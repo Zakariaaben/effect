@@ -11,6 +11,7 @@
  */
 import type * as Cause from "../../Cause.ts"
 import * as Context from "../../Context.ts"
+import * as DateTime from "../../DateTime.ts"
 import * as Effect from "../../Effect.ts"
 import * as Exit from "../../Exit.ts"
 import * as Fiber from "../../Fiber.ts"
@@ -195,6 +196,67 @@ export class WorkflowEngine extends Context.Service<
     >
 
     /**
+     * Poll a DurableDeferred using an explicit workflow address.
+     */
+    readonly deferredPoll: <
+      Success extends Schema.Constraint,
+      Error extends Schema.Constraint
+    >(
+      deferred: DurableDeferred.DurableDeferred<Success, Error>,
+      options: {
+        readonly workflowName: string
+        readonly executionId: string
+        readonly deferredName: string
+      }
+    ) => Effect.Effect<
+      Option.Option<Exit.Exit<Success["Type"], Error["Type"]>>,
+      never,
+      Success["DecodingServices"] | Error["DecodingServices"]
+    >
+
+    /**
+     * Resolve a DurableDeferred using an explicit workflow address, returning
+     * the canonical first result.
+     */
+    readonly deferredResolve: <
+      Success extends Schema.Constraint,
+      Error extends Schema.Constraint
+    >(
+      deferred: DurableDeferred.DurableDeferred<Success, Error>,
+      options: {
+        readonly workflowName: string
+        readonly executionId: string
+        readonly deferredName: string
+        readonly exit: Exit.Exit<Success["Type"], Error["Type"]>
+      }
+    ) => Effect.Effect<
+      Exit.Exit<Success["Type"], Error["Type"]>,
+      never,
+      | Success["DecodingServices"]
+      | Success["EncodingServices"]
+      | Error["DecodingServices"]
+      | Error["EncodingServices"]
+    >
+
+    /**
+     * Schedule a successful DurableDeferred resolution at an absolute time.
+     */
+    readonly scheduleDeferred: <
+      Success extends Schema.Constraint,
+      Error extends Schema.Constraint
+    >(
+      deferred: DurableDeferred.DurableDeferred<Success, Error>,
+      options: {
+        readonly workflowName: string
+        readonly executionId: string
+        readonly deferredName: string
+        readonly scheduleId: string
+        readonly wakeUp: DateTime.Utc
+        readonly value: Success["Type"]
+      }
+    ) => Effect.Effect<void, never, Success["EncodingServices"]>
+
+    /**
      * Schedule a wake up for a DurableClock
      */
     readonly scheduleClock: (
@@ -349,6 +411,34 @@ export interface Encoded {
     readonly deferredName: string
     readonly exit: Exit.Exit<unknown, unknown>
   }) => Effect.Effect<void>
+  readonly deferredPoll: (
+    deferred: DurableDeferred.Any,
+    options: {
+      readonly workflowName: string
+      readonly executionId: string
+      readonly deferredName: string
+    }
+  ) => Effect.Effect<Option.Option<Exit.Exit<unknown, unknown>>>
+  readonly deferredResolve: (
+    deferred: DurableDeferred.Any,
+    options: {
+      readonly workflowName: string
+      readonly executionId: string
+      readonly deferredName: string
+      readonly exit: Exit.Exit<unknown, unknown>
+    }
+  ) => Effect.Effect<Exit.Exit<unknown, unknown>>
+  readonly scheduleDeferred: (
+    deferred: DurableDeferred.Any,
+    options: {
+      readonly workflowName: string
+      readonly executionId: string
+      readonly deferredName: string
+      readonly scheduleId: string
+      readonly wakeUp: DateTime.Utc
+      readonly value: unknown
+    }
+  ) => Effect.Effect<void>
   readonly scheduleClock: (
     workflow: Workflow.Any,
     options: {
@@ -535,6 +625,102 @@ export const makeUnsafe = (options: Encoded): WorkflowEngine["Service"] =>
         { captureStackTrace: false }
       )
     ),
+    deferredPoll: Effect.fnUntraced(
+      function*<Success extends Schema.Constraint, Error extends Schema.Constraint>(
+        deferred: DurableDeferred.DurableDeferred<Success, Error>,
+        opts: {
+          readonly workflowName: string
+          readonly executionId: string
+          readonly deferredName: string
+        }
+      ) {
+        const exit = yield* options.deferredPoll(deferred, opts)
+        if (Option.isNone(exit)) {
+          return Option.none()
+        }
+        return Option.some(
+          yield* Effect.orDie(
+            Schema.decodeEffect(deferred.exitSchema)(toJsonExit(exit.value))
+          ) as Effect.Effect<Exit.Exit<Success["Type"], Error["Type"]>>
+        )
+      },
+      Effect.withSpan(
+        "WorkflowEngine.deferredPoll",
+        (_, { deferredName, executionId }) => ({
+          attributes: { name: deferredName, executionId }
+        }),
+        { captureStackTrace: false }
+      )
+    ),
+    deferredResolve: Effect.fnUntraced(
+      function*<Success extends Schema.Constraint, Error extends Schema.Constraint>(
+        deferred: DurableDeferred.DurableDeferred<Success, Error>,
+        opts: {
+          readonly workflowName: string
+          readonly executionId: string
+          readonly deferredName: string
+          readonly exit: Exit.Exit<Success["Type"], Error["Type"]>
+        }
+      ) {
+        const encodedExit = (yield* Effect.orDie(
+          Schema.encodeEffect(deferred.exitSchema)(opts.exit)
+        )) as Exit.Exit<unknown, unknown>
+        const canonical = yield* options.deferredResolve(deferred, {
+          workflowName: opts.workflowName,
+          executionId: opts.executionId,
+          deferredName: opts.deferredName,
+          exit: encodedExit
+        })
+        return yield* Effect.orDie(
+          Schema.decodeEffect(deferred.exitSchema)(toJsonExit(canonical))
+        ) as Effect.Effect<Exit.Exit<Success["Type"], Error["Type"]>>
+      },
+      Effect.withSpan(
+        "WorkflowEngine.deferredResolve",
+        (_, { deferredName, executionId }) => ({
+          attributes: { name: deferredName, executionId }
+        }),
+        { captureStackTrace: false }
+      )
+    ),
+    scheduleDeferred: Effect.fnUntraced(
+      function*<Success extends Schema.Constraint, Error extends Schema.Constraint>(
+        deferred: DurableDeferred.DurableDeferred<Success, Error>,
+        opts: {
+          readonly workflowName: string
+          readonly executionId: string
+          readonly deferredName: string
+          readonly scheduleId: string
+          readonly wakeUp: DateTime.Utc
+          readonly value: Success["Type"]
+        }
+      ) {
+        const value = yield* Effect.orDie(
+          Schema.encodeEffect(
+            Schema.toCodecJson(deferred.successSchema)
+          )(opts.value)
+        )
+        return yield* options.scheduleDeferred(deferred, {
+          workflowName: opts.workflowName,
+          executionId: opts.executionId,
+          deferredName: opts.deferredName,
+          scheduleId: opts.scheduleId,
+          wakeUp: opts.wakeUp,
+          value
+        })
+      },
+      Effect.withSpan(
+        "WorkflowEngine.scheduleDeferred",
+        (_, { deferredName, executionId, scheduleId }) => ({
+          attributes: {
+            name: deferredName,
+            executionId,
+            scheduleId
+          }
+        }),
+        { captureStackTrace: false }
+      )
+    ),
     scheduleClock: (workflow, opts) =>
       options.scheduleClock(workflow, opts).pipe(
         Effect.withSpan(
@@ -642,6 +828,33 @@ export const layerMemory: Layer.Layer<WorkflowEngine> = Layer.effect(WorkflowEng
 
     const clocks = yield* FiberMap.make<string>()
 
+    const deferredKey = (options: {
+      readonly workflowName: string
+      readonly executionId: string
+      readonly deferredName: string
+    }) =>
+      JSON.stringify([
+        options.workflowName,
+        options.executionId,
+        options.deferredName
+      ])
+
+    const resolveDeferred = (options: {
+      readonly workflowName: string
+      readonly executionId: string
+      readonly deferredName: string
+      readonly exit: Exit.Exit<unknown, unknown>
+    }): Effect.Effect<Exit.Exit<unknown, unknown>> =>
+      Effect.suspend(() => {
+        const id = deferredKey(options)
+        const existing = deferredResults.get(id)
+        if (existing !== undefined) {
+          return Effect.succeed(existing)
+        }
+        deferredResults.set(id, options.exit)
+        return Effect.as(resume(options.executionId), options.exit)
+      })
+
     const engine = makeUnsafe({
       register: Effect.fnUntraced(function*(workflow, execute) {
         workflows.set(workflow._tag, {
@@ -730,16 +943,38 @@ export const layerMemory: Layer.Layer<WorkflowEngine> = Layer.effect(WorkflowEng
         }),
       deferredResult: Effect.fnUntraced(function*(deferred) {
         const instance = yield* WorkflowInstance
-        const id = `${instance.executionId}/${deferred.name}`
-        return Option.fromNullishOr(deferredResults.get(id))
+        return Option.fromNullishOr(deferredResults.get(deferredKey({
+          workflowName: instance.workflow._tag,
+          executionId: instance.executionId,
+          deferredName: deferred.name
+        })))
       }),
-      deferredDone: (options) =>
-        Effect.suspend(() => {
-          const id = `${options.executionId}/${options.deferredName}`
-          if (deferredResults.has(id)) return Effect.void
-          deferredResults.set(id, options.exit)
-          return resume(options.executionId)
-        }),
+      deferredDone: (options) => Effect.asVoid(resolveDeferred(options)),
+      deferredPoll: (_deferred, options) =>
+        Effect.sync(() => Option.fromNullishOr(deferredResults.get(deferredKey(options)))),
+      deferredResolve: (_deferred, options) => resolveDeferred(options),
+      scheduleDeferred: (_deferred, options) =>
+        Effect.gen(function*() {
+          const now = yield* DateTime.now
+          yield* Effect.sleep(DateTime.distance(now, options.wakeUp))
+          yield* resolveDeferred({
+            workflowName: options.workflowName,
+            executionId: options.executionId,
+            deferredName: options.deferredName,
+            exit: Exit.succeed(options.value)
+          })
+        }).pipe(
+          FiberMap.run(
+            clocks,
+            JSON.stringify([
+              options.workflowName,
+              options.executionId,
+              options.scheduleId
+            ]),
+            { onlyIfMissing: true }
+          ),
+          Effect.asVoid
+        ),
       scheduleClock: (workflow, options) =>
         engine.deferredDone(options.clock.deferred, {
           workflowName: workflow._tag,
@@ -748,7 +983,15 @@ export const layerMemory: Layer.Layer<WorkflowEngine> = Layer.effect(WorkflowEng
           exit: Exit.void
         }).pipe(
           Effect.delay(options.clock.duration),
-          FiberMap.run(clocks, `${options.executionId}/${options.clock.name}`, { onlyIfMissing: true }),
+          FiberMap.run(
+            clocks,
+            JSON.stringify([
+              workflow._tag,
+              options.executionId,
+              options.clock.name
+            ]),
+            { onlyIfMissing: true }
+          ),
           Effect.asVoid
         )
     })

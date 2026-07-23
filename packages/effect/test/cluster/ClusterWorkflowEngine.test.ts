@@ -292,6 +292,135 @@ describe.concurrent("ClusterWorkflowEngine", () => {
       assert.strictEqual(envelope.address.shardId.group, "workflow")
     }).pipe(Effect.scoped, Effect.provide(TestWorkflowEngine)))
 
+  it.effect("returns the canonical deferred resolution and polls it outside a workflow", () =>
+    Effect.gen(function*() {
+      const driver = yield* MessageStorage.MemoryDriver
+      const engine = yield* WorkflowEngine
+
+      const primedExecutionId = yield* ShardedDeferredWorkflow.executionId({ id: "external-prime" })
+      const primedToken = DurableDeferred.tokenFromExecutionId(ExternalDeferred, {
+        workflow: ShardedDeferredWorkflow,
+        executionId: primedExecutionId
+      })
+      const primingFiber = yield* DurableDeferred.done(ExternalDeferred, {
+        token: primedToken,
+        exit: Exit.succeed("primed")
+      }).pipe(Effect.forkChild({ startImmediately: true }))
+      yield* Effect.yieldNow
+      yield* Fiber.interrupt(primingFiber)
+
+      yield* engine.register(ShardedDeferredWorkflow, () => Effect.void)
+
+      const initializedExecutionId = yield* ShardedDeferredWorkflow.executionId({ id: "external-initialize" })
+      const initializedToken = DurableDeferred.tokenFromExecutionId(ExternalDeferred, {
+        workflow: ShardedDeferredWorkflow,
+        executionId: initializedExecutionId
+      })
+      expect(
+        yield* DurableDeferred.resolve(ExternalDeferred, {
+          token: initializedToken,
+          exit: Exit.fail("failure-as-value")
+        })
+      ).toEqual(Exit.fail("failure-as-value"))
+
+      const executionId = yield* ShardedDeferredWorkflow.executionId({ id: "external-canonical" })
+      const token = DurableDeferred.tokenFromExecutionId(ExternalDeferred, {
+        workflow: ShardedDeferredWorkflow,
+        executionId
+      })
+      const journalLength = driver.journal.length
+      const [left, right] = yield* Effect.all([
+        DurableDeferred.resolve(ExternalDeferred, {
+          token,
+          exit: Exit.succeed("left")
+        }),
+        DurableDeferred.resolve(ExternalDeferred, {
+          token,
+          exit: Exit.fail("right")
+        })
+      ], { concurrency: "unbounded" })
+
+      expect(left).toEqual(right)
+      expect(yield* DurableDeferred.poll(ExternalDeferred, { token })).toEqual(Option.some(left))
+
+      const envelopes = driver.journal.slice(journalLength).filter((envelope) =>
+        envelope._tag === "Request" &&
+        envelope.address.entityType === "Workflow/ShardedDeferredWorkflow" &&
+        envelope.address.entityId === executionId &&
+        envelope.tag === "deferred"
+      )
+      assert(envelopes.length > 0)
+      assert(envelopes.every((envelope) => envelope.address.shardId.group === "workflow"))
+    }).pipe(Effect.scoped, Effect.provide(TestWorkflowEngine)))
+
+  it.effect("schedules an external deferred once and retains the first deadline and value", () =>
+    Effect.gen(function*() {
+      const driver = yield* MessageStorage.MemoryDriver
+      const sharding = yield* Sharding.Sharding
+      const engine = yield* WorkflowEngine
+      yield* engine.register(ShardedDeferredWorkflow, () => Effect.void)
+
+      const executionId = yield* ShardedDeferredWorkflow.executionId({ id: "external-schedule" })
+      const token = DurableDeferred.tokenFromExecutionId(ExternalDeferred, {
+        workflow: ShardedDeferredWorkflow,
+        executionId
+      })
+      const now = yield* DateTime.now
+      const journalLength = driver.journal.length
+
+      yield* DurableClock.schedule(ExternalDeferred, {
+        token,
+        scheduleId: "external-deadline",
+        wakeUp: DateTime.addDuration(now, "10 seconds"),
+        value: "first"
+      })
+      yield* DurableClock.schedule(ExternalDeferred, {
+        token,
+        scheduleId: "external-deadline",
+        wakeUp: DateTime.addDuration(now, "1 second"),
+        value: "second"
+      })
+
+      const clockEnvelopes = driver.journal.slice(journalLength).filter((envelope) =>
+        envelope._tag === "Request" &&
+        envelope.address.entityType === "Workflow/-/DurableClock" &&
+        envelope.address.entityId === executionId &&
+        envelope.tag === "scheduleDeferred"
+      )
+      assert(clockEnvelopes.length > 0)
+      assert(clockEnvelopes.every((envelope) => envelope.address.shardId.group === "workflow"))
+
+      yield* TestClock.adjust("2 seconds")
+      yield* sharding.pollStorage
+      yield* Effect.yieldNow
+      expect(yield* DurableDeferred.poll(ExternalDeferred, { token })).toEqual(Option.none())
+
+      yield* TestClock.adjust("8 seconds")
+      yield* sharding.pollStorage
+      yield* Effect.yieldNow
+      yield* sharding.pollStorage
+      yield* Effect.yieldNow
+
+      expect(yield* DurableDeferred.poll(ExternalDeferred, { token })).toEqual(
+        Option.some(Exit.succeed("first"))
+      )
+      expect(
+        yield* DurableDeferred.resolve(ExternalDeferred, {
+          token,
+          exit: Exit.succeed("late")
+        })
+      ).toEqual(Exit.succeed("first"))
+
+      const deferredEnvelope = driver.journal.slice(journalLength).find((envelope) =>
+        envelope._tag === "Request" &&
+        envelope.address.entityType === "Workflow/ShardedDeferredWorkflow" &&
+        envelope.address.entityId === executionId &&
+        envelope.tag === "deferred"
+      )
+      assert(deferredEnvelope)
+      assert.strictEqual(deferredEnvelope.address.shardId.group, "workflow")
+    }).pipe(Effect.scoped, Effect.provide(TestWorkflowEngine)))
+
   it.effect("routes activities to the workflow shard group after a partial client is cached", () =>
     Effect.gen(function*() {
       const driver = yield* MessageStorage.MemoryDriver
@@ -646,6 +775,11 @@ const ShardedClockWorkflowLayer = ShardedClockWorkflow.toLayer(Effect.fnUntraced
 }))
 
 const ShardedDeferred = DurableDeferred.make("ShardedDeferred")
+
+const ExternalDeferred = DurableDeferred.make("ExternalDeferred", {
+  success: Schema.String,
+  error: Schema.String
+})
 
 const ShardedDeferredWorkflow = Workflow.make("ShardedDeferredWorkflow", {
   payload: {

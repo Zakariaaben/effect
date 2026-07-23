@@ -117,6 +117,16 @@ Today the package provides:
   collision-free tenant/run idempotency, handler registration, and lifecycle
   delegation to an injected `WorkflowEngine` without implementing its backend
   SPI;
+- forked native Effect Workflow deferred-handshake primitives:
+  token-addressed polling, canonical first-wins resolution that preserves a
+  typed failure as data, and idempotent absolute scheduled resolution. Memory
+  and persisted cluster implementations share the contract, including
+  result-before-deadline, deadline-before-result, and duplicate-schedule races.
+  These are backend coordination primitives, not Builder authorization,
+  semantic worker leases, heartbeats, or completion admission. A cluster
+  client using a custom shard group must have the workflow definition
+  registered so its annotation can be recovered from the otherwise opaque
+  deferred token;
 - a bounded protocol-v3 native-operation naming profile that maps exact dynamic
   occurrence, operation, and timer/deferred generation coordinates to
   replay-stable names, while semantic activity attempts use Effect's native
@@ -179,8 +189,9 @@ Today the package provides:
   already dispatched. `executeDetailed` exposes that same closed durable
   outcome without decoding or rerunning the handler, allowing trusted adapters
   to retain attempt and activity coordinates. Schedule-to-start and
-  start-to-close remain rejected until a persistent worker start/lease
-  acknowledgement exists;
+  start-to-close remain rejected until the Builder adapter binds the new native
+  first-wins handshake to an authenticated persistent worker start/lease
+  acknowledgement and its heartbeat/fencing rules;
   `maximumElapsed` remains an admission budget and does not interrupt an
   attempt already running;
 - protocol-v3 child-workflow collision-free identities, exact

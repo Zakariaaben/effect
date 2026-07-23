@@ -108,6 +108,18 @@ machinery. An application supplies a `WorkflowEngine` layer: the native memory
 layer is suitable for tests, while `ClusterWorkflowEngine` can supply production
 distribution and persistence without becoming a dependency of this package.
 
+The fork extends that native boundary with explicit token-addressed deferred
+polling, canonical first-wins resolution, and idempotent absolute scheduled
+resolution. A failure `Exit` is wrapped as the successful RPC payload so it
+remains domain data rather than being interpreted as an RPC failure. Those
+primitives provide the durable race needed by worker-start and terminal-result
+handshakes without adding a Builder-owned persistence backend. They do not by
+themselves authenticate a token, grant a semantic lease, define heartbeat
+expiry, or admit a worker result. Custom cluster shard-group routing also
+requires the workflow definition to be registered in the engine that resolves
+the token, because the token intentionally carries only workflow, execution,
+and deferred identity.
+
 The boundary is deliberately above the native replay engine:
 
 | Owner                            | Responsibilities                                                                                                                                                                                                                                                                                          |

@@ -9,8 +9,10 @@
  * @since 4.0.0
  */
 import * as Context from "../../Context.ts"
+import type * as DateTime from "../../DateTime.ts"
 import * as Duration from "../../Duration.ts"
 import * as Effect from "../../Effect.ts"
+import { dual } from "../../Function.ts"
 import type * as Schema from "../../Schema.ts"
 import * as Activity from "./Activity.ts"
 import * as DurableDeferred from "./DurableDeferred.ts"
@@ -58,6 +60,63 @@ const InstanceTag = Context.Service<
   WorkflowInstance["Service"]
 >(
   "effect/workflow/WorkflowEngine/WorkflowInstance" satisfies typeof WorkflowInstance.key
+)
+
+/**
+ * Schedules an absolute durable deadline that completes the deferred
+ * identified by a token with a successful value.
+ *
+ * **Details**
+ *
+ * Scheduling is idempotent by `scheduleId`: scheduling the same identifier
+ * again cannot move the original deadline or replace its value.
+ *
+ * @category scheduling
+ * @since 4.0.0
+ */
+export const schedule: {
+  <Success extends Schema.Constraint, Error extends Schema.Constraint>(options: {
+    readonly token: DurableDeferred.Token
+    readonly scheduleId: string
+    readonly wakeUp: DateTime.Utc
+    readonly value: Success["Type"]
+  }): (
+    self: DurableDeferred.DurableDeferred<Success, Error>
+  ) => Effect.Effect<void, never, WorkflowEngine | Success["EncodingServices"]>
+  <Success extends Schema.Constraint, Error extends Schema.Constraint>(
+    self: DurableDeferred.DurableDeferred<Success, Error>,
+    options: {
+      readonly token: DurableDeferred.Token
+      readonly scheduleId: string
+      readonly wakeUp: DateTime.Utc
+      readonly value: Success["Type"]
+    }
+  ): Effect.Effect<void, never, WorkflowEngine | Success["EncodingServices"]>
+} = dual(
+  2,
+  Effect.fnUntraced(function*<
+    Success extends Schema.Constraint,
+    Error extends Schema.Constraint
+  >(
+    self: DurableDeferred.DurableDeferred<Success, Error>,
+    options: {
+      readonly token: DurableDeferred.Token
+      readonly scheduleId: string
+      readonly wakeUp: DateTime.Utc
+      readonly value: Success["Type"]
+    }
+  ) {
+    const engine = yield* EngineTag
+    const token = DurableDeferred.TokenParsed.fromString(options.token)
+    yield* engine.scheduleDeferred(self, {
+      workflowName: token.workflowName,
+      executionId: token.executionId,
+      deferredName: token.deferredName,
+      scheduleId: options.scheduleId,
+      wakeUp: options.wakeUp,
+      value: options.value
+    })
+  })
 )
 
 /**

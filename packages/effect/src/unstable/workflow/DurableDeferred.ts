@@ -495,6 +495,118 @@ export const tokenFromPayload: {
 )
 
 /**
+ * Polls the durable deferred identified by a token without requiring a
+ * `WorkflowInstance`.
+ *
+ * @category combinators
+ * @since 4.0.0
+ */
+export const poll: {
+  (options: {
+    readonly token: Token
+  }): <Success extends Schema.Constraint, Error extends Schema.Constraint>(
+    self: DurableDeferred<Success, Error>
+  ) => Effect.Effect<
+    Option.Option<Exit.Exit<Success["Type"], Error["Type"]>>,
+    never,
+    | WorkflowEngine
+    | Success["DecodingServices"]
+    | Error["DecodingServices"]
+  >
+  <Success extends Schema.Constraint, Error extends Schema.Constraint>(
+    self: DurableDeferred<Success, Error>,
+    options: {
+      readonly token: Token
+    }
+  ): Effect.Effect<
+    Option.Option<Exit.Exit<Success["Type"], Error["Type"]>>,
+    never,
+    | WorkflowEngine
+    | Success["DecodingServices"]
+    | Error["DecodingServices"]
+  >
+} = dual(
+  2,
+  Effect.fnUntraced(function*<
+    Success extends Schema.Constraint,
+    Error extends Schema.Constraint
+  >(
+    self: DurableDeferred<Success, Error>,
+    options: {
+      readonly token: Token
+    }
+  ) {
+    const engine = yield* EngineTag
+    const token = TokenParsed.fromString(options.token)
+    return yield* engine.deferredPoll(self, {
+      workflowName: token.workflowName,
+      executionId: token.executionId,
+      deferredName: token.deferredName
+    })
+  })
+)
+
+/**
+ * Resolves the durable deferred identified by a token and returns the
+ * canonical first result.
+ *
+ * @category combinators
+ * @since 4.0.0
+ */
+export const resolve: {
+  <Success extends Schema.Constraint, Error extends Schema.Constraint>(options: {
+    readonly token: Token
+    readonly exit: Exit.Exit<Success["Type"], Error["Type"]>
+  }): (
+    self: DurableDeferred<Success, Error>
+  ) => Effect.Effect<
+    Exit.Exit<Success["Type"], Error["Type"]>,
+    never,
+    | WorkflowEngine
+    | Success["DecodingServices"]
+    | Success["EncodingServices"]
+    | Error["DecodingServices"]
+    | Error["EncodingServices"]
+  >
+  <Success extends Schema.Constraint, Error extends Schema.Constraint>(
+    self: DurableDeferred<Success, Error>,
+    options: {
+      readonly token: Token
+      readonly exit: Exit.Exit<Success["Type"], Error["Type"]>
+    }
+  ): Effect.Effect<
+    Exit.Exit<Success["Type"], Error["Type"]>,
+    never,
+    | WorkflowEngine
+    | Success["DecodingServices"]
+    | Success["EncodingServices"]
+    | Error["DecodingServices"]
+    | Error["EncodingServices"]
+  >
+} = dual(
+  2,
+  Effect.fnUntraced(function*<
+    Success extends Schema.Constraint,
+    Error extends Schema.Constraint
+  >(
+    self: DurableDeferred<Success, Error>,
+    options: {
+      readonly token: Token
+      readonly exit: Exit.Exit<Success["Type"], Error["Type"]>
+    }
+  ) {
+    const engine = yield* EngineTag
+    const token = TokenParsed.fromString(options.token)
+    return yield* engine.deferredResolve(self, {
+      workflowName: token.workflowName,
+      executionId: token.executionId,
+      deferredName: token.deferredName,
+      exit: options.exit
+    })
+  })
+)
+
+/**
  * Completes the durable deferred identified by a token with the supplied exit,
  * encoding the result through the deferred schemas.
  *
