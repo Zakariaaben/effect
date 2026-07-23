@@ -51,7 +51,7 @@ export const ExecutionProtocolVersion = 3 as const
  * @category constants
  * @since 4.0.0
  */
-export const OperationVersion = 1 as const
+export const OperationVersion = 2 as const
 
 /**
  * Maximum number of participants admitted by one semantic race.
@@ -294,9 +294,10 @@ export const NodeOutputAggregateContract = Schema.TaggedStruct(
  * @since 4.0.0
  */
 export const NodeAttemptSucceeded = Schema.TaggedStruct("Succeeded", {
-  outcomeVersion: Schema.Literal(1),
+  outcomeVersion: Schema.Literal(2),
   attempt: Wire.PositiveSafeInt,
   activityDigest: Wire.OperationDigest,
+  completedAt: Wire.Timestamp,
   output: Wire.InlineEncodedPayload
 }).annotate({
   identifier: "WorkflowSemanticOperationV3NodeAttemptSucceeded",
@@ -316,9 +317,10 @@ export type NodeAttemptSucceeded = Schema.Schema.Type<
 const NodeAttemptApplicationFailedStruct = Schema.TaggedStruct(
   "ApplicationFailed",
   {
-    outcomeVersion: Schema.Literal(1),
+    outcomeVersion: Schema.Literal(2),
     attempt: Wire.PositiveSafeInt,
     activityDigest: Wire.OperationDigest,
+    completedAt: Wire.Timestamp,
     failure: ActivityPolicyV3.ApplicationFailure
   }
 )
@@ -371,20 +373,79 @@ export type NodeAttemptApplicationFailed = Schema.Schema.Type<
   typeof NodeAttemptApplicationFailed
 >
 
+const NodeAttemptTimedOutStruct = Schema.TaggedStruct("TimedOut", {
+  outcomeVersion: Schema.Literal(2),
+  attempt: Wire.PositiveSafeInt,
+  activityDigest: Wire.OperationDigest,
+  timeout: ActivityPolicyV3.AttemptTimeout,
+  timerOperationDigest: Wire.OperationDigest,
+  deadline: Wire.Timestamp,
+  durationMillis: Wire.PositiveSemanticDelayMillis
+})
+
+/**
+ * A managed node attempt whose schedule-to-start or start-to-close deadline
+ * won before the attempt produced an application outcome.
+ *
+ * **Details**
+ *
+ * The outer attempt coordinates deliberately duplicate the nested retry
+ * cause so the persisted outcome is independently inspectable while the
+ * nested value can be passed to the exact retry classifier without
+ * reconstruction. The timer digest, absolute deadline, and exact configured
+ * duration retain the timeout's semantic provenance.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const NodeAttemptTimedOut = NodeAttemptTimedOutStruct.check(
+  Schema.makeFilter((value) => {
+    const issues: Array<Schema.FilterIssue> = []
+    if (value.attempt !== value.timeout.attempt) {
+      issues.push({
+        path: ["timeout", "attempt"],
+        issue: "timeout attempt must equal the outer node-attempt outcome attempt"
+      })
+    }
+    if (value.activityDigest !== value.timeout.activityDigest) {
+      issues.push({
+        path: ["timeout", "activityDigest"],
+        issue: "timeout activityDigest must equal the outer node-attempt outcome digest"
+      })
+    }
+    return issues
+  })
+).annotate({
+  identifier: "WorkflowSemanticOperationV3NodeAttemptTimedOut",
+  parseOptions: strictParseOptions
+})
+
+/**
+ * The decoded type of {@link NodeAttemptTimedOut}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type NodeAttemptTimedOut = Schema.Schema.Type<
+  typeof NodeAttemptTimedOut
+>
+
 /**
  * Complete persisted success contract of one managed native node attempt.
  *
  * **Details**
  *
- * Native activity error is `Never`. Business failures are values in this
- * union; protocol, codec, and handler-boundary violations remain defects.
+ * Native activity error is `Never`. Business failures and retry-classifiable
+ * attempt timeouts are values in this union; protocol, codec, and
+ * handler-boundary violations remain defects.
  *
  * @category schemas
  * @since 4.0.0
  */
 export const NodeAttemptOutcome = Schema.Union([
   NodeAttemptSucceeded,
-  NodeAttemptApplicationFailed
+  NodeAttemptApplicationFailed,
+  NodeAttemptTimedOut
 ]).annotate({
   identifier: "WorkflowSemanticOperationV3NodeAttemptOutcome",
   parseOptions: strictParseOptions
@@ -401,13 +462,14 @@ export type NodeAttemptOutcome = Schema.Schema.Type<
 >
 
 /**
- * Closed names in built-in result-schema vocabulary version `1`.
+ * Closed names in built-in result-schema vocabulary version `2`.
  *
  * **Details**
  *
- * These names refer respectively to Effect's impossible error channel, the
- * closed retry-classifier decision, an admitted replay-recorded retry delay,
- * and {@link Wire.Timestamp}.
+ * These names refer respectively to Effect's impossible error channel, a
+ * no-value success, the closed managed-attempt outcome, the retry-classifier
+ * decision, an admitted replay-recorded retry delay, and
+ * {@link Wire.Timestamp}.
  *
  * @category schemas
  * @since 4.0.0
@@ -441,7 +503,7 @@ export type BuiltInSchemaName = Schema.Schema.Type<
  */
 export const BuiltInContract = Schema.TaggedStruct("BuiltIn", {
   contractReferenceVersion: Schema.Literal(1),
-  vocabularyVersion: Schema.Literal(1),
+  vocabularyVersion: Schema.Literal(2),
   schema: BuiltInSchemaName
 }).annotate({
   identifier: "WorkflowSemanticOperationV3BuiltInContract",
@@ -482,7 +544,7 @@ const isBuiltInContract = (
   schema: BuiltInSchemaName
 ): boolean =>
   contract._tag === "BuiltIn" &&
-  contract.vocabularyVersion === 1 &&
+  contract.vocabularyVersion === 2 &&
   contract.schema === schema
 
 const activityContractIssues = (
@@ -657,6 +719,19 @@ export const StartToCloseOwner = Schema.TaggedStruct("StartToClose", {
 })
 
 /**
+ * A schedule-to-start deadline owned by one semantic activity attempt.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const ScheduleToStartOwner = Schema.TaggedStruct("ScheduleToStart", {
+  activityDigest: Wire.OperationDigest
+}).annotate({
+  identifier: "WorkflowSemanticOperationV3ScheduleToStartOwner",
+  parseOptions: strictParseOptions
+})
+
+/**
  * A schedule-to-close deadline owned by one semantic activity occurrence.
  *
  * @category schemas
@@ -714,6 +789,7 @@ export const BpmnTimerOwner = Schema.TaggedStruct("BpmnTimer", {
  */
 export const TimerOwner = Schema.Union([
   RetryBackoffOwner,
+  ScheduleToStartOwner,
   StartToCloseOwner,
   ScheduleToCloseOwner,
   DeferredTimeoutOwner,
@@ -1036,18 +1112,6 @@ const retryScheduleToCloseIssues = (
   spec: Schema.Schema.Type<typeof RetryScheduleToCloseSpecStruct>
 ): ReadonlyArray<Schema.FilterIssue> => {
   const issues: Array<Schema.FilterIssue> = []
-  if (spec.activityPolicy.timeouts.scheduleToStart._tag !== "Disabled") {
-    issues.push({
-      path: ["activityPolicy", "timeouts", "scheduleToStart"],
-      issue: "Retry schedule-to-close controllers require scheduleToStart to be disabled"
-    })
-  }
-  if (spec.activityPolicy.timeouts.startToClose._tag !== "Disabled") {
-    issues.push({
-      path: ["activityPolicy", "timeouts", "startToClose"],
-      issue: "Retry schedule-to-close controllers require startToClose to be disabled"
-    })
-  }
   const scheduleToClose = spec.activityPolicy.timeouts.scheduleToClose
   if (scheduleToClose._tag !== "After") {
     issues.push({
@@ -1068,7 +1132,7 @@ const RetryScheduleToCloseSpecStruct = Schema.TaggedStruct(
   {
     ...CommonSpec,
     generation: Wire.NonNegativeSafeInt,
-    controllerVersion: Schema.Literal(1),
+    controllerVersion: Schema.Literal(2),
     firstActivityDigest: Wire.OperationDigest,
     initialObservationDigest: Wire.OperationDigest,
     nodeDefinitionKey: Wire.Identifier,
@@ -1090,7 +1154,8 @@ const RetryScheduleToCloseSpecStruct = Schema.TaggedStruct(
  *
  * The nested occurrence pins the artifact and dynamic node coordinates. The
  * descriptor repeats the exact handler, inline input, complete activity
- * policy, first managed-attempt digest, timeout kind, duration, outcome
+ * policy (including independent schedule-to-start and start-to-close
+ * dimensions), first managed-attempt digest, timeout kind, duration, outcome
  * contract, and honest waiter-interruption disposition so its native name can
  * never silently acquire different retry or timeout meaning.
  *
@@ -1116,7 +1181,7 @@ export type RetryScheduleToCloseSpec = Schema.Schema.Type<
 
 /**
  * Closed semantic operation specification vocabulary currently admitted by
- * version `1`.
+ * version `2`.
  *
  * @category schemas
  * @since 4.0.0
@@ -1232,7 +1297,7 @@ export const RetryScheduleToCloseDocument = Schema.TaggedStruct(
   {
     ...CommonDocument,
     generation: Wire.NonNegativeSafeInt,
-    controllerVersion: Schema.Literal(1),
+    controllerVersion: Schema.Literal(2),
     firstActivityDigest: Wire.OperationDigest,
     initialObservationDigest: Wire.OperationDigest,
     nodeDefinitionKey: Wire.Identifier,
@@ -1519,7 +1584,7 @@ const builtInContract = (
 ): ResultContract => ({
   _tag: "BuiltIn",
   contractReferenceVersion: 1,
-  vocabularyVersion: 1,
+  vocabularyVersion: 2,
   schema
 })
 

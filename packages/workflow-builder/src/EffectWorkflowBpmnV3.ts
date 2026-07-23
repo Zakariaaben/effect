@@ -11,8 +11,8 @@
  *
  * The command is intentionally not applied here. A durable coordinator must
  * serialize or compare-and-swap the later {@link BpmnKernel.resolveTask}
- * transition. Schedule-to-close timeout, defects, interruption, and adapter
- * failures never become BPMN Error outcomes.
+ * transition. Attempt timeout, schedule-to-close timeout, defects,
+ * interruption, and adapter failures never become BPMN Error outcomes.
  *
  * @since 4.0.0
  */
@@ -23,7 +23,7 @@ import * as Schema from "effect/Schema"
 import * as BpmnActivityV3 from "./BpmnActivityV3.ts"
 import * as BpmnKernel from "./BpmnKernel.ts"
 import * as EffectWorkflowRetryV3 from "./EffectWorkflowRetryV3.ts"
-import * as EffectWorkflowSemanticV3 from "./EffectWorkflowSemanticV3.ts"
+import type * as EffectWorkflowSemanticV3 from "./EffectWorkflowSemanticV3.ts"
 import * as Json from "./internal/json.ts"
 
 const strictParseOptions = {
@@ -69,9 +69,9 @@ export type TaskResolutionTarget = Schema.Schema.Type<
  *
  * **Details**
  *
- * Schedule-to-close timeout is deliberately excluded. A future Boundary
- * Timer integration needs a distinct BPMN timer subscription and must not
- * masquerade as an Error event.
+ * Attempt and schedule-to-close timeouts are deliberately excluded. A future
+ * Boundary Timer integration needs a distinct BPMN timer subscription and
+ * must not masquerade as an Error event.
  *
  * @category schemas
  * @since 4.0.0
@@ -341,8 +341,8 @@ const resolutionReceipt = (
  * {@link BpmnKernel.resolveTask} in the caller's durable state transaction.
  *
  * The native retry loop runs exactly once. Business terminal failures are
- * preserved as values long enough to become `BusinessFailed`; a
- * schedule-to-close timeout remains a typed operational failure. Defects and
+ * preserved as values long enough to become `BusinessFailed`; attempt and
+ * schedule-to-close timeouts remain typed operational failures. Defects and
  * interruption retain their native cause.
  *
  * @category execution
@@ -356,6 +356,7 @@ export const executeTask = (
 ): Effect.Effect<
   ExecutedTaskResolution,
   | EffectWorkflowBpmnError
+  | EffectWorkflowRetryV3.AttemptTimedOut
   | EffectWorkflowRetryV3.ScheduleToCloseTimedOut
   | EffectWorkflowRetryV3.EffectWorkflowRetryError
   | EffectWorkflowSemanticV3.EffectWorkflowSemanticError,
@@ -388,7 +389,10 @@ export const executeTask = (
       invocation,
       options
     )
-    if (outcome._tag === "ScheduleToCloseTimedOut") {
+    if (
+      outcome._tag === "AttemptTimedOut" ||
+      outcome._tag === "ScheduleToCloseTimedOut"
+    ) {
       return yield* Effect.fail(outcome)
     }
     return yield* Effect.fromResult(

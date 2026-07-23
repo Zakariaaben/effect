@@ -451,7 +451,12 @@ export const make = Effect.gen(function*() {
 
               activity(request: Entity.Request<any>) {
                 const payload = request.payload as { name: string; attempt: number }
-                const activityId = `${executionId}/${payload.name}`
+                const activityId = activityExecutionKey(
+                  workflow._tag,
+                  executionId,
+                  payload.name,
+                  payload.attempt
+                )
                 const instance = WorkflowEngine.WorkflowInstance.initial(workflow, executionId)
                 interruptedActivities.delete(activityId)
                 return Effect.gen(function*() {
@@ -491,11 +496,14 @@ export const make = Effect.gen(function*() {
                 )
               },
 
-              deferred: Effect.fnUntraced(function*(request: Entity.Request<any>) {
-                const payload = request.payload as any
-                yield* ensureSuccess(resume(workflow, executionId))
-                return { exit: payload.exit }
-              }),
+              deferred: (request: Entity.Request<any>) =>
+                Effect.gen(function*() {
+                  const payload = request.payload as any
+                  yield* ensureSuccess(resume(workflow, executionId))
+                  return { exit: payload.exit }
+                }).pipe(
+                  Rpc.wrap({ fork: true, uninterruptible: true })
+                ),
 
               resume: () => ensureSuccess(resume(workflow, executionId))
             }
@@ -570,7 +578,12 @@ export const make = Effect.gen(function*() {
         const services = yield* Effect.context<WorkflowEngine.WorkflowInstance>()
         const instance = Context.get(services, WorkflowEngine.WorkflowInstance)
         yield* Effect.annotateCurrentSpan("executionId", instance.executionId)
-        const activityId = `${instance.executionId}/${activity.name}`
+        const activityId = activityExecutionKey(
+          instance.workflow._tag,
+          instance.executionId,
+          activity.name,
+          attempt
+        )
         const client = (yield* RcMap.get(clientsPartial, instance.workflow._tag))(instance.executionId)
         while (true) {
           if (!activities.has(activityId)) {
@@ -837,6 +850,13 @@ const makePartialWorkflowEntity = (workflowName: string) =>
     ResumeRpc,
     ActivityRpc
   ])
+
+const activityExecutionKey = (
+  workflowName: string,
+  executionId: string,
+  activityName: string,
+  attempt: number
+) => JSON.stringify([workflowName, executionId, activityName, attempt])
 
 const activityPrimaryKey = (activity: string, attempt: number) => `${activity}/${attempt}`
 

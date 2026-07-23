@@ -225,6 +225,12 @@ export type BusinessFailureTerminal = Schema.Schema.Type<
   typeof BusinessFailureTerminal
 >
 
+/**
+ * A terminal application failure projected onto one exact BPMN Task.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
 export const TaskBusinessFailed = Schema.TaggedStruct("BusinessFailed", {
   ...OutcomeCoordinates,
   terminal: BusinessFailureTerminal,

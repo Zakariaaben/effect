@@ -16,6 +16,7 @@ import * as Cause from "effect/Cause"
 import * as Clock from "effect/Clock"
 import * as Context from "effect/Context"
 import type * as Crypto from "effect/Crypto"
+import * as DateTime from "effect/DateTime"
 import * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
 import * as Exit from "effect/Exit"
@@ -452,6 +453,43 @@ export interface ActivityExecutionOptions {
  * @since 4.0.0
  */
 export type ActivityOptions = ActivityExecutionOptions
+
+/**
+ * Explicit worker-side start gate for one managed node attempt.
+ *
+ * **Details**
+ *
+ * The gate runs inside the native activity boundary, before the user handler
+ * is constructed or evaluated. `undefined` admits the handler; the only
+ * early value it may produce is an exact
+ * {@link SemanticOperationV3.NodeAttemptTimedOut}. Defects and interruption
+ * retain their native `Cause`, while a typed gate failure is deliberately
+ * unrepresentable.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export interface NodeAttemptStartGateOptions<R = never> extends ActivityExecutionOptions {
+  /**
+   * Computes the only exact timeout the gate is authorized to return.
+   *
+   * **Details**
+   *
+   * It is evaluated only after the gate returns a timeout, allowing an exact
+   * expectation to be derived from the gate's canonical durable decision.
+   * `undefined` makes the gate admission-only: any early timeout is rejected.
+   */
+  readonly expectedTimeout: Effect.Effect<
+    SemanticOperationV3.NodeAttemptTimedOut | undefined,
+    never,
+    R
+  >
+  readonly startGate: Effect.Effect<
+    SemanticOperationV3.NodeAttemptTimedOut | undefined,
+    never,
+    R
+  >
+}
 
 /**
  * Explicit operational policy for activities participating in a semantic
@@ -1007,6 +1045,94 @@ const admitManagedOutcome = (
     : Effect.succeed(Object.freeze(admitted.success))
 }
 
+const decodeManagedTimeout = Schema.decodeUnknownResult(
+  SemanticOperationV3.NodeAttemptTimedOut,
+  strictParseOptions
+)
+
+const admitManagedTimeout = (
+  resolution: SemanticExecutableRegistryV3.ResolvedNodeAttemptActivity,
+  input: unknown,
+  expected: SemanticOperationV3.NodeAttemptTimedOut | undefined
+): Effect.Effect<SemanticOperationV3.NodeAttemptTimedOut> => {
+  let admitted: ReturnType<typeof decodeManagedTimeout>
+  try {
+    admitted = decodeManagedTimeout(input)
+  } catch {
+    return Effect.die(activityDefect(
+      resolution,
+      ActivityDefectCodes.InvalidOutcome,
+      "Managed node-attempt start-gate timeout validation threw unexpectedly"
+    ))
+  }
+  if (Result.isFailure(admitted)) {
+    return Effect.die(activityDefect(
+      resolution,
+      ActivityDefectCodes.InvalidOutcome,
+      `Managed node-attempt start gate may only return an exact timeout: ${admitted.failure.message}`
+    ))
+  }
+  const document = resolution.operation.document
+  if (
+    document._tag !== "Activity" ||
+    admitted.success.attempt !== document.attempt ||
+    admitted.success.activityDigest !==
+      resolution.operation.operationDigest
+  ) {
+    return Effect.die(activityDefect(
+      resolution,
+      ActivityDefectCodes.InvalidOutcome,
+      "Managed node-attempt start-gate timeout does not match its exact activity coordinates"
+    ))
+  }
+  if (expected === undefined) {
+    return Effect.die(activityDefect(
+      resolution,
+      ActivityDefectCodes.InvalidOutcome,
+      "Managed node-attempt start gate is not authorized to return an early timeout"
+    ))
+  }
+  let admittedExpected: ReturnType<typeof decodeManagedTimeout>
+  try {
+    admittedExpected = decodeManagedTimeout(expected)
+  } catch {
+    return Effect.die(activityDefect(
+      resolution,
+      ActivityDefectCodes.InvalidOutcome,
+      "Managed node-attempt expected start-gate timeout validation threw unexpectedly"
+    ))
+  }
+  if (Result.isFailure(admittedExpected)) {
+    return Effect.die(activityDefect(
+      resolution,
+      ActivityDefectCodes.InvalidOutcome,
+      `Managed node-attempt expected start-gate timeout is invalid: ${admittedExpected.failure.message}`
+    ))
+  }
+  const actual = admitted.success
+  const authorized = admittedExpected.success
+  if (
+    actual.attempt !== authorized.attempt ||
+    actual.activityDigest !== authorized.activityDigest ||
+    actual.timeout.attempt !== authorized.timeout.attempt ||
+    actual.timeout.activityDigest !==
+      authorized.timeout.activityDigest ||
+    actual.timeout.timeoutKind !==
+      authorized.timeout.timeoutKind ||
+    actual.timerOperationDigest !==
+      authorized.timerOperationDigest ||
+    actual.deadline !== authorized.deadline ||
+    actual.durationMillis !== authorized.durationMillis
+  ) {
+    return Effect.die(activityDefect(
+      resolution,
+      ActivityDefectCodes.InvalidOutcome,
+      "Managed node-attempt start-gate timeout does not match its exact authorized timer, duration, and deadline"
+    ))
+  }
+  return Effect.succeed(Object.freeze(admitted.success))
+}
+
 const encodeManagedInline = (
   resolution: SemanticExecutableRegistryV3.ResolvedNodeAttemptActivity,
   schema: Schema.Top,
@@ -1047,6 +1173,26 @@ const encodeManagedInline = (
   })
 }
 
+const managedCompletionTimestamp = (
+  resolution: SemanticExecutableRegistryV3.ResolvedNodeAttemptActivity
+): Effect.Effect<Wire.Timestamp> =>
+  Effect.flatMap(
+    Clock.currentTimeMillis,
+    (millis) =>
+      Effect.try({
+        try: () =>
+          DateTime.formatIso(
+            DateTime.makeUnsafe(millis)
+          ) as Wire.Timestamp,
+        catch: () =>
+          activityDefect(
+            resolution,
+            ActivityDefectCodes.InvalidOutcome,
+            "Managed node-attempt completion time could not be represented as canonical UTC milliseconds"
+          )
+      }).pipe(Effect.orDie)
+  )
+
 const managedSuccess = (
   resolution: SemanticExecutableRegistryV3.ResolvedNodeAttemptActivity,
   value: unknown
@@ -1063,23 +1209,23 @@ const managedSuccess = (
       "Managed node attempt no longer retains an Activity descriptor"
     ))
   }
-  return Effect.flatMap(
-    encodeManagedInline(
+  return Effect.gen(function*() {
+    const output = yield* encodeManagedInline(
       resolution,
       resolution.node.contract.successSchema,
       captured.success,
       ActivityDefectCodes.InvalidOutput,
       "Node handler output"
-    ),
-    (output) =>
-      admitManagedOutcome(resolution, {
-        _tag: "Succeeded",
-        outcomeVersion: 1,
-        attempt: document.attempt,
-        activityDigest: resolution.operation.operationDigest,
-        output
-      })
-  )
+    )
+    return yield* admitManagedOutcome(resolution, {
+      _tag: "Succeeded",
+      outcomeVersion: 2,
+      attempt: document.attempt,
+      activityDigest: resolution.operation.operationDigest,
+      completedAt: yield* managedCompletionTimestamp(resolution),
+      output
+    })
+  })
 }
 
 const managedFailure = (
@@ -1094,43 +1240,42 @@ const managedFailure = (
       "Managed node attempt no longer retains an Activity descriptor"
     ))
   }
-  return Effect.flatMap(
-    encodeManagedInline(
+  return Effect.gen(function*() {
+    const encodedFailure = yield* encodeManagedInline(
       resolution,
       resolution.node.contract.failure.schema,
       failure,
       ActivityDefectCodes.InvalidFailure,
       "Node handler failure"
-    ),
-    (encodedFailure) => {
-      const identity = ActivityPolicyV3.extractFailureIdentity(
-        resolution.node.binding.activityPolicy.retry.failureIdentity,
-        encodedFailure.value
-      )
-      if (Result.isFailure(identity)) {
-        return Effect.die(activityDefect(
-          resolution,
-          ActivityDefectCodes.InvalidFailureIdentity,
-          `Could not derive the policy-pinned failure identity: ${identity.failure.message}`
-        ))
-      }
-      const applicationFailure = {
-        _tag: "ApplicationFailure",
-        failureCauseVersion: 1,
-        activityDigest: resolution.operation.operationDigest,
-        attempt: document.attempt,
-        identity: identity.success,
-        failure: encodedFailure
-      } satisfies ActivityPolicyV3.ApplicationFailure
-      return admitManagedOutcome(resolution, {
-        _tag: "ApplicationFailed",
-        outcomeVersion: 1,
-        attempt: document.attempt,
-        activityDigest: resolution.operation.operationDigest,
-        failure: applicationFailure
-      })
+    )
+    const identity = ActivityPolicyV3.extractFailureIdentity(
+      resolution.node.binding.activityPolicy.retry.failureIdentity,
+      encodedFailure.value
+    )
+    if (Result.isFailure(identity)) {
+      return yield* Effect.die(activityDefect(
+        resolution,
+        ActivityDefectCodes.InvalidFailureIdentity,
+        `Could not derive the policy-pinned failure identity: ${identity.failure.message}`
+      ))
     }
-  )
+    const applicationFailure = {
+      _tag: "ApplicationFailure",
+      failureCauseVersion: 1,
+      activityDigest: resolution.operation.operationDigest,
+      attempt: document.attempt,
+      identity: identity.success,
+      failure: encodedFailure
+    } satisfies ActivityPolicyV3.ApplicationFailure
+    return yield* admitManagedOutcome(resolution, {
+      _tag: "ApplicationFailed",
+      outcomeVersion: 2,
+      attempt: document.attempt,
+      activityDigest: resolution.operation.operationDigest,
+      completedAt: yield* managedCompletionTimestamp(resolution),
+      failure: applicationFailure
+    })
+  })
 }
 
 const verifyManagedOutcomeCoordinates = (
@@ -1150,6 +1295,93 @@ const verifyManagedOutcomeCoordinates = (
     ))
   }
   return Effect.succeed(outcome)
+}
+
+const executeNodeAttempt = <R>(
+  resolution: SemanticExecutableRegistryV3.ResolvedNodeAttemptActivity,
+  options: ActivityExecutionOptions,
+  startGate?: Effect.Effect<
+    SemanticOperationV3.NodeAttemptTimedOut | undefined,
+    never,
+    R
+  >,
+  expectedTimeout?: Effect.Effect<
+    SemanticOperationV3.NodeAttemptTimedOut | undefined,
+    never,
+    R
+  >
+): Effect.Effect<
+  SemanticOperationV3.NodeAttemptOutcome,
+  EffectWorkflowSemanticError,
+  | Requirements
+  | Exclude<
+    R,
+    | NativeWorkflowEngine.WorkflowEngine
+    | NativeWorkflowEngine.WorkflowInstance
+  >
+> => {
+  if (
+    !SemanticExecutableRegistryV3.isResolvedActivity(resolution) ||
+    resolution._tag !== "NodeAttempt"
+  ) {
+    return Effect.fail(error(
+      ErrorCodes.InvalidActivityResolution,
+      startGate === undefined
+        ? "Managed node-attempt execution requires an exact NodeAttempt resolution"
+        : "Managed node-attempt start gate requires an exact NodeAttempt resolution"
+    ))
+  }
+  const native = resolve(resolution.operation)
+  if (Result.isFailure(native)) return Effect.fail(native.failure)
+  const executeHandler = Effect.flatMap(
+    prepareNodeHandlerEffect(
+      resolution,
+      native.success.operationName
+    ),
+    (handlerEffect) =>
+      Effect.matchEffect(handlerEffect, {
+        onSuccess: (value) => managedSuccess(resolution, value),
+        onFailure: (failure) => managedFailure(resolution, failure)
+      })
+  )
+  const execute: Effect.Effect<
+    SemanticOperationV3.NodeAttemptOutcome,
+    never,
+    | R
+    | NativeWorkflowEngine.WorkflowInstance
+  > = startGate === undefined
+    ? executeHandler
+    : Effect.gen(function*() {
+      const early = yield* startGate
+      if (early === undefined) {
+        return yield* executeHandler
+      }
+      const expected = yield* (
+        expectedTimeout ?? Effect.succeed(undefined)
+      )
+      return yield* admitManagedTimeout(
+        resolution,
+        early,
+        expected
+      )
+    })
+  return Effect.flatMap(
+    executeResolvedActivity(
+      resolution,
+      execute,
+      options
+    ),
+    (outcome) => verifyManagedOutcomeCoordinates(resolution, outcome)
+  ) as Effect.Effect<
+    SemanticOperationV3.NodeAttemptOutcome,
+    EffectWorkflowSemanticError,
+    | Requirements
+    | Exclude<
+      R,
+      | NativeWorkflowEngine.WorkflowEngine
+      | NativeWorkflowEngine.WorkflowInstance
+    >
+  >
 }
 
 /**
@@ -1175,42 +1407,57 @@ export const nodeAttempt = (
   SemanticOperationV3.NodeAttemptOutcome,
   EffectWorkflowSemanticError,
   Requirements
-> => {
-  if (
-    !SemanticExecutableRegistryV3.isResolvedActivity(resolution) ||
-    resolution._tag !== "NodeAttempt"
-  ) {
-    return Effect.fail(error(
-      ErrorCodes.InvalidActivityResolution,
-      "Managed node-attempt execution requires an exact NodeAttempt resolution"
-    ))
-  }
-  const native = resolve(resolution.operation)
-  if (Result.isFailure(native)) return Effect.fail(native.failure)
-  const execute = Effect.flatMap(
-    prepareNodeHandlerEffect(
-      resolution,
-      native.success.operationName
-    ),
-    (handlerEffect) =>
-      Effect.matchEffect(handlerEffect, {
-        onSuccess: (value) => managedSuccess(resolution, value),
-        onFailure: (failure) => managedFailure(resolution, failure)
-      })
-  )
-  return Effect.flatMap(
-    executeResolvedActivity(
-      resolution,
-      execute,
-      options
-    ),
-    (outcome) => verifyManagedOutcomeCoordinates(resolution, outcome)
+> =>
+  executeNodeAttempt<never>(
+    resolution,
+    options
   ) as Effect.Effect<
     SemanticOperationV3.NodeAttemptOutcome,
     EffectWorkflowSemanticError,
     Requirements
   >
-}
+
+/**
+ * Executes one managed node attempt behind an explicit worker-side start
+ * gate.
+ *
+ * **Details**
+ *
+ * The gate is part of the native activity execution and runs immediately
+ * before handler preparation, so an admitted timeout prevents even
+ * synchronous handler construction. It may only return `undefined` to
+ * proceed or an exact `NodeAttemptTimedOut` to finish early; in particular it
+ * cannot manufacture a node success or application failure. A timeout must
+ * equal `expectedTimeout` across its activity, attempt, timer, kind, duration,
+ * and absolute deadline; `undefined` authorizes no timeout. The persisted
+ * outcome is subsequently checked against the resolved attempt's coordinates
+ * just like {@link nodeAttempt}.
+ *
+ * This extension is intentionally separate: callers that do not need a
+ * worker handshake retain the direct, zero-gate {@link nodeAttempt} path.
+ *
+ * @category execution
+ * @since 4.0.0
+ */
+export const nodeAttemptWithStartGate = <R>(
+  resolution: SemanticExecutableRegistryV3.ResolvedNodeAttemptActivity,
+  options: NodeAttemptStartGateOptions<R>
+): Effect.Effect<
+  SemanticOperationV3.NodeAttemptOutcome,
+  EffectWorkflowSemanticError,
+  | Requirements
+  | Exclude<
+    R,
+    | NativeWorkflowEngine.WorkflowEngine
+    | NativeWorkflowEngine.WorkflowInstance
+  >
+> =>
+  executeNodeAttempt(
+    resolution,
+    options,
+    options.startGate,
+    options.expectedTimeout
+  )
 
 const decodeInlineActivityInput = <A>(
   resolution: SemanticExecutableRegistryV3.ResolvedActivity,

@@ -548,6 +548,12 @@ interface PreparedActivity {
   readonly resolution: Executables.ResolvedNodeHandlerActivity
 }
 
+interface PreparedNodeAttempt {
+  readonly occurrence: Occurrence.PreparedOccurrence
+  readonly operation: Operation.PreparedOperation
+  readonly resolution: Executables.ResolvedNodeAttemptActivity
+}
+
 const prepareActivity = (
   fixture: Fixture,
   options: {
@@ -612,6 +618,104 @@ const prepareActivity = (
       resolution
     } satisfies PreparedActivity
   })
+
+const prepareNodeAttempt = (
+  fixture: Fixture,
+  options: {
+    readonly runId: string
+    readonly attempt?: number | undefined
+    readonly input: Schema.Json
+  }
+) =>
+  Effect.gen(function*() {
+    const occurrence = yield* Occurrence.prepare({
+      occurrenceVersion: Occurrence.OccurrenceVersion,
+      executionProtocolVersion: Occurrence.ExecutionProtocolVersion,
+      tenantId: "tenant-boundary",
+      runId: options.runId,
+      artifactDigest: fixture.verified.artifactDigest,
+      nodeId: fixture.binding.nodeId,
+      scopePath: [],
+      activation: 0
+    })
+    const operation = yield* Operation.prepare(occurrence, {
+      _tag: "Activity",
+      operationVersion: Operation.OperationVersion,
+      executionProtocolVersion: Operation.ExecutionProtocolVersion,
+      operationId: "invoke-handler",
+      attempt: options.attempt ?? 1,
+      purpose: {
+        _tag: "NodeAttempt",
+        purposeVersion: 1,
+        nodeDefinitionKey: fixture.binding.nodeDefinitionKey,
+        handlerBuildDigest: fixture.binding.handlerBuild.buildDigest
+      },
+      input: {
+        _tag: "Inline",
+        value: options.input
+      },
+      successContract: {
+        _tag: "BuiltIn",
+        contractReferenceVersion: 1,
+        vocabularyVersion: 2,
+        schema: "NodeAttemptOutcome"
+      },
+      errorContract: {
+        _tag: "BuiltIn",
+        contractReferenceVersion: 1,
+        vocabularyVersion: 2,
+        schema: "Never"
+      }
+    })
+    const resolution = expectSuccess(
+      Executables.resolveActivity(
+        fixture.resolvedArtifact,
+        operation
+      )
+    )
+    if (resolution._tag !== "NodeAttempt") {
+      return yield* Effect.die(
+        "Expected an exact managed node-attempt activity resolution"
+      )
+    }
+    return {
+      occurrence,
+      operation,
+      resolution
+    } satisfies PreparedNodeAttempt
+  })
+
+const nodeAttemptTimeout = (
+  prepared: PreparedNodeAttempt,
+  options: {
+    readonly attempt?: number | undefined
+    readonly activityDigest?: Operation.PreparedOperation["operationDigest"] | undefined
+  } = {}
+): Operation.NodeAttemptTimedOut => {
+  const document = prepared.operation.document
+  if (document._tag !== "Activity") {
+    throw new TypeError("Expected an Activity operation")
+  }
+  const attempt = options.attempt ?? document.attempt
+  const activityDigest = options.activityDigest ??
+    prepared.operation.operationDigest
+  return Schema.decodeUnknownSync(Operation.NodeAttemptTimedOut)({
+    _tag: "TimedOut",
+    outcomeVersion: 2,
+    attempt,
+    activityDigest,
+    timeout: {
+      _tag: "AttemptTimeout",
+      failureCauseVersion: 1,
+      activityDigest,
+      attempt,
+      timeoutKind: "ScheduleToStart"
+    },
+    timerOperationDigest: prepared.operation.operationDigest,
+    deadline: "2026-07-23T12:00:00.000Z",
+    durationMillis: 5_000
+  })
+}
 
 const noInterruptRetry = Schedule.recurs(0).pipe(
   Schedule.setInputType<Cause.Cause<unknown>>()
@@ -916,5 +1020,235 @@ describe("EffectWorkflowSemanticV3 node activity boundary", () => {
       )
       assert.strictEqual(fixture.telemetry.requests.length, 8)
       assert.strictEqual(fixture.telemetry.getterReads, 0)
+    }).pipe(provideCrypto))
+
+  it.effect("does not construct or execute the handler when the native start gate times out", () =>
+    Effect.gen(function*() {
+      const fixture = yield* makeFixture()
+      const prepared = yield* prepareNodeAttempt(fixture, {
+        runId: "run-start-gate-timeout",
+        input: { value: "must-not-run" }
+      })
+      const timeout = nodeAttemptTimeout(prepared)
+
+      const terminal = yield* runInWorkflow(
+        "managed-start-gate-timeout",
+        NativeSemantic.nodeAttemptWithStartGate(
+          prepared.resolution,
+          {
+            interruptRetryPolicy: noInterruptRetry,
+            expectedTimeout: Effect.succeed(timeout),
+            startGate: Effect.succeed(timeout)
+          }
+        ).pipe(Effect.map((outcome) => outcome._tag))
+      )
+
+      assert(Exit.isSuccess(terminal.exit))
+      if (Exit.isFailure(terminal.exit)) return
+      assert.strictEqual(terminal.exit.value, "TimedOut")
+      assert.strictEqual(fixture.telemetry.requests.length, 0)
+    }).pipe(provideCrypto))
+
+  it.effect("executes the handler exactly once when the native start gate proceeds", () =>
+    Effect.gen(function*() {
+      const fixture = yield* makeFixture()
+      const prepared = yield* prepareNodeAttempt(fixture, {
+        runId: "run-start-gate-proceed",
+        input: { value: "once" }
+      })
+
+      const terminal = yield* runInWorkflow(
+        "managed-start-gate-proceed",
+        NativeSemantic.nodeAttemptWithStartGate(
+          prepared.resolution,
+          {
+            interruptRetryPolicy: noInterruptRetry,
+            expectedTimeout: Effect.succeed(undefined),
+            startGate: Effect.succeed(undefined)
+          }
+        ).pipe(Effect.map((outcome) => outcome._tag))
+      )
+
+      assert(Exit.isSuccess(terminal.exit))
+      if (Exit.isFailure(terminal.exit)) return
+      assert.strictEqual(terminal.exit.value, "Succeeded")
+      assert.strictEqual(fixture.telemetry.requests.length, 1)
+      assert.deepStrictEqual(
+        fixture.telemetry.requests[0]!.inputs,
+        { value: "once" }
+      )
+    }).pipe(provideCrypto))
+
+  it.effect("defects when a start-gate timeout carries different outer attempt coordinates", () =>
+    Effect.gen(function*() {
+      const fixture = yield* makeFixture()
+      const prepared = yield* prepareNodeAttempt(fixture, {
+        runId: "run-start-gate-invalid-coordinates",
+        attempt: 1,
+        input: { value: "must-not-run" }
+      })
+      const timeout = nodeAttemptTimeout(prepared, {
+        attempt: 2
+      })
+
+      const terminal = yield* runInWorkflow(
+        "managed-start-gate-invalid-coordinates",
+        NativeSemantic.nodeAttemptWithStartGate(
+          prepared.resolution,
+          {
+            interruptRetryPolicy: noInterruptRetry,
+            expectedTimeout: Effect.succeed(timeout),
+            startGate: Effect.succeed(timeout)
+          }
+        ).pipe(Effect.as("unreachable"))
+      )
+
+      assertActivityDefect(
+        terminal.exit,
+        NativeSemantic.ActivityDefectCodes.InvalidOutcome
+      )
+      assert.strictEqual(fixture.telemetry.requests.length, 0)
+    }).pipe(provideCrypto))
+
+  it.effect("rejects a timeout with valid outer coordinates but altered timer provenance before the handler", () =>
+    Effect.gen(function*() {
+      const fixture = yield* makeFixture()
+      const candidates = [
+        {
+          id: "timer-digest",
+          alter: (expected: Operation.NodeAttemptTimedOut) => ({
+            ...expected,
+            timerOperationDigest: `sha256:${"f".repeat(64)}`
+          })
+        },
+        {
+          id: "duration",
+          alter: (expected: Operation.NodeAttemptTimedOut) => ({
+            ...expected,
+            durationMillis: expected.durationMillis + 1
+          })
+        },
+        {
+          id: "deadline",
+          alter: (expected: Operation.NodeAttemptTimedOut) => ({
+            ...expected,
+            deadline: "2026-07-23T12:00:01.000Z"
+          })
+        },
+        {
+          id: "timeout-kind",
+          alter: (expected: Operation.NodeAttemptTimedOut) => ({
+            ...expected,
+            timeout: {
+              ...expected.timeout,
+              timeoutKind: "StartToClose"
+            }
+          })
+        }
+      ] as const
+
+      for (const candidate of candidates) {
+        const prepared = yield* prepareNodeAttempt(fixture, {
+          runId: `run-start-gate-altered-${candidate.id}`,
+          input: { value: "must-not-run" }
+        })
+        const expectedTimeout = nodeAttemptTimeout(prepared)
+        const alteredTimeout = Schema.decodeUnknownSync(
+          Operation.NodeAttemptTimedOut
+        )(candidate.alter(expectedTimeout))
+
+        const terminal = yield* runInWorkflow(
+          `managed-start-gate-altered-${candidate.id}`,
+          NativeSemantic.nodeAttemptWithStartGate(
+            prepared.resolution,
+            {
+              interruptRetryPolicy: noInterruptRetry,
+              expectedTimeout: Effect.succeed(expectedTimeout),
+              startGate: Effect.succeed(alteredTimeout)
+            }
+          ).pipe(Effect.as("unreachable"))
+        )
+
+        assertActivityDefect(
+          terminal.exit,
+          NativeSemantic.ActivityDefectCodes.InvalidOutcome
+        )
+      }
+
+      assert.strictEqual(fixture.telemetry.requests.length, 0)
+    }).pipe(provideCrypto))
+
+  it.effect("rejects success and application-failure values forged through the timeout-only gate", () =>
+    Effect.gen(function*() {
+      const fixture = yield* makeFixture()
+      const candidates = [
+        {
+          id: "success",
+          outcome: (prepared: PreparedNodeAttempt) =>
+            Schema.decodeUnknownSync(Operation.NodeAttemptOutcome)({
+              _tag: "Succeeded",
+              outcomeVersion: 2,
+              attempt: 1,
+              activityDigest: prepared.operation.operationDigest,
+              completedAt: "2026-07-23T11:59:59.000Z",
+              output: {
+                _tag: "Inline",
+                value: { value: "forged" }
+              }
+            })
+        },
+        {
+          id: "application-failure",
+          outcome: (prepared: PreparedNodeAttempt) =>
+            Schema.decodeUnknownSync(Operation.NodeAttemptOutcome)({
+              _tag: "ApplicationFailed",
+              outcomeVersion: 2,
+              attempt: 1,
+              activityDigest: prepared.operation.operationDigest,
+              completedAt: "2026-07-23T11:59:59.000Z",
+              failure: {
+                _tag: "ApplicationFailure",
+                failureCauseVersion: 1,
+                activityDigest: prepared.operation.operationDigest,
+                attempt: 1,
+                identity: {
+                  failureIdentityVersion: 1,
+                  errorTag: "ForgedFailure",
+                  errorCode: "FORGED"
+                },
+                failure: {
+                  _tag: "Inline",
+                  value: { code: "FORGED" }
+                }
+              }
+            })
+        }
+      ] as const
+
+      for (const candidate of candidates) {
+        const prepared = yield* prepareNodeAttempt(fixture, {
+          runId: `run-start-gate-forged-${candidate.id}`,
+          input: { value: "must-not-run" }
+        })
+        const forged = candidate.outcome(prepared) as unknown as Operation.NodeAttemptTimedOut
+        const terminal = yield* runInWorkflow(
+          `managed-start-gate-forged-${candidate.id}`,
+          NativeSemantic.nodeAttemptWithStartGate(
+            prepared.resolution,
+            {
+              interruptRetryPolicy: noInterruptRetry,
+              expectedTimeout: Effect.succeed(undefined),
+              startGate: Effect.succeed(forged)
+            }
+          ).pipe(Effect.as("unreachable"))
+        )
+
+        assertActivityDefect(
+          terminal.exit,
+          NativeSemantic.ActivityDefectCodes.InvalidOutcome
+        )
+      }
+
+      assert.strictEqual(fixture.telemetry.requests.length, 0)
     }).pipe(provideCrypto))
 })

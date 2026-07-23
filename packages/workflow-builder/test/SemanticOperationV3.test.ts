@@ -2,6 +2,7 @@ import { assert, describe, it } from "@effect/vitest"
 import * as Crypto from "effect/Crypto"
 import * as Effect from "effect/Effect"
 import * as Result from "effect/Result"
+import * as Schema from "effect/Schema"
 import { createHash } from "node:crypto"
 import * as NativeName from "../src/EffectWorkflowOperationV3.ts"
 import * as Occurrence from "../src/SemanticOccurrenceV3.ts"
@@ -93,12 +94,198 @@ const deferred = (
   errorSchemaDigest: digest("d")
 })
 
+const retryController = () => ({
+  _tag: "RetryScheduleToClose",
+  operationVersion: Operation.OperationVersion,
+  executionProtocolVersion: Operation.ExecutionProtocolVersion,
+  operationId: "retry-controller",
+  generation: 0,
+  controllerVersion: 2,
+  firstActivityDigest: digest("4"),
+  initialObservationDigest: digest("5"),
+  nodeDefinitionKey: "document-generator@1",
+  handlerBuildDigest: digest("f"),
+  input: {
+    _tag: "Inline",
+    value: { documentId: 42 }
+  },
+  activityPolicy: {
+    policyVersion: 3,
+    retry: {
+      retryPolicyVersion: 3,
+      maximumAttempts: 3,
+      maximumElapsed: { _tag: "Unlimited" },
+      classifier: {
+        classifierPinVersion: 3,
+        classifierId: "default-error-classifier",
+        classifierVersion: "1.0.0",
+        buildDigest: digest("6")
+      },
+      failureIdentity: {
+        _tag: "EffectTagged",
+        identityContractVersion: 1,
+        code: "OptionalString"
+      },
+      nonRetryableErrorTags: [],
+      nonRetryableErrorCodes: [],
+      backoff: {
+        _tag: "Fixed",
+        delayMillis: 1_000
+      },
+      jitter: { _tag: "NoJitter" }
+    },
+    timeouts: {
+      scheduleToStart: {
+        _tag: "After",
+        durationMillis: 10_000
+      },
+      startToClose: {
+        _tag: "After",
+        durationMillis: 20_000
+      },
+      scheduleToClose: {
+        _tag: "After",
+        durationMillis: 30_000
+      }
+    }
+  },
+  timeoutKind: "ScheduleToClose",
+  durationMillis: 30_000,
+  outcomeContractVersion: 1,
+  loserDisposition: "InterruptWaiters"
+})
+
 const success = <A, E>(result: Result.Result<A, E>): A => {
   assert(Result.isSuccess(result))
   return result.success
 }
 
 describe("SemanticOperationV3", () => {
+  it("strictly admits timeout outcomes and rejects mismatched attempt coordinates", () => {
+    const timedOut = {
+      _tag: "TimedOut",
+      outcomeVersion: 2,
+      attempt: 2,
+      activityDigest: digest("4"),
+      timeout: {
+        _tag: "AttemptTimeout",
+        failureCauseVersion: 1,
+        attempt: 2,
+        activityDigest: digest("4"),
+        timeoutKind: "ScheduleToStart"
+      },
+      timerOperationDigest: digest("5"),
+      deadline: "2026-07-23T12:00:00.000Z",
+      durationMillis: 30_000
+    }
+    const decode = Schema.decodeUnknownResult(
+      Operation.NodeAttemptOutcome,
+      {
+        errors: "all",
+        onExcessProperty: "error"
+      }
+    )
+    assert(Result.isSuccess(decode(timedOut)))
+
+    for (
+      const candidate of [
+        {
+          ...timedOut,
+          attempt: 3
+        },
+        {
+          ...timedOut,
+          activityDigest: digest("6")
+        },
+        {
+          ...timedOut,
+          timeout: {
+            ...timedOut.timeout,
+            attempt: 3
+          }
+        },
+        {
+          ...timedOut,
+          timeout: {
+            ...timedOut.timeout,
+            activityDigest: digest("6")
+          }
+        },
+        {
+          ...timedOut,
+          timeout: {
+            ...timedOut.timeout,
+            forged: true
+          }
+        },
+        {
+          ...timedOut,
+          forged: true
+        }
+      ]
+    ) {
+      assert(Result.isFailure(decode(candidate)))
+    }
+  })
+
+  it.effect("admits schedule-to-start timer ownership and all timeout dimensions on retry controllers", () =>
+    Effect.gen(function*() {
+      const preparedOccurrence = yield* occurrence()
+      const scheduled = yield* Operation.prepare(
+        preparedOccurrence,
+        {
+          ...timer(0, 10_000),
+          operationId: "schedule-to-start",
+          owner: {
+            _tag: "ScheduleToStart",
+            activityDigest: digest("4")
+          }
+        }
+      )
+      assert.strictEqual(scheduled.document._tag, "Timer")
+      if (scheduled.document._tag === "Timer") {
+        assert.deepStrictEqual(scheduled.document.owner, {
+          _tag: "ScheduleToStart",
+          activityDigest: digest("4")
+        })
+      }
+
+      const controller = yield* Operation.prepare(
+        preparedOccurrence,
+        retryController()
+      )
+      assert.strictEqual(controller.document._tag, "RetryScheduleToClose")
+      if (controller.document._tag === "RetryScheduleToClose") {
+        assert.strictEqual(controller.document.controllerVersion, 2)
+        assert.strictEqual(
+          controller.document.activityPolicy.timeouts.scheduleToStart._tag,
+          "After"
+        )
+        assert.strictEqual(
+          controller.document.activityPolicy.timeouts.startToClose._tag,
+          "After"
+        )
+      }
+
+      const oldController = yield* Operation.prepare(
+        preparedOccurrence,
+        {
+          ...retryController(),
+          controllerVersion: 1
+        }
+      ).pipe(Effect.flip)
+      assert.strictEqual(oldController.code, Operation.ErrorCodes.InvalidSpec)
+
+      const oldOperation = yield* Operation.prepare(
+        preparedOccurrence,
+        {
+          ...timer(0, 10_000),
+          operationVersion: 1
+        }
+      ).pipe(Effect.flip)
+      assert.strictEqual(oldOperation.code, Operation.ErrorCodes.InvalidSpec)
+    }).pipe(Effect.provideService(Crypto.Crypto, crypto)))
+
   it.effect("pins activity meaning while retaining one logical native name across attempts", () =>
     Effect.gen(function*() {
       const preparedOccurrence = yield* occurrence()
@@ -256,7 +443,7 @@ describe("SemanticOperationV3", () => {
       ) => ({
         _tag: "BuiltIn" as const,
         contractReferenceVersion: 1 as const,
-        vocabularyVersion: 1 as const,
+        vocabularyVersion: 2 as const,
         schema
       })
       const specifications = [
@@ -438,13 +625,13 @@ describe("SemanticOperationV3", () => {
         successContract: {
           _tag: "BuiltIn",
           contractReferenceVersion: 1,
-          vocabularyVersion: 1,
+          vocabularyVersion: 2,
           schema: "SomethingElse"
         },
         errorContract: {
           _tag: "BuiltIn",
           contractReferenceVersion: 1,
-          vocabularyVersion: 1,
+          vocabularyVersion: 2,
           schema: "Never"
         }
       }
@@ -465,7 +652,7 @@ describe("SemanticOperationV3", () => {
           successContract: {
             _tag: "BuiltIn",
             contractReferenceVersion: 1,
-            vocabularyVersion: 1,
+            vocabularyVersion: 2,
             schema: "RetryClassification",
             forged: true
           }
@@ -475,7 +662,7 @@ describe("SemanticOperationV3", () => {
           successContract: {
             _tag: "BuiltIn",
             contractReferenceVersion: 1,
-            vocabularyVersion: 1,
+            vocabularyVersion: 2,
             schema: "CanonicalTimestamp"
           }
         },
@@ -484,7 +671,7 @@ describe("SemanticOperationV3", () => {
           successContract: {
             _tag: "BuiltIn",
             contractReferenceVersion: 1,
-            vocabularyVersion: 2,
+            vocabularyVersion: 1,
             schema: "RetryClassification"
           }
         },
@@ -500,13 +687,13 @@ describe("SemanticOperationV3", () => {
           successContract: {
             _tag: "BuiltIn",
             contractReferenceVersion: 1,
-            vocabularyVersion: 1,
+            vocabularyVersion: 2,
             schema: "CanonicalTimestamp"
           },
           errorContract: {
             _tag: "BuiltIn",
             contractReferenceVersion: 1,
-            vocabularyVersion: 1,
+            vocabularyVersion: 2,
             schema: "Never"
           }
         },

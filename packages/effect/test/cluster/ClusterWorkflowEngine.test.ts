@@ -1,5 +1,5 @@
 import { assert, describe, expect, it } from "@effect/vitest"
-import { Cause, Context, DateTime, Duration, Effect, Exit, Fiber, Layer, Option, Result, Schema } from "effect"
+import { Cause, Context, DateTime, Duration, Effect, Exit, Fiber, Latch, Layer, Option, Result, Schema } from "effect"
 import { TestClock } from "effect/testing"
 import {
   ClusterSchema,
@@ -456,6 +456,83 @@ describe.concurrent("ClusterWorkflowEngine", () => {
       assert.strictEqual(envelope.address.shardId.group, "workflow")
     }).pipe(Effect.scoped, Effect.provide(TestWorkflowEngine)))
 
+  it.effect("isolates overlapping activity closures and contexts by attempt", () =>
+    Effect.gen(function*() {
+      const engine = yield* WorkflowEngine
+      yield* engine.register(AttemptIsolationWorkflow, () => Effect.void)
+
+      const executionId = yield* AttemptIsolationWorkflow.executionId({ id: "overlapping-attempts" })
+      const instance = WorkflowInstance.initial(AttemptIsolationWorkflow, executionId)
+      const started = Latch.makeUnsafe()
+      let startedCount = 0
+
+      const makeActivity = (closure: string) =>
+        Activity.make({
+          name: "same-activity-name",
+          success: Schema.String,
+          execute: Effect.gen(function*() {
+            const context = yield* AttemptContext
+            startedCount++
+            if (startedCount === 2) {
+              yield* started.open
+            }
+            yield* started.await
+            return `${closure}/${context}`
+          })
+        })
+
+      const executeAttempt = (attempt: number, closure: string, context: string) =>
+        engine.activityExecute(makeActivity(closure), attempt).pipe(
+          Effect.provideService(AttemptContext, context),
+          Effect.provideService(WorkflowInstance, instance)
+        )
+
+      const results = yield* Effect.all([
+        executeAttempt(1, "closure-1", "context-1"),
+        executeAttempt(2, "closure-2", "context-2")
+      ], { concurrency: "unbounded" })
+
+      const values = results.map((result) => {
+        assert(result._tag === "Complete")
+        assert(Exit.isSuccess(result.exit))
+        return result.exit.value
+      }).sort()
+      expect(values).toEqual([
+        "closure-1/context-1",
+        "closure-2/context-2"
+      ])
+    }).pipe(Effect.scoped, Effect.provide(TestWorkflowEngine)))
+
+  it.effect("an activity resolves and reads its execution's canonical deferred", () =>
+    Effect.gen(function*() {
+      const engine = yield* WorkflowEngine
+      yield* engine.register(SelfDeferredWorkflow, () =>
+        Activity.make({
+          name: "resolve-own-deferred",
+          success: Schema.String,
+          execute: Effect.gen(function*() {
+            const token = yield* DurableDeferred.token(SelfActivityDeferred)
+            const first = yield* DurableDeferred.resolve(SelfActivityDeferred, {
+              token,
+              exit: Exit.succeed("winner")
+            })
+            const late = yield* DurableDeferred.resolve(SelfActivityDeferred, {
+              token,
+              exit: Exit.succeed("late")
+            })
+            const observed = yield* DurableDeferred.poll(SelfActivityDeferred, { token })
+
+            expect(first).toEqual(Exit.succeed("winner"))
+            expect(late).toEqual(first)
+            expect(observed).toEqual(Option.some(first))
+            assert(Exit.isSuccess(first))
+            return first.value
+          })
+        }))
+
+      expect(yield* SelfDeferredWorkflow.execute({ id: "self-deferred" })).toEqual("winner")
+    }).pipe(Effect.scoped, Effect.provide(TestWorkflowEngine)))
+
   it.effect("SuspendOnFailure", () =>
     Effect.gen(function*() {
       const flags = yield* Flags
@@ -789,6 +866,33 @@ const ShardedDeferredWorkflow = Workflow.make("ShardedDeferredWorkflow", {
     return payload.id
   }
 }).annotate(ClusterSchema.ShardGroup, () => "workflow")
+
+const AttemptIsolationWorkflow = Workflow.make("AttemptIsolationWorkflow", {
+  payload: {
+    id: Schema.String
+  },
+  idempotencyKey(payload) {
+    return payload.id
+  }
+})
+
+class AttemptContext extends Context.Service<AttemptContext, string>()(
+  "ClusterWorkflowEngine.test/AttemptContext"
+) {}
+
+const SelfActivityDeferred = DurableDeferred.make("SelfActivityDeferred", {
+  success: Schema.String
+})
+
+const SelfDeferredWorkflow = Workflow.make("SelfDeferredWorkflow", {
+  payload: {
+    id: Schema.String
+  },
+  success: Schema.String,
+  idempotencyKey(payload) {
+    return payload.id
+  }
+})
 
 const SuspendOnFailureWorkflow = Workflow.make("SuspendOnFailureWorkflow", {
   payload: {

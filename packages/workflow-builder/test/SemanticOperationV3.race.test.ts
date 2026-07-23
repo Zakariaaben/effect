@@ -87,13 +87,13 @@ const classifier = () => ({
   successContract: {
     _tag: "BuiltIn",
     contractReferenceVersion: 1,
-    vocabularyVersion: 1,
+    vocabularyVersion: 2,
     schema: "RetryClassification"
   },
   errorContract: {
     _tag: "BuiltIn",
     contractReferenceVersion: 1,
-    vocabularyVersion: 1,
+    vocabularyVersion: 2,
     schema: "Never"
   }
 })
@@ -246,7 +246,7 @@ describe("SemanticOperationV3 race", () => {
         {
           _tag: "BuiltIn",
           contractReferenceVersion: 1,
-          vocabularyVersion: 1,
+          vocabularyVersion: 2,
           schema: "Void"
         }
       )

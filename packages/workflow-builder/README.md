@@ -74,9 +74,10 @@ Today the package provides:
   failures. A native Effect Workflow bridge checks the exact compiled task
   binding before dispatch, executes the prepared retry invocation once, and
   returns a strict portable `resolveTask` command plus the raw retry outcome.
-  Schedule-to-close timeout, defects, interruption, and adapter failures remain
-  outside BPMN Error routing. Durable resolutions are idempotent and causally
-  replayed. This does not yet cover the complete BPMN Activity lifecycle,
+  Attempt and schedule-to-close timeouts, defects, interruption, and adapter
+  failures remain outside BPMN Error routing. Durable resolutions are
+  idempotent and causally replayed. This does not yet cover the complete BPMN
+  Activity lifecycle,
   parent-scope Error propagation, timers, BPMN Cancel, non-interrupting
   boundaries, event subprocesses, or task-binding admission through the XML
   executable facade;
@@ -126,7 +127,7 @@ Today the package provides:
   semantic worker leases, heartbeats, or completion admission. A cluster
   client using a custom shard group must have the workflow definition
   registered so its annotation can be recovered from the otherwise opaque
-  deferred token;
+  deferred token. The token is an address, not an authenticated capability;
 - a bounded protocol-v3 native-operation naming profile that maps exact dynamic
   occurrence, operation, and timer/deferred generation coordinates to
   replay-stable names, while semantic activity attempts use Effect's native
@@ -172,8 +173,9 @@ Today the package provides:
   dimensions;
 - a managed protocol-v3 retry facade over native Effect Workflow primitives.
   Each semantic attempt is one exact build-pinned native activity whose success
-  channel persists a closed success-or-application-failure outcome; only the
-  user handler's typed failure is classified. The facade applies explicit
+  channel persists a closed success, application-failure, or authorized
+  attempt-timeout outcome; only the user handler's typed failure is classified.
+  The facade applies explicit
   non-retryable identities, the exact classifier, attempt and elapsed admission
   budgets, replay-recorded internal jitter, and native durable-clock backoff,
   and returns closed `NonRetryable` or `Exhausted` terminal explanations.
@@ -182,16 +184,46 @@ Today the package provides:
   initial time observation or any node attempt. Completion and clock contenders
   publish success-only envelopes to one native durable deferred; its backend
   first-wins result covers encoded success, terminal business failure, timeout,
-  and non-interrupt defect. Attempts and final publication are clock-fenced,
-  winner coordinates and deterministic policy facts are revalidated, and loser
-  interruption is fire-and-forget rather than joined. The timeout fences
-  semantic completion but cannot promise rollback of an external side effect
-  already dispatched. `executeDetailed` exposes that same closed durable
-  outcome without decoding or rerunning the handler, allowing trusted adapters
-  to retain attempt and activity coordinates. Schedule-to-start and
-  start-to-close remain rejected until the Builder adapter binds the new native
-  first-wins handshake to an authenticated persistent worker start/lease
-  acknowledgement and its heartbeat/fencing rules;
+  and non-interrupt defect. Native defects retain their full `Cause`; they are
+  not encoded as business failure or timeout. Attempts and final publication
+  are clock-fenced, typed winner coordinates and deterministic policy facts are
+  revalidated, and loser interruption is fire-and-forget rather than joined.
+  The timeout fences semantic completion but cannot promise rollback of an
+  external side effect already dispatched. `executeDetailed` exposes that same
+  closed durable outcome without decoding or rerunning the handler, allowing
+  trusted adapters to retain attempt and activity coordinates.
+  Schedule-to-start first persists one canonical `ScheduleToStartArmed`
+  acknowledgement containing the activity/timer digests, attempt, `armedAt`,
+  duration, and absolute deadline. Only that canonical acknowledgement is used
+  to schedule the idempotent native clock and dispatch the activity, and replay
+  reuses it instead of observing a new budget origin. The start gate runs inside
+  the native Activity RPC immediately before handler preparation, so a
+  canonical timeout winner prevents user code from starting. Timeout
+  authorization is a lazy `Effect` evaluated only when the gate actually
+  proposes a timeout. It derives the exact schedule-to-start expectation from
+  the canonical arm acknowledgement, or the exact start-to-close expectation
+  from canonical `Started`, then compares activity, attempt, timer, timeout kind,
+  duration, and deadline. Thus the authorization is dynamic but cannot admit a
+  timeout without its canonical persisted basis. This boundary means “entered
+  the Activity RPC”, not “acquired a future authenticated distributed-queue
+  lease”. A timed attempt therefore uses a start and terminal gate, plus the arm
+  gate when schedule-to-start is configured.
+  Start-to-close commits `startedAt` and its exact absolute deadline in the
+  canonical `Started` acknowledgement, then idempotently schedules the terminal
+  deferred; redelivery cannot reset that deadline. Persisted version `2`
+  `Succeeded` and `ApplicationFailed` outcomes carry `completedAt`, and the
+  terminal protocol compares it with the canonical start-to-close deadline even
+  when clock delivery is late. Their `AttemptTimedOut` outcome is classified as
+  an attempt-timeout cause but remains distinct from application failure and is
+  never projected through BPMN Boundary Error as a business error. Native
+  defects have no corresponding persisted completion timestamp yet, so the
+  race between a late defect and a late-delivered start-to-close timer remains a
+  known conformance gap rather than a claimed deterministic ordering. A losing
+  native scheduled resolution is not cancelled: first-wins makes its eventual
+  delivery semantically inert, but it still consumes timer/backend capacity
+  until its deadline. These handshakes do not provide an authenticated worker
+  lease, heartbeat expiry, queue-acquisition fencing, cross-process
+  cancellation, or proof that already-started external work stopped;
   `maximumElapsed` remains an admission budget and does not interrupt an
   attempt already running;
 - protocol-v3 child-workflow collision-free identities, exact
@@ -252,13 +284,21 @@ artifact-versioned native handlers, authorized deferred completion, stable
 dynamic activity/child identities, forced-durable business timers, and
 cross-process semantic conformance tests.
 
+The current attempt-timeout contract tests exercise the native memory engine and
+the cluster implementation over its in-memory cluster driver. They prove the
+first-wins protocol and adapter wiring in those fixtures; they do not prove
+survival of a process or machine crash, empty-cache recovery, multi-worker
+failover, or a production storage deployment.
+
 The forked native `PersistedQueue` Redis and SQL stores now fence every scoped
 take with a fresh acquisition UUID. Lock refresh, completion, requeue,
 interruption release, and failed-item settlement are conditional on that exact
 acquisition, so a finalizer from an expired delivery cannot mutate its
 replacement. This is transport ownership fencing only; it is not yet the
 protocol-v3 semantic start permit, heartbeat, cancellation, or completion
-authority required before enabling schedule-to-start and start-to-close.
+authority. The implemented schedule-to-start clock currently ends at entry into
+the native Activity RPC; it does not claim to measure acquisition of this or any
+future authenticated distributed queue.
 
 The BPMN model, named XML/DI mapping slice, durable marking, and bounded token
 kernel are likewise not a BPMN conformance claim. Mapping outside

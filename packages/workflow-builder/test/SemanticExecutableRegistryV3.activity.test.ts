@@ -480,7 +480,7 @@ const builtIn = (
 ) => ({
   _tag: "BuiltIn" as const,
   contractReferenceVersion: 1 as const,
-  vocabularyVersion: 1 as const,
+  vocabularyVersion: 2 as const,
   schema
 })
 
@@ -548,7 +548,7 @@ const classifierPurpose = (
 })
 
 describe("SemanticExecutableRegistryV3 activity resolution", () => {
-  it.effect("resolves all four purposes to exact handler, codec, built-in, callable, and context objects", () =>
+  it.effect("resolves all five purposes to exact handler, codec, built-in, callable, and context objects", () =>
     Effect.gen(function*() {
       const fixture = yield* makeFixture
       const preparedOccurrence = yield* occurrence(
@@ -575,6 +575,18 @@ describe("SemanticExecutableRegistryV3 activity resolution", () => {
         "classify-failure",
         classifierPurpose(fixture),
         builtIn("RetryClassification"),
+        builtIn("Never")
+      )
+      const attemptOperation = yield* prepareActivity(
+        preparedOccurrence,
+        "managed-attempt",
+        {
+          _tag: "NodeAttempt",
+          purposeVersion: 1,
+          nodeDefinitionKey: fixture.nodeDefinitionKey,
+          handlerBuildDigest: fixture.handlerBuildDigest
+        },
+        builtIn("NodeAttemptOutcome"),
         builtIn("Never")
       )
       const delayOperation = yield* prepareActivity(
@@ -623,6 +635,58 @@ describe("SemanticExecutableRegistryV3 activity resolution", () => {
       assert.strictEqual(
         handler.context,
         handler.node.contract.codecContext
+      )
+
+      const attempt = success(
+        Executables.resolveActivity(
+          fixture.resolved,
+          attemptOperation
+        )
+      )
+      assert.strictEqual(attempt._tag, "NodeAttempt")
+      if (attempt._tag !== "NodeAttempt") return
+      assert.strictEqual(
+        attempt.successSchema,
+        SemanticOperationV3.NodeAttemptOutcome
+      )
+      assert.strictEqual(attempt.errorSchema, Schema.Never)
+      assert.strictEqual(
+        attempt.context,
+        attempt.node.contract.codecContext
+      )
+      assert.deepStrictEqual(
+        Schema.decodeUnknownSync(attempt.successSchema)({
+          _tag: "TimedOut",
+          outcomeVersion: 2,
+          attempt: 1,
+          activityDigest: attemptOperation.operationDigest,
+          timeout: {
+            _tag: "AttemptTimeout",
+            failureCauseVersion: 1,
+            attempt: 1,
+            activityDigest: attemptOperation.operationDigest,
+            timeoutKind: "StartToClose"
+          },
+          timerOperationDigest: digest("e"),
+          deadline: "2026-07-23T12:00:00.000Z",
+          durationMillis: 5_000
+        }),
+        {
+          _tag: "TimedOut",
+          outcomeVersion: 2,
+          attempt: 1,
+          activityDigest: attemptOperation.operationDigest,
+          timeout: {
+            _tag: "AttemptTimeout",
+            failureCauseVersion: 1,
+            attempt: 1,
+            activityDigest: attemptOperation.operationDigest,
+            timeoutKind: "StartToClose"
+          },
+          timerOperationDigest: digest("e"),
+          deadline: "2026-07-23T12:00:00.000Z",
+          durationMillis: 5_000
+        }
       )
 
       const resolvedClassifier = success(
@@ -696,6 +760,7 @@ describe("SemanticExecutableRegistryV3 activity resolution", () => {
       for (
         const resolved of [
           handler,
+          attempt,
           resolvedClassifier,
           delay,
           time

@@ -18,6 +18,7 @@ import * as Cause from "effect/Cause"
 import * as Clock from "effect/Clock"
 import * as Context from "effect/Context"
 import type * as Crypto from "effect/Crypto"
+import * as DateTime from "effect/DateTime"
 import * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
 import * as Exit from "effect/Exit"
@@ -49,6 +50,11 @@ const OperationIds = {
   Classifier: "workflow-builder.retry.classifier",
   Delay: "workflow-builder.retry.delay",
   Backoff: "workflow-builder.retry.backoff",
+  ScheduleToStart: "workflow-builder.retry.schedule-to-start",
+  ScheduleToStartArm: "workflow-builder.retry.schedule-to-start-arm",
+  AttemptStart: "workflow-builder.retry.attempt-start",
+  AttemptTerminal: "workflow-builder.retry.attempt-terminal",
+  StartToClose: "workflow-builder.retry.start-to-close",
   ScheduleToClose: "workflow-builder.retry.schedule-to-close"
 } as const
 
@@ -59,6 +65,13 @@ const OperationIds = {
  * @since 4.0.0
  */
 export const NodeAttemptSucceeded = SemanticOperationV3.NodeAttemptSucceeded
+
+/**
+ * The decoded type of {@link NodeAttemptSucceeded}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
 export type NodeAttemptSucceeded = SemanticOperationV3.NodeAttemptSucceeded
 
 /**
@@ -68,6 +81,13 @@ export type NodeAttemptSucceeded = SemanticOperationV3.NodeAttemptSucceeded
  * @since 4.0.0
  */
 export const NodeAttemptApplicationFailed = SemanticOperationV3.NodeAttemptApplicationFailed
+
+/**
+ * The decoded type of {@link NodeAttemptApplicationFailed}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
 export type NodeAttemptApplicationFailed = SemanticOperationV3.NodeAttemptApplicationFailed
 
 /**
@@ -77,7 +97,145 @@ export type NodeAttemptApplicationFailed = SemanticOperationV3.NodeAttemptApplic
  * @since 4.0.0
  */
 export const NodeAttemptOutcome = SemanticOperationV3.NodeAttemptOutcome
+
+/**
+ * The decoded type of {@link NodeAttemptOutcome}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
 export type NodeAttemptOutcome = SemanticOperationV3.NodeAttemptOutcome
+
+/**
+ * Canonical managed-attempt timeout outcome.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const NodeAttemptTimedOut = SemanticOperationV3.NodeAttemptTimedOut
+
+/**
+ * The decoded type of {@link NodeAttemptTimedOut}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type NodeAttemptTimedOut = SemanticOperationV3.NodeAttemptTimedOut
+
+const ScheduleToStartArmedStruct = Schema.TaggedStruct("Armed", {
+  armVersion: Schema.Literal(1),
+  activityDigest: Wire.OperationDigest,
+  attempt: Wire.PositiveSafeInt,
+  timerOperationDigest: Wire.OperationDigest,
+  armedAt: Wire.Timestamp,
+  deadline: Wire.Timestamp,
+  durationMillis: Wire.PositiveSemanticDelayMillis
+})
+
+const ScheduleToStartArmed = ScheduleToStartArmedStruct.check(
+  Schema.makeFilter((armed) => {
+    const start = Date.parse(armed.armedAt)
+    const deadline = Date.parse(armed.deadline)
+    return Number.isSafeInteger(start) &&
+        Number.isSafeInteger(deadline) &&
+        deadline - start === armed.durationMillis
+      ? []
+      : [{
+        path: ["deadline"],
+        issue: "schedule-to-start deadline must equal armedAt plus durationMillis"
+      }]
+  })
+).annotate({
+  identifier: "WorkflowEffectWorkflowRetryV3ScheduleToStartArmed",
+  parseOptions: strictParseOptions
+})
+
+type ScheduleToStartArmed = Schema.Schema.Type<
+  typeof ScheduleToStartArmed
+>
+
+const StartToCloseDisabled = Schema.TaggedStruct("Disabled", {})
+
+const StartToCloseScheduled = Schema.TaggedStruct("Scheduled", {
+  timerOperationDigest: Wire.OperationDigest,
+  durationMillis: Wire.PositiveSemanticDelayMillis,
+  deadline: Wire.Timestamp
+})
+
+const AttemptStartedStruct = Schema.TaggedStruct("Started", {
+  startVersion: Schema.Literal(1),
+  activityDigest: Wire.OperationDigest,
+  attempt: Wire.PositiveSafeInt,
+  startedAt: Wire.Timestamp,
+  startToClose: Schema.Union([
+    StartToCloseDisabled,
+    StartToCloseScheduled
+  ])
+})
+
+/**
+ * Canonical durable acknowledgement that one native attempt entered its
+ * worker-side activity boundary.
+ *
+ * **Details**
+ *
+ * When start-to-close is enabled, the acknowledgement commits its exact timer,
+ * duration, and absolute deadline. Redelivery therefore cannot extend the
+ * original attempt budget before re-arming the idempotent native schedule.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const AttemptStarted = AttemptStartedStruct.check(
+  Schema.makeFilter((started) => {
+    if (started.startToClose._tag === "Disabled") return []
+    const start = Date.parse(started.startedAt)
+    const deadline = Date.parse(started.startToClose.deadline)
+    return Number.isSafeInteger(start) &&
+        Number.isSafeInteger(deadline) &&
+        deadline - start === started.startToClose.durationMillis
+      ? []
+      : [{
+        path: ["startToClose", "deadline"],
+        issue: "start-to-close deadline must equal startedAt plus durationMillis"
+      }]
+  })
+).annotate({
+  identifier: "WorkflowEffectWorkflowRetryV3AttemptStarted",
+  parseOptions: strictParseOptions
+})
+
+/**
+ * The decoded type of {@link AttemptStarted}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type AttemptStarted = Schema.Schema.Type<typeof AttemptStarted>
+
+/**
+ * First-wins start gate for one exact native attempt.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const AttemptStartDecision = Schema.Union([
+  AttemptStarted,
+  NodeAttemptTimedOut
+]).annotate({
+  identifier: "WorkflowEffectWorkflowRetryV3AttemptStartDecision",
+  parseOptions: strictParseOptions
+})
+
+/**
+ * The decoded type of {@link AttemptStartDecision}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type AttemptStartDecision = Schema.Schema.Type<
+  typeof AttemptStartDecision
+>
 
 /**
  * Stable retry-composition failure codes.
@@ -91,7 +249,6 @@ export const ErrorCodes = {
   ArtifactMismatch: "ArtifactMismatch",
   UnknownNode: "UnknownNode",
   UnsupportedBlobPayload: "UnsupportedBlobPayload",
-  UnsupportedTimeoutPolicy: "UnsupportedTimeoutPolicy",
   OperationPreparationFailed: "OperationPreparationFailed",
   ActivityResolutionFailed: "ActivityResolutionFailed",
   ClockRegression: "ClockRegression"
@@ -111,7 +268,6 @@ const ErrorCode = Schema.Literals([
   ErrorCodes.ArtifactMismatch,
   ErrorCodes.UnknownNode,
   ErrorCodes.UnsupportedBlobPayload,
-  ErrorCodes.UnsupportedTimeoutPolicy,
   ErrorCodes.OperationPreparationFailed,
   ErrorCodes.ActivityResolutionFailed,
   ErrorCodes.ClockRegression
@@ -150,6 +306,12 @@ export const DefectCodes = {
   InvalidPolicyEvaluation: "InvalidPolicyEvaluation"
 } as const
 
+/**
+ * A retry-composition invariant defect code.
+ *
+ * @category models
+ * @since 4.0.0
+ */
 export type DefectCode = typeof DefectCodes[keyof typeof DefectCodes]
 
 const DefectCode = Schema.Literals([
@@ -211,6 +373,12 @@ export const ClassifierNonRetryableDecision = Schema.TaggedStruct(
   parseOptions: strictParseOptions
 })
 
+/**
+ * Closed decision vocabulary for a non-retryable application failure.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
 export const NonRetryableDecision = Schema.Union([
   ExplicitNonRetryableDecision,
   ClassifierNonRetryableDecision
@@ -237,6 +405,12 @@ export const NonRetryable = Schema.TaggedStruct("NonRetryable", {
   parseOptions: strictParseOptions
 })
 
+/**
+ * The decoded type of {@link NonRetryable}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
 export type NonRetryable = Schema.Schema.Type<typeof NonRetryable>
 
 /**
@@ -259,7 +433,95 @@ export const Exhausted = Schema.TaggedStruct("Exhausted", {
   parseOptions: strictParseOptions
 })
 
+/**
+ * The decoded type of {@link Exhausted}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
 export type Exhausted = Schema.Schema.Type<typeof Exhausted>
+
+/**
+ * A classifier rejected a retry-classifiable attempt timeout.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const AttemptTimeoutNonRetryableDecision = Schema.TaggedStruct(
+  "NonRetryable",
+  {
+    decisionVersion: Schema.Literal(1),
+    classificationActivityDigest: Wire.OperationDigest
+  }
+).annotate({
+  identifier: "WorkflowEffectWorkflowRetryV3AttemptTimeoutNonRetryableDecision",
+  parseOptions: strictParseOptions
+})
+
+/**
+ * A retry-classifiable attempt timeout exhausted an attempt or elapsed budget.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const AttemptTimeoutExhaustedDecision = Schema.TaggedStruct(
+  "Exhausted",
+  {
+    decisionVersion: Schema.Literal(1),
+    classificationActivityDigest: Wire.OperationDigest,
+    reason: ActivityPolicyV3.RetryDeniedReason
+  }
+).annotate({
+  identifier: "WorkflowEffectWorkflowRetryV3AttemptTimeoutExhaustedDecision",
+  parseOptions: strictParseOptions
+})
+
+/**
+ * Closed terminal-decision vocabulary for an attempt timeout.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const AttemptTimeoutTerminalDecision = Schema.Union([
+  AttemptTimeoutNonRetryableDecision,
+  AttemptTimeoutExhaustedDecision
+]).annotate({
+  identifier: "WorkflowEffectWorkflowRetryV3AttemptTimeoutTerminalDecision",
+  parseOptions: strictParseOptions
+})
+
+/**
+ * A schedule-to-start or start-to-close timeout that terminated the managed
+ * retry composition.
+ *
+ * **Details**
+ *
+ * Attempt timeouts are classified separately from application failures. They
+ * therefore remain an operational timeout terminal and can never be projected
+ * as a BPMN business error.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const AttemptTimedOut = Schema.TaggedStruct("AttemptTimedOut", {
+  terminalVersion: Schema.Literal(1),
+  timeout: NodeAttemptTimedOut,
+  initialObservedAt: Wire.Timestamp,
+  failedObservedAt: Wire.Timestamp,
+  elapsedMillis: Wire.SemanticDelayMillis,
+  decision: AttemptTimeoutTerminalDecision
+}).annotate({
+  identifier: "WorkflowEffectWorkflowRetryV3AttemptTimedOut",
+  parseOptions: strictParseOptions
+})
+
+/**
+ * The decoded type of {@link AttemptTimedOut}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type AttemptTimedOut = Schema.Schema.Type<typeof AttemptTimedOut>
 
 /**
  * A durable schedule-to-close deadline that won before semantic completion.
@@ -287,6 +549,12 @@ export const ScheduleToCloseTimedOut = Schema.TaggedStruct(
   parseOptions: strictParseOptions
 })
 
+/**
+ * The decoded type of {@link ScheduleToCloseTimedOut}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
 export type ScheduleToCloseTimedOut = Schema.Schema.Type<
   typeof ScheduleToCloseTimedOut
 >
@@ -300,12 +568,19 @@ export type ScheduleToCloseTimedOut = Schema.Schema.Type<
 export const TerminalFailure = Schema.Union([
   NonRetryable,
   Exhausted,
+  AttemptTimedOut,
   ScheduleToCloseTimedOut
 ]).annotate({
   identifier: "WorkflowEffectWorkflowRetryV3TerminalFailure",
   parseOptions: strictParseOptions
 })
 
+/**
+ * The decoded type of {@link TerminalFailure}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
 export type TerminalFailure = Schema.Schema.Type<
   typeof TerminalFailure
 >
@@ -321,12 +596,19 @@ export const RetryScheduleToCloseOutcome = Schema.Union([
   NodeAttemptSucceeded,
   NonRetryable,
   Exhausted,
+  AttemptTimedOut,
   ScheduleToCloseTimedOut
 ]).annotate({
   identifier: "WorkflowEffectWorkflowRetryV3ScheduleToCloseOutcome",
   parseOptions: strictParseOptions
 })
 
+/**
+ * The decoded type of {@link RetryScheduleToCloseOutcome}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
 export type RetryScheduleToCloseOutcome = Schema.Schema.Type<
   typeof RetryScheduleToCloseOutcome
 >
@@ -356,7 +638,7 @@ export type RetryExecutionOutcome = RetryScheduleToCloseOutcome
 
 const RetryScheduleToCloseWinnerStruct = Schema.Struct({
   _tag: Schema.Literal("RetryScheduleToCloseWinner"),
-  outcomeEnvelopeVersion: Schema.Literal(1),
+  outcomeEnvelopeVersion: Schema.Literal(2),
   controllerOperationDigest: Wire.OperationDigest,
   exit: Schema.Exit(
     RetryScheduleToCloseOutcome,
@@ -384,6 +666,12 @@ export const RetryScheduleToCloseWinner = RetryScheduleToCloseWinnerStruct.pipe(
   parseOptions: strictParseOptions
 })
 
+/**
+ * The decoded type of {@link RetryScheduleToCloseWinner}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
 export type RetryScheduleToCloseWinner = Schema.Schema.Type<
   typeof RetryScheduleToCloseWinner
 >
@@ -400,11 +688,13 @@ export type RetryScheduleToCloseWinner = Schema.Schema.Type<
  * @since 4.0.0
  */
 export interface PreparedRetryInvocation {
-  readonly invocationVersion: 1
+  readonly invocationVersion: 2
   readonly artifactDigest: Wire.ArtifactDigest
   readonly occurrenceDigest: Wire.OccurrenceDigest
   readonly nodeId: Wire.AtomicIdentifier
   readonly firstActivityDigest: Wire.OperationDigest
+  readonly firstScheduleToStartTimerDigest?: Wire.OperationDigest | undefined
+  readonly firstStartToCloseTimerDigest?: Wire.OperationDigest | undefined
   readonly scheduleToCloseControllerDigest?: Wire.OperationDigest | undefined
 }
 
@@ -439,6 +729,22 @@ interface PreparedAttempt {
   readonly attempt: Wire.PositiveSafeInt
   readonly operation: SemanticOperationV3.PreparedOperation
   readonly resolution: SemanticExecutableRegistryV3.ResolvedNodeAttemptActivity
+  readonly scheduleToStart: PreparedAttemptTimer | undefined
+  readonly startToClose: PreparedAttemptTimer | undefined
+}
+
+type PreparedTimerOperation = SemanticOperationV3.PreparedOperation & {
+  readonly document: Extract<
+    SemanticOperationV3.OperationDocument,
+    { readonly _tag: "Timer" }
+  >
+}
+
+interface PreparedAttemptTimer {
+  readonly operation: PreparedTimerOperation
+  readonly operationName: string
+  readonly timeoutKind: ActivityPolicyV3.AttemptTimeout["timeoutKind"]
+  readonly durationMillis: Wire.PositiveSemanticDelayMillis
 }
 
 type PreparedScheduleToCloseOperation = SemanticOperationV3.PreparedOperation & {
@@ -604,7 +910,7 @@ const builtIn = (
 ) => ({
   _tag: "BuiltIn" as const,
   contractReferenceVersion: 1 as const,
-  vocabularyVersion: 1 as const,
+  vocabularyVersion: 2 as const,
   schema
 })
 
@@ -672,6 +978,92 @@ const resolveActivity = <K extends keyof ResolutionByTag>(
     )
   })
 
+const nativeOperationName = (
+  nodeId: string,
+  operation: SemanticOperationV3.PreparedOperation
+): Effect.Effect<string, EffectWorkflowRetryError> => {
+  const coordinates = SemanticOperationV3.nativeCoordinates(operation)
+  if (Result.isFailure(coordinates)) {
+    return Effect.fail(retryError(
+      ErrorCodes.OperationPreparationFailed,
+      `Could not derive native operation coordinates: ${coordinates.failure.message}`,
+      {
+        nodeId,
+        operationId: operation.document.operationId,
+        operationDigest: operation.operationDigest
+      }
+    ))
+  }
+  const name = NativeName.name(coordinates.success)
+  return Result.isFailure(name)
+    ? Effect.fail(retryError(
+      ErrorCodes.OperationPreparationFailed,
+      `Could not derive native operation name: ${name.failure.message}`,
+      {
+        nodeId,
+        operationId: operation.document.operationId,
+        operationDigest: operation.operationDigest
+      }
+    ))
+    : Effect.succeed(name.success)
+}
+
+const prepareAttemptTimer = (
+  state: Pick<InvocationState, "occurrence" | "node">,
+  attempt: {
+    readonly attempt: Wire.PositiveSafeInt
+    readonly operation: SemanticOperationV3.PreparedOperation
+  },
+  timeoutKind: ActivityPolicyV3.AttemptTimeout["timeoutKind"],
+  durationMillis: Wire.PositiveSemanticDelayMillis
+): Effect.Effect<
+  PreparedAttemptTimer,
+  EffectWorkflowRetryError,
+  Crypto.Crypto
+> =>
+  Effect.gen(function*() {
+    const operationId = timeoutKind === "ScheduleToStart"
+      ? OperationIds.ScheduleToStart
+      : OperationIds.StartToClose
+    const operation = yield* prepareOperation(
+      state.occurrence,
+      state.node.binding.nodeId,
+      operationId,
+      {
+        _tag: "Timer",
+        operationVersion: SemanticOperationV3.OperationVersion,
+        executionProtocolVersion: SemanticOperationV3.ExecutionProtocolVersion,
+        operationId,
+        generation: attempt.attempt,
+        owner: {
+          _tag: timeoutKind,
+          activityDigest: attempt.operation.operationDigest
+        },
+        delayMillis: durationMillis
+      }
+    )
+    if (operation.document._tag !== "Timer") {
+      return yield* Effect.fail(retryError(
+        ErrorCodes.OperationPreparationFailed,
+        "Prepared attempt timeout did not retain its Timer operation",
+        {
+          nodeId: state.node.binding.nodeId,
+          operationId,
+          operationDigest: operation.operationDigest
+        }
+      ))
+    }
+    return Object.freeze({
+      operation: operation as PreparedTimerOperation,
+      operationName: yield* nativeOperationName(
+        state.node.binding.nodeId,
+        operation
+      ),
+      timeoutKind,
+      durationMillis
+    })
+  })
+
 const prepareAttempt = (
   state: Pick<
     InvocationState,
@@ -710,10 +1102,29 @@ const prepareAttempt = (
       operation,
       "NodeAttempt"
     )
+    const timeoutPolicy = state.node.binding.activityPolicy.timeouts
+    const scheduleToStart = timeoutPolicy.scheduleToStart._tag === "After"
+      ? yield* prepareAttemptTimer(
+        state,
+        { attempt, operation },
+        "ScheduleToStart",
+        timeoutPolicy.scheduleToStart.durationMillis
+      )
+      : undefined
+    const startToClose = timeoutPolicy.startToClose._tag === "After"
+      ? yield* prepareAttemptTimer(
+        state,
+        { attempt, operation },
+        "StartToClose",
+        timeoutPolicy.startToClose.durationMillis
+      )
+      : undefined
     return Object.freeze({
       attempt,
       operation,
-      resolution
+      resolution,
+      scheduleToStart,
+      startToClose
     })
   })
 
@@ -765,7 +1176,7 @@ const prepareTimeObservation = (
 const prepareClassifier = (
   state: InvocationState,
   attempt: PreparedAttempt,
-  failure: ActivityPolicyV3.ApplicationFailure
+  failure: ActivityPolicyV3.RetryFailureCause
 ): Effect.Effect<
   SemanticExecutableRegistryV3.ResolvedRetryClassifierActivity,
   EffectWorkflowRetryError,
@@ -895,7 +1306,7 @@ const prepareScheduleToClose = (
         executionProtocolVersion: SemanticOperationV3.ExecutionProtocolVersion,
         operationId: OperationIds.ScheduleToClose,
         generation: 0,
-        controllerVersion: 1,
+        controllerVersion: 2,
         firstActivityDigest: firstAttempt.operation.operationDigest,
         initialObservationDigest: initialObservation.operation.operationDigest,
         nodeDefinitionKey: state.node.binding.nodeDefinitionKey,
@@ -950,18 +1361,6 @@ const prepareScheduleToClose = (
     })
   })
 
-const unsupportedTimeout = (
-  policy: ActivityPolicyV3.TimeoutPolicy
-): string | undefined => {
-  if (policy.scheduleToStart._tag !== "Disabled") {
-    return "scheduleToStart"
-  }
-  if (policy.startToClose._tag !== "Disabled") {
-    return "startToClose"
-  }
-  return undefined
-}
-
 /**
  * Prepares an exact process-local retry invocation.
  *
@@ -969,9 +1368,10 @@ const unsupportedTimeout = (
  *
  * The three capability-bearing options are captured through own data-property
  * descriptors before any value is read. Getters, symbols, extra properties,
- * exotic prototypes, copied capabilities, blobs, schedule-to-start, and
- * start-to-close timeouts fail closed. An exact schedule-to-close policy is
- * compiled into a dedicated durable controller.
+ * exotic prototypes, copied capabilities, and blobs fail closed. Exact
+ * schedule-to-start and start-to-close timers are prepared per attempt, while
+ * an enabled schedule-to-close policy is compiled into a dedicated durable
+ * controller.
  *
  * @category constructors
  * @since 4.0.0
@@ -1024,17 +1424,6 @@ export const prepare = (
       { nodeId: occurrence.document.nodeId }
     ))
   }
-  const timeout = unsupportedTimeout(
-    node.binding.activityPolicy.timeouts
-  )
-  if (timeout !== undefined) {
-    return Effect.fail(retryError(
-      ErrorCodes.UnsupportedTimeoutPolicy,
-      `Timeout '${timeout}' is enabled but is not implemented by the durable retry facade`,
-      { nodeId: node.binding.nodeId }
-    ))
-  }
-
   const snapshot = Json.snapshot(captured.success.input)
   if (Result.isFailure(snapshot)) {
     return Effect.fail(retryError(
@@ -1096,11 +1485,21 @@ export const prepare = (
       )
       : undefined
     const invocation = Object.freeze({
-      invocationVersion: 1,
+      invocationVersion: 2,
       artifactDigest: artifact.artifactDigest,
       occurrenceDigest: occurrence.occurrenceDigest,
       nodeId: node.binding.nodeId,
       firstActivityDigest: firstAttempt.operation.operationDigest,
+      ...(firstAttempt.scheduleToStart === undefined
+        ? undefined
+        : {
+          firstScheduleToStartTimerDigest: firstAttempt.scheduleToStart.operation.operationDigest
+        }),
+      ...(firstAttempt.startToClose === undefined
+        ? undefined
+        : {
+          firstStartToCloseTimerDigest: firstAttempt.startToClose.operation.operationDigest
+        }),
       ...(scheduleToClose === undefined
         ? undefined
         : {
@@ -1258,6 +1657,314 @@ const exhaustedTerminal = (
     reason
   })
 
+const classifiedTimeoutTerminal = (
+  timeout: NodeAttemptTimedOut,
+  initialObservedAt: Wire.Timestamp,
+  failedObservedAt: Wire.Timestamp,
+  elapsedMillis: Wire.SemanticDelayMillis,
+  classifier: SemanticExecutableRegistryV3.ResolvedRetryClassifierActivity
+): AttemptTimedOut =>
+  Object.freeze({
+    _tag: "AttemptTimedOut",
+    terminalVersion: 1,
+    timeout,
+    initialObservedAt,
+    failedObservedAt,
+    elapsedMillis,
+    decision: {
+      _tag: "NonRetryable" as const,
+      decisionVersion: 1 as const,
+      classificationActivityDigest: classifier.operation.operationDigest
+    }
+  })
+
+const exhaustedTimeoutTerminal = (
+  timeout: NodeAttemptTimedOut,
+  initialObservedAt: Wire.Timestamp,
+  failedObservedAt: Wire.Timestamp,
+  elapsedMillis: Wire.SemanticDelayMillis,
+  classifier: SemanticExecutableRegistryV3.ResolvedRetryClassifierActivity,
+  reason: ActivityPolicyV3.RetryDeniedReason
+): AttemptTimedOut =>
+  Object.freeze({
+    _tag: "AttemptTimedOut",
+    terminalVersion: 1,
+    timeout,
+    initialObservedAt,
+    failedObservedAt,
+    elapsedMillis,
+    decision: {
+      _tag: "Exhausted" as const,
+      decisionVersion: 1 as const,
+      classificationActivityDigest: classifier.operation.operationDigest,
+      reason
+    }
+  })
+
+const attemptProtocolError = (
+  state: InvocationState,
+  attempt: PreparedAttempt,
+  message: string
+): EffectWorkflowRetryError =>
+  retryError(
+    ErrorCodes.OperationPreparationFailed,
+    message,
+    {
+      nodeId: state.node.binding.nodeId,
+      operationId: attempt.operation.document.operationId,
+      operationDigest: attempt.operation.operationDigest
+    }
+  )
+
+const dateTimeAt = (
+  state: InvocationState,
+  attempt: PreparedAttempt,
+  millis: number
+): Effect.Effect<
+  { readonly dateTime: DateTime.Utc; readonly timestamp: Wire.Timestamp },
+  EffectWorkflowRetryError
+> =>
+  Effect.try({
+    try: () => {
+      if (!Number.isSafeInteger(millis)) {
+        throw new RangeError("Unsafe epoch milliseconds")
+      }
+      const dateTime = DateTime.makeUnsafe(millis)
+      return {
+        dateTime,
+        timestamp: DateTime.formatIso(dateTime) as Wire.Timestamp
+      }
+    },
+    catch: () =>
+      attemptProtocolError(
+        state,
+        attempt,
+        "Attempt timeout deadline could not be represented as canonical UTC milliseconds"
+      )
+  })
+
+const deadlineFromStart = (
+  state: InvocationState,
+  attempt: PreparedAttempt,
+  startedAtMillis: number,
+  durationMillis: Wire.PositiveSemanticDelayMillis
+): Effect.Effect<
+  {
+    readonly startedAt: Wire.Timestamp
+    readonly deadline: Wire.Timestamp
+    readonly wakeUp: DateTime.Utc
+  },
+  EffectWorkflowRetryError
+> =>
+  Effect.gen(function*() {
+    const started = yield* dateTimeAt(
+      state,
+      attempt,
+      startedAtMillis
+    )
+    const deadline = yield* dateTimeAt(
+      state,
+      attempt,
+      startedAtMillis + durationMillis
+    )
+    return {
+      startedAt: started.timestamp,
+      deadline: deadline.timestamp,
+      wakeUp: deadline.dateTime
+    }
+  })
+
+const deadlineFromNow = (
+  state: InvocationState,
+  attempt: PreparedAttempt,
+  durationMillis: Wire.PositiveSemanticDelayMillis
+): Effect.Effect<
+  {
+    readonly startedAt: Wire.Timestamp
+    readonly deadline: Wire.Timestamp
+    readonly wakeUp: DateTime.Utc
+  },
+  EffectWorkflowRetryError
+> =>
+  Effect.flatMap(
+    Clock.currentTimeMillis,
+    (now) =>
+      deadlineFromStart(
+        state,
+        attempt,
+        now,
+        durationMillis
+      )
+  )
+
+const attemptPhaseName = (
+  state: InvocationState,
+  attempt: PreparedAttempt,
+  operationId: string
+): Effect.Effect<string, EffectWorkflowRetryError> => {
+  const result = NativeName.name({
+    _tag: "Deferred",
+    coordinateVersion: NativeName.CoordinateVersion,
+    occurrenceDigest: state.occurrence.occurrenceDigest,
+    operationId,
+    generation: attempt.attempt
+  })
+  return Result.isFailure(result)
+    ? Effect.fail(attemptProtocolError(
+      state,
+      attempt,
+      `Could not derive bounded attempt handshake name: ${result.failure.message}`
+    ))
+    : Effect.succeed(result.success)
+}
+
+const timeoutFor = (
+  attempt: PreparedAttempt,
+  timer: PreparedAttemptTimer,
+  deadline: Wire.Timestamp
+): NodeAttemptTimedOut =>
+  Object.freeze({
+    _tag: "TimedOut",
+    outcomeVersion: 2,
+    attempt: attempt.attempt,
+    activityDigest: attempt.operation.operationDigest,
+    timeout: {
+      _tag: "AttemptTimeout" as const,
+      failureCauseVersion: 1 as const,
+      activityDigest: attempt.operation.operationDigest,
+      attempt: attempt.attempt,
+      timeoutKind: timer.timeoutKind
+    },
+    timerOperationDigest: timer.operation.operationDigest,
+    deadline,
+    durationMillis: timer.durationMillis
+  })
+
+const validateScheduleToStartArmed = (
+  state: InvocationState,
+  attempt: PreparedAttempt,
+  armed: ScheduleToStartArmed
+): Effect.Effect<void, EffectWorkflowRetryError> => {
+  const timer = attempt.scheduleToStart
+  if (
+    timer === undefined ||
+    armed.attempt !== attempt.attempt ||
+    armed.activityDigest !== attempt.operation.operationDigest ||
+    armed.timerOperationDigest !== timer.operation.operationDigest ||
+    armed.durationMillis !== timer.durationMillis
+  ) {
+    return Effect.fail(attemptProtocolError(
+      state,
+      attempt,
+      "Persisted schedule-to-start arm does not match its exact activity, timer, or duration"
+    ))
+  }
+  return Effect.void
+}
+
+const timerForTimeout = (
+  attempt: PreparedAttempt,
+  timeoutKind: ActivityPolicyV3.AttemptTimeout["timeoutKind"]
+): PreparedAttemptTimer | undefined =>
+  timeoutKind === "ScheduleToStart"
+    ? attempt.scheduleToStart
+    : attempt.startToClose
+
+const validateAttemptTimeout = (
+  state: InvocationState,
+  attempt: PreparedAttempt,
+  timeout: NodeAttemptTimedOut,
+  expectedDeadline?: Wire.Timestamp | undefined
+): Effect.Effect<void, EffectWorkflowRetryError> => {
+  const timer = timerForTimeout(
+    attempt,
+    timeout.timeout.timeoutKind
+  )
+  if (
+    timer === undefined ||
+    timeout.attempt !== attempt.attempt ||
+    timeout.activityDigest !== attempt.operation.operationDigest ||
+    timeout.timeout.attempt !== attempt.attempt ||
+    timeout.timeout.activityDigest !==
+      attempt.operation.operationDigest ||
+    timeout.timerOperationDigest !==
+      timer.operation.operationDigest ||
+    timeout.durationMillis !== timer.durationMillis ||
+    (expectedDeadline !== undefined &&
+      timeout.deadline !== expectedDeadline)
+  ) {
+    return Effect.fail(attemptProtocolError(
+      state,
+      attempt,
+      "Persisted attempt timeout does not match its exact activity, timer, duration, or deadline"
+    ))
+  }
+  return Effect.void
+}
+
+const validateAttemptStarted = (
+  state: InvocationState,
+  attempt: PreparedAttempt,
+  started: AttemptStarted
+): Effect.Effect<void, EffectWorkflowRetryError> => {
+  if (
+    started.attempt !== attempt.attempt ||
+    started.activityDigest !== attempt.operation.operationDigest
+  ) {
+    return Effect.fail(attemptProtocolError(
+      state,
+      attempt,
+      "Persisted start acknowledgement belongs to a different managed attempt"
+    ))
+  }
+  if (attempt.startToClose === undefined) {
+    return started.startToClose._tag === "Disabled"
+      ? Effect.void
+      : Effect.fail(attemptProtocolError(
+        state,
+        attempt,
+        "Persisted start acknowledgement arms an unconfigured start-to-close timeout"
+      ))
+  }
+  return started.startToClose._tag === "Scheduled" &&
+      started.startToClose.timerOperationDigest ===
+        attempt.startToClose.operation.operationDigest &&
+      started.startToClose.durationMillis ===
+        attempt.startToClose.durationMillis
+    ? Effect.void
+    : Effect.fail(attemptProtocolError(
+      state,
+      attempt,
+      "Persisted start acknowledgement does not match its exact start-to-close timer"
+    ))
+}
+
+const validateAttemptOutcome = (
+  state: InvocationState,
+  attempt: PreparedAttempt,
+  outcome: NodeAttemptOutcome,
+  expectedTimeoutDeadline?: Wire.Timestamp | undefined
+): Effect.Effect<void, EffectWorkflowRetryError> => {
+  if (
+    outcome.attempt !== attempt.attempt ||
+    outcome.activityDigest !== attempt.operation.operationDigest
+  ) {
+    return Effect.fail(attemptProtocolError(
+      state,
+      attempt,
+      "Persisted attempt terminal belongs to a different managed attempt"
+    ))
+  }
+  return outcome._tag === "TimedOut"
+    ? validateAttemptTimeout(
+      state,
+      attempt,
+      outcome,
+      expectedTimeoutDeadline
+    )
+    : Effect.void
+}
+
 type RetryTimer = (
   operation: SemanticOperationV3.PreparedOperation
 ) => Effect.Effect<
@@ -1272,6 +1979,596 @@ type AttemptFence = () => Effect.Effect<
   never,
   EffectWorkflowSemanticV3.Requirements
 >
+
+const executeAttempt = (
+  state: InvocationState,
+  attempt: PreparedAttempt,
+  options: ExecutionOptions
+): Effect.Effect<
+  NodeAttemptOutcome,
+  | EffectWorkflowRetryError
+  | EffectWorkflowSemanticV3.EffectWorkflowSemanticError,
+  EffectWorkflowSemanticV3.Requirements
+> => {
+  if (
+    attempt.scheduleToStart === undefined &&
+    attempt.startToClose === undefined
+  ) {
+    return EffectWorkflowSemanticV3.nodeAttempt(
+      attempt.resolution,
+      options
+    )
+  }
+
+  return Effect.gen(function*() {
+    // Bind every descriptor before arming the queue deadline. Descriptor
+    // admission work is not part of the user activity's schedule-to-start
+    // interval, and replay must reject drift before reading a cached winner.
+    yield* EffectWorkflowSemanticV3.bind(attempt.operation)
+    if (attempt.scheduleToStart !== undefined) {
+      yield* EffectWorkflowSemanticV3.bind(
+        attempt.scheduleToStart.operation
+      )
+    }
+    if (attempt.startToClose !== undefined) {
+      yield* EffectWorkflowSemanticV3.bind(
+        attempt.startToClose.operation
+      )
+    }
+
+    const instance = yield* NativeWorkflowEngine.WorkflowInstance
+    const startGate = NativeDeferred.make(
+      yield* attemptPhaseName(
+        state,
+        attempt,
+        OperationIds.AttemptStart
+      ),
+      {
+        success: AttemptStartDecision,
+        error: Schema.Never
+      }
+    )
+    const scheduleToStartArmGate = attempt.scheduleToStart === undefined
+      ? undefined
+      : NativeDeferred.make(
+        yield* attemptPhaseName(
+          state,
+          attempt,
+          OperationIds.ScheduleToStartArm
+        ),
+        {
+          success: ScheduleToStartArmed,
+          error: Schema.Never
+        }
+      )
+    const terminalGate = NativeDeferred.make(
+      yield* attemptPhaseName(
+        state,
+        attempt,
+        OperationIds.AttemptTerminal
+      ),
+      {
+        success: NodeAttemptOutcome,
+        error: EffectWorkflowSemanticV3.EffectWorkflowSemanticError
+      }
+    )
+    const startToken = NativeDeferred.tokenFromExecutionId(
+      startGate,
+      {
+        workflow: instance.workflow,
+        executionId: instance.executionId
+      }
+    )
+    const scheduleToStartArmToken = scheduleToStartArmGate === undefined
+      ? undefined
+      : NativeDeferred.tokenFromExecutionId(
+        scheduleToStartArmGate,
+        {
+          workflow: instance.workflow,
+          executionId: instance.executionId
+        }
+      )
+    const terminalToken = NativeDeferred.tokenFromExecutionId(
+      terminalGate,
+      {
+        workflow: instance.workflow,
+        executionId: instance.executionId
+      }
+    )
+
+    let scheduleToStartArmed:
+      | ScheduleToStartArmed
+      | undefined
+    const validateStartDecisionTimeout = (
+      timeout: NodeAttemptTimedOut
+    ): Effect.Effect<void, EffectWorkflowRetryError> => {
+      if (
+        timeout.timeout.timeoutKind !== "ScheduleToStart" ||
+        scheduleToStartArmed === undefined
+      ) {
+        return Effect.fail(attemptProtocolError(
+          state,
+          attempt,
+          "Persisted start-gate timeout is not the exact canonical schedule-to-start decision"
+        ))
+      }
+      return validateAttemptTimeout(
+        state,
+        attempt,
+        timeout,
+        scheduleToStartArmed.deadline
+      )
+    }
+    const expectedTimeoutDeadlineFor = (
+      outcome: NodeAttemptOutcome
+    ): Effect.Effect<
+      Wire.Timestamp | undefined,
+      EffectWorkflowRetryError,
+      NativeWorkflowEngine.WorkflowEngine
+    > => {
+      if (outcome._tag !== "TimedOut") {
+        return Effect.succeed(undefined)
+      }
+      if (outcome.timeout.timeoutKind === "ScheduleToStart") {
+        return scheduleToStartArmed === undefined
+          ? Effect.fail(attemptProtocolError(
+            state,
+            attempt,
+            "Persisted schedule-to-start timeout has no canonical arm acknowledgement"
+          ))
+          : Effect.succeed(scheduleToStartArmed.deadline)
+      }
+      return Effect.gen(function*() {
+        const recordedStart = yield* NativeDeferred.poll(
+          startGate,
+          { token: startToken }
+        )
+        if (Option.isNone(recordedStart)) {
+          return yield* Effect.fail(attemptProtocolError(
+            state,
+            attempt,
+            "Persisted start-to-close timeout has no canonical start acknowledgement"
+          ))
+        }
+        const decision = yield* recordedStart.value
+        if (decision._tag !== "Started") {
+          return yield* Effect.fail(attemptProtocolError(
+            state,
+            attempt,
+            "Persisted start-to-close timeout is paired with a non-start decision"
+          ))
+        }
+        yield* validateAttemptStarted(state, attempt, decision)
+        if (decision.startToClose._tag !== "Scheduled") {
+          return yield* Effect.fail(attemptProtocolError(
+            state,
+            attempt,
+            "Persisted start-to-close timeout is paired with a disabled start-to-close acknowledgement"
+          ))
+        }
+        return decision.startToClose.deadline
+      })
+    }
+    const readTerminal = Effect.gen(function*() {
+      const recorded = yield* NativeDeferred.poll(
+        terminalGate,
+        { token: terminalToken }
+      )
+      if (Option.isNone(recorded)) return Option.none()
+      if (Exit.isSuccess(recorded.value)) {
+        const expectedTimeoutDeadline = yield* expectedTimeoutDeadlineFor(recorded.value.value)
+        yield* validateAttemptOutcome(
+          state,
+          attempt,
+          recorded.value.value,
+          expectedTimeoutDeadline
+        )
+      }
+      return recorded
+    })
+
+    if (
+      attempt.scheduleToStart !== undefined &&
+      scheduleToStartArmGate !== undefined &&
+      scheduleToStartArmToken !== undefined
+    ) {
+      const clock = yield* deadlineFromNow(
+        state,
+        attempt,
+        attempt.scheduleToStart.durationMillis
+      )
+      const armedExit = yield* NativeDeferred.resolve(
+        scheduleToStartArmGate,
+        {
+          token: scheduleToStartArmToken,
+          exit: Exit.succeed({
+            _tag: "Armed",
+            armVersion: 1,
+            activityDigest: attempt.operation.operationDigest,
+            attempt: attempt.attempt,
+            timerOperationDigest: attempt.scheduleToStart.operation.operationDigest,
+            armedAt: clock.startedAt,
+            deadline: clock.deadline,
+            durationMillis: attempt.scheduleToStart.durationMillis
+          })
+        }
+      )
+      scheduleToStartArmed = yield* armedExit
+      yield* validateScheduleToStartArmed(
+        state,
+        attempt,
+        scheduleToStartArmed
+      )
+      const wakeUp = yield* dateTimeAt(
+        state,
+        attempt,
+        Date.parse(scheduleToStartArmed.deadline)
+      )
+      yield* NativeClock.schedule(startGate, {
+        token: startToken,
+        scheduleId: attempt.scheduleToStart.operationName,
+        wakeUp: wakeUp.dateTime,
+        value: timeoutFor(
+          attempt,
+          attempt.scheduleToStart,
+          scheduleToStartArmed.deadline
+        )
+      })
+    }
+
+    const recorded = yield* readTerminal
+    if (Option.isSome(recorded)) {
+      return yield* recorded.value
+    }
+
+    const startGateEffect = Effect.gen(function*() {
+      const recorded = yield* NativeDeferred.poll(
+        startGate,
+        { token: startToken }
+      )
+      let canonical: AttemptStartDecision
+      if (Option.isSome(recorded)) {
+        canonical = yield* recorded.value
+      } else {
+        const observedAt = yield* Clock.currentTimeMillis
+        if (
+          scheduleToStartArmed !== undefined &&
+          attempt.scheduleToStart !== undefined &&
+          observedAt >= Date.parse(scheduleToStartArmed.deadline)
+        ) {
+          const canonicalExit = yield* NativeDeferred.resolve(
+            startGate,
+            {
+              token: startToken,
+              exit: Exit.succeed(timeoutFor(
+                attempt,
+                attempt.scheduleToStart,
+                scheduleToStartArmed.deadline
+              ))
+            }
+          )
+          canonical = yield* canonicalExit
+        } else {
+          const startedClock = attempt.startToClose === undefined
+            ? undefined
+            : yield* deadlineFromStart(
+              state,
+              attempt,
+              observedAt,
+              attempt.startToClose.durationMillis
+            )
+          const candidate = Object.freeze({
+            _tag: "Started" as const,
+            startVersion: 1 as const,
+            activityDigest: attempt.operation.operationDigest,
+            attempt: attempt.attempt,
+            startedAt: startedClock === undefined
+              ? (yield* dateTimeAt(
+                state,
+                attempt,
+                observedAt
+              )).timestamp
+              : startedClock.startedAt,
+            startToClose: startedClock === undefined
+              ? { _tag: "Disabled" as const }
+              : {
+                _tag: "Scheduled" as const,
+                timerOperationDigest: attempt.startToClose!.operation.operationDigest,
+                durationMillis: attempt.startToClose!.durationMillis,
+                deadline: startedClock.deadline
+              }
+          }) satisfies AttemptStarted
+          const canonicalExit = yield* NativeDeferred.resolve(
+            startGate,
+            {
+              token: startToken,
+              exit: Exit.succeed(candidate)
+            }
+          )
+          canonical = yield* canonicalExit
+        }
+      }
+      if (canonical._tag === "TimedOut") {
+        yield* validateStartDecisionTimeout(canonical)
+        return canonical
+      }
+      yield* validateAttemptStarted(
+        state,
+        attempt,
+        canonical
+      )
+
+      if (
+        canonical.startToClose._tag === "Scheduled" &&
+        attempt.startToClose !== undefined
+      ) {
+        const wakeUp = yield* dateTimeAt(
+          state,
+          attempt,
+          Date.parse(canonical.startToClose.deadline)
+        )
+        const timeout = timeoutFor(
+          attempt,
+          attempt.startToClose,
+          canonical.startToClose.deadline
+        )
+        yield* NativeClock.schedule(terminalGate, {
+          token: terminalToken,
+          scheduleId: attempt.startToClose.operationName,
+          wakeUp: wakeUp.dateTime,
+          value: timeout
+        })
+
+        // Re-delivery after a crash must not run user code merely because the
+        // durable timer delivery is a little late. The canonical start
+        // acknowledgement itself carries the absolute deadline.
+        if (
+          (yield* Clock.currentTimeMillis) >=
+            Date.parse(canonical.startToClose.deadline)
+        ) {
+          const terminal = yield* NativeDeferred.resolve(
+            terminalGate,
+            {
+              token: terminalToken,
+              exit: Exit.succeed(timeout)
+            }
+          )
+          if (
+            Exit.isSuccess(terminal) &&
+            terminal.value._tag === "TimedOut"
+          ) {
+            yield* validateAttemptTimeout(
+              state,
+              attempt,
+              terminal.value,
+              canonical.startToClose.deadline
+            )
+            return terminal.value
+          }
+          if (Exit.isFailure(terminal)) {
+            return yield* Effect.die(terminal.cause)
+          }
+        }
+      }
+      return undefined
+    })
+
+    const expectedStartGateTimeout = Effect.gen(function*() {
+      const recorded = yield* NativeDeferred.poll(
+        startGate,
+        { token: startToken }
+      )
+      if (Option.isNone(recorded)) return undefined
+      const decision = yield* recorded.value
+      if (decision._tag === "TimedOut") {
+        const timer = attempt.scheduleToStart
+        const armed = scheduleToStartArmed
+        if (timer === undefined || armed === undefined) {
+          return yield* Effect.fail(attemptProtocolError(
+            state,
+            attempt,
+            "Canonical start-gate timeout has no matching schedule-to-start arm"
+          ))
+        }
+        yield* validateStartDecisionTimeout(decision)
+        return timeoutFor(
+          attempt,
+          timer,
+          armed.deadline
+        )
+      }
+      yield* validateAttemptStarted(state, attempt, decision)
+      if (
+        decision.startToClose._tag === "Scheduled" &&
+        attempt.startToClose !== undefined
+      ) {
+        return timeoutFor(
+          attempt,
+          attempt.startToClose,
+          decision.startToClose.deadline
+        )
+      }
+      return undefined
+    })
+
+    const terminalOutcomeFor = (
+      outcome: NodeAttemptOutcome
+    ): Effect.Effect<
+      NodeAttemptOutcome,
+      EffectWorkflowRetryError,
+      NativeWorkflowEngine.WorkflowEngine
+    > =>
+      Effect.gen(function*() {
+        const expectedTimeoutDeadline = yield* expectedTimeoutDeadlineFor(outcome)
+        yield* validateAttemptOutcome(
+          state,
+          attempt,
+          outcome,
+          expectedTimeoutDeadline
+        )
+        if (outcome._tag === "TimedOut") return outcome
+        const recorded = yield* NativeDeferred.poll(
+          startGate,
+          { token: startToken }
+        )
+        if (Option.isNone(recorded)) {
+          return yield* Effect.fail(attemptProtocolError(
+            state,
+            attempt,
+            "Managed activity completed without a canonical start acknowledgement"
+          ))
+        }
+        const started = yield* recorded.value
+        if (started._tag === "TimedOut") {
+          yield* validateStartDecisionTimeout(started)
+          return started
+        }
+        yield* validateAttemptStarted(
+          state,
+          attempt,
+          started
+        )
+        if (
+          started.startToClose._tag === "Scheduled" &&
+          attempt.startToClose !== undefined
+        ) {
+          const completedAt = Date.parse(outcome.completedAt)
+          const startedAt = Date.parse(started.startedAt)
+          const deadline = Date.parse(
+            started.startToClose.deadline
+          )
+          if (
+            !Number.isSafeInteger(completedAt) ||
+            !Number.isSafeInteger(startedAt) ||
+            !Number.isSafeInteger(deadline)
+          ) {
+            return yield* Effect.fail(attemptProtocolError(
+              state,
+              attempt,
+              "Managed activity start, completion, or start-to-close deadline is not a safe canonical timestamp"
+            ))
+          }
+          if (completedAt < startedAt) {
+            return yield* Effect.fail(attemptProtocolError(
+              state,
+              attempt,
+              "Managed activity completion precedes its canonical start acknowledgement"
+            ))
+          }
+          if (completedAt >= deadline) {
+            return timeoutFor(
+              attempt,
+              attempt.startToClose,
+              started.startToClose.deadline
+            )
+          }
+        }
+        return outcome
+      })
+
+    const activity = EffectWorkflowSemanticV3
+      .nodeAttemptWithStartGate(
+        attempt.resolution,
+        {
+          interruptRetryPolicy: options.interruptRetryPolicy,
+          expectedTimeout: expectedStartGateTimeout.pipe(
+            Effect.orDie
+          ),
+          startGate: startGateEffect.pipe(Effect.orDie)
+        }
+      )
+
+    const publishActivity = Effect.flatMap(
+      activity,
+      (outcome) => terminalOutcomeFor(outcome).pipe(Effect.orDie)
+    ).pipe(
+      Effect.matchCauseEffect({
+        onFailure: (cause) => {
+          if (Cause.hasInterruptsOnly(cause)) {
+            return Effect.failCause(cause)
+          }
+          const reasons = cause.reasons.filter(
+            (reason) => !Cause.isInterruptReason(reason)
+          )
+          if (reasons.length === 0) {
+            return Effect.failCause(cause)
+          }
+          return NativeDeferred.resolve(terminalGate, {
+            token: terminalToken,
+            exit: Exit.failCause(Cause.fromReasons(reasons))
+          }).pipe(Effect.asVoid)
+        },
+        onSuccess: (outcome) =>
+          NativeDeferred.resolve(terminalGate, {
+            token: terminalToken,
+            exit: Exit.succeed(outcome)
+          }).pipe(Effect.asVoid)
+      })
+    )
+    const activityFiber = yield* publishActivity.pipe(
+      Effect.forkDetach({ startImmediately: true })
+    )
+
+    return yield* Effect.gen(function*() {
+      let immediatePolls = 0
+      let nextDelay = MinimumDeferredPollMillis
+      while (true) {
+        const terminal = yield* readTerminal
+        if (Option.isSome(terminal)) {
+          return yield* terminal.value
+        }
+        if (attempt.scheduleToStart !== undefined) {
+          const start = yield* NativeDeferred.poll(
+            startGate,
+            { token: startToken }
+          )
+          if (Option.isSome(start)) {
+            const decision = yield* start.value
+            if (decision._tag === "TimedOut") {
+              yield* validateStartDecisionTimeout(decision)
+              const canonical = yield* NativeDeferred.resolve(
+                terminalGate,
+                {
+                  token: terminalToken,
+                  exit: Exit.succeed(decision)
+                }
+              )
+              if (Exit.isSuccess(canonical)) {
+                const expectedTimeoutDeadline = yield* expectedTimeoutDeadlineFor(canonical.value)
+                yield* validateAttemptOutcome(
+                  state,
+                  attempt,
+                  canonical.value,
+                  expectedTimeoutDeadline
+                )
+              }
+              return yield* canonical
+            }
+            yield* validateAttemptStarted(
+              state,
+              attempt,
+              decision
+            )
+          }
+        }
+        if (immediatePolls < ImmediateDeferredPolls) {
+          immediatePolls++
+          yield* Effect.yieldNow
+          continue
+        }
+        yield* Effect.sleep(Duration.millis(nextDelay))
+        nextDelay = Math.min(
+          nextDelay * 2,
+          MaximumDeferredPollMillis
+        )
+      }
+    }).pipe(
+      Effect.ensuring(
+        Effect.sync(() => activityFiber.interruptUnsafe())
+      )
+    )
+  })
+}
 
 const retryLoop = (
   state: InvocationState,
@@ -1299,14 +2596,17 @@ const retryLoop = (
         const timedOut = yield* attemptFence()
         if (timedOut !== undefined) return timedOut
       }
-      const outcome = yield* EffectWorkflowSemanticV3.nodeAttempt(
-        attempt.resolution,
+      const outcome = yield* executeAttempt(
+        state,
+        attempt,
         options
       )
       if (outcome._tag === "Succeeded") {
         return outcome
       }
-      const failure = outcome.failure
+      const failure = outcome._tag === "ApplicationFailed"
+        ? outcome.failure
+        : outcome.timeout
       const failureObservation = yield* prepareTimeObservation(state, {
         operationId: OperationIds.FailureTime,
         attempt: attempt.attempt,
@@ -1324,28 +2624,30 @@ const retryLoop = (
           failedObservedAt
         )
       )
-      const disposition = ActivityPolicyV3.failureDisposition(
-        state.node.binding.activityPolicy,
-        failure.identity
-      )
-      if (Result.isFailure(disposition)) {
-        return yield* Effect.die(retryDefect(
-          attempt,
-          DefectCodes.InvalidPolicyEvaluation,
-          `Failure disposition evaluation failed: ${disposition.failure.message}`
-        ))
-      }
-      if (
-        disposition.success._tag ===
-          "ExplicitNonRetryable"
-      ) {
-        return explicitTerminal(
-          failure,
-          initialObservedAt,
-          failedObservedAt,
-          elapsedMillis,
-          disposition.success
+      if (failure._tag === "ApplicationFailure") {
+        const disposition = ActivityPolicyV3.failureDisposition(
+          state.node.binding.activityPolicy,
+          failure.identity
         )
+        if (Result.isFailure(disposition)) {
+          return yield* Effect.die(retryDefect(
+            attempt,
+            DefectCodes.InvalidPolicyEvaluation,
+            `Failure disposition evaluation failed: ${disposition.failure.message}`
+          ))
+        }
+        if (
+          disposition.success._tag ===
+            "ExplicitNonRetryable"
+        ) {
+          return explicitTerminal(
+            failure,
+            initialObservedAt,
+            failedObservedAt,
+            elapsedMillis,
+            disposition.success
+          )
+        }
       }
 
       const classifier = yield* prepareClassifier(
@@ -1358,13 +2660,21 @@ const retryLoop = (
         options
       )
       if (classification._tag === "NonRetryable") {
-        return classifiedTerminal(
-          failure,
-          initialObservedAt,
-          failedObservedAt,
-          elapsedMillis,
-          classifier
-        )
+        return outcome._tag === "TimedOut"
+          ? classifiedTimeoutTerminal(
+            outcome,
+            initialObservedAt,
+            failedObservedAt,
+            elapsedMillis,
+            classifier
+          )
+          : classifiedTerminal(
+            failure as ActivityPolicyV3.ApplicationFailure,
+            initialObservedAt,
+            failedObservedAt,
+            elapsedMillis,
+            classifier
+          )
       }
 
       const delayInput = {
@@ -1384,14 +2694,23 @@ const retryLoop = (
         ))
       }
       if (decision.success._tag === "DoNotRetry") {
-        return exhaustedTerminal(
-          failure,
-          initialObservedAt,
-          failedObservedAt,
-          elapsedMillis,
-          classifier,
-          decision.success.reason
-        )
+        return outcome._tag === "TimedOut"
+          ? exhaustedTimeoutTerminal(
+            outcome,
+            initialObservedAt,
+            failedObservedAt,
+            elapsedMillis,
+            classifier,
+            decision.success.reason
+          )
+          : exhaustedTerminal(
+            failure as ActivityPolicyV3.ApplicationFailure,
+            initialObservedAt,
+            failedObservedAt,
+            elapsedMillis,
+            classifier,
+            decision.success.reason
+          )
       }
 
       const delayResolution = yield* prepareDelaySelection(
@@ -1428,6 +2747,7 @@ const completeRetryOutcome = (
       return decodeSucceededOutput(state, outcome)
     case "NonRetryable":
     case "Exhausted":
+    case "AttemptTimedOut":
     case "ScheduleToCloseTimedOut":
       return Effect.fail(outcome)
   }
@@ -1438,7 +2758,7 @@ const scheduleToCloseWinner = (
   exit: Exit.Exit<RetryScheduleToCloseOutcome, never>
 ): RetryScheduleToCloseWinner => ({
   _tag: "RetryScheduleToCloseWinner",
-  outcomeEnvelopeVersion: 1,
+  outcomeEnvelopeVersion: 2,
   controllerOperationDigest: controller.operation.operationDigest,
   exit
 })
@@ -1560,9 +2880,13 @@ const validateWinnerCoordinates = (
 
     const attemptNumber = outcome._tag === "Succeeded"
       ? outcome.attempt
+      : outcome._tag === "AttemptTimedOut"
+      ? outcome.timeout.attempt
       : outcome.cause.attempt
     const activityDigest = outcome._tag === "Succeeded"
       ? outcome.activityDigest
+      : outcome._tag === "AttemptTimedOut"
+      ? outcome.timeout.activityDigest
       : outcome.cause.activityDigest
     const attempt = yield* prepareAttempt(state, attemptNumber)
     if (attempt.operation.operationDigest !== activityDigest) {
@@ -1606,6 +2930,70 @@ const validateWinnerCoordinates = (
         controller,
         "Persisted terminal retry timestamps do not match their replay-recorded observations"
       ))
+    }
+
+    if (outcome._tag === "AttemptTimedOut") {
+      yield* validateAttemptTimeout(
+        state,
+        attempt,
+        outcome.timeout
+      )
+      const classifier = yield* prepareClassifier(
+        state,
+        attempt,
+        outcome.timeout.timeout
+      )
+      if (
+        classifier.operation.operationDigest !==
+          outcome.decision.classificationActivityDigest
+      ) {
+        return yield* Effect.fail(invalidWinnerCoordinates(
+          state,
+          controller,
+          "Persisted attempt-timeout classifier coordinates do not match its exact timed-out attempt"
+        ))
+      }
+      const classification = yield* EffectWorkflowSemanticV3.retryClassifier(
+        classifier,
+        options
+      )
+      if (outcome.decision._tag === "NonRetryable") {
+        if (classification._tag !== "NonRetryable") {
+          return yield* Effect.fail(invalidWinnerCoordinates(
+            state,
+            controller,
+            "Persisted attempt-timeout terminal contradicts its replay-recorded classifier result"
+          ))
+        }
+        return
+      }
+      if (classification._tag !== "Retryable") {
+        return yield* Effect.fail(invalidWinnerCoordinates(
+          state,
+          controller,
+          "Persisted exhausted attempt timeout contradicts its replay-recorded classifier result"
+        ))
+      }
+      const decision = ActivityPolicyV3.retryDelayRange(
+        state.node.binding.activityPolicy,
+        {
+          evaluationVersion: 1,
+          failedAttempt: attempt.attempt,
+          elapsedMillis
+        }
+      )
+      if (
+        Result.isFailure(decision) ||
+        decision.success._tag !== "DoNotRetry" ||
+        decision.success.reason !== outcome.decision.reason
+      ) {
+        return yield* Effect.fail(invalidWinnerCoordinates(
+          state,
+          controller,
+          "Persisted exhausted attempt timeout does not match the exact retry policy decision"
+        ))
+      }
+      return
     }
 
     const disposition = ActivityPolicyV3.failureDisposition(
@@ -1818,36 +3206,6 @@ const timeoutIfClockCompleted = (
         )
   )
 
-const nativeOperationName = (
-  state: InvocationState,
-  operation: SemanticOperationV3.PreparedOperation
-): Effect.Effect<string, EffectWorkflowRetryError> => {
-  const coordinates = SemanticOperationV3.nativeCoordinates(operation)
-  if (Result.isFailure(coordinates)) {
-    return Effect.fail(retryError(
-      ErrorCodes.OperationPreparationFailed,
-      `Could not derive durable timer coordinates: ${coordinates.failure.message}`,
-      {
-        nodeId: state.node.binding.nodeId,
-        operationId: operation.document.operationId,
-        operationDigest: operation.operationDigest
-      }
-    ))
-  }
-  const name = NativeName.name(coordinates.success)
-  return Result.isFailure(name)
-    ? Effect.fail(retryError(
-      ErrorCodes.OperationPreparationFailed,
-      `Could not derive durable timer name: ${name.failure.message}`,
-      {
-        nodeId: state.node.binding.nodeId,
-        operationId: operation.document.operationId,
-        operationDigest: operation.operationDigest
-      }
-    ))
-    : Effect.succeed(name.success)
-}
-
 const nonSuspendingTimer = (
   state: InvocationState,
   operation: SemanticOperationV3.PreparedOperation
@@ -1873,7 +3231,10 @@ const nonSuspendingTimer = (
     const engine = yield* NativeWorkflowEngine.WorkflowEngine
     const instance = yield* NativeWorkflowEngine.WorkflowInstance
     const clock = NativeClock.make({
-      name: yield* nativeOperationName(state, operation),
+      name: yield* nativeOperationName(
+        state.node.binding.nodeId,
+        operation
+      ),
       duration: Duration.millis(operation.document.delayMillis)
     })
     yield* engine.scheduleClock(instance.workflow, {

@@ -2064,7 +2064,7 @@ const isBuiltInContract = (
 ): boolean =>
   contract._tag === "BuiltIn" &&
   contract.contractReferenceVersion === 1 &&
-  contract.vocabularyVersion === 1 &&
+  contract.vocabularyVersion === 2 &&
   contract.schema === schema
 
 const builtInSchema = (
@@ -2687,13 +2687,13 @@ const expectedRaceContracts = (
         success: {
           _tag: "BuiltIn",
           contractReferenceVersion: 1,
-          vocabularyVersion: 1,
+          vocabularyVersion: 2,
           schema: "Void"
         },
         error: {
           _tag: "BuiltIn",
           contractReferenceVersion: 1,
-          vocabularyVersion: 1,
+          vocabularyVersion: 2,
           schema: "Never"
         }
       }

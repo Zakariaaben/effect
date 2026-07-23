@@ -139,15 +139,39 @@ Implemented foundations:
   persistent clock is acknowledged before time observation or node execution;
   contenders publish success-only envelopes to one native first-wins deferred,
   attempts and publication are clock-fenced, and the recorded
-  completion/timeout/defect winner is coordinate- and policy-checked. Loser
-  interruption is never joined; timeout fences semantic completion without
-  claiming rollback of an external side effect. The same closed result is
-  available through `executeDetailed` without another execution or successful
-  output decoding.
-  Schedule-to-start, start-to-close, and cancellation propagation remain
-  rejected until the required worker lifecycle protocol exists, so this is
-  backend evidence rather than a complete BPMN Activity or boundary-event
-  implementation; and
+  typed completion/timeout winner is coordinate-, timestamp-, and
+  policy-checked. Native defects retain their full `Cause`, while deterministic
+  ordering of a late defect against a late-delivered timer remains an open
+  conformance obligation. Loser interruption is never joined; timeout fences
+  semantic completion without claiming rollback of an external side effect.
+  The same closed typed result is available through `executeDetailed` without
+  another execution or successful output decoding. Schedule-to-start first
+  persists a canonical `ScheduleToStartArmed` acknowledgement with its activity
+  and timer digests, attempt, `armedAt`, duration, and absolute deadline.
+  Scheduling and activity dispatch occur only after that acknowledgement, and
+  replay reuses it rather than extending the deadline. The timed-attempt
+  protocol has start and terminal first-wins gates, plus this arm gate when
+  schedule-to-start is configured. The Activity-side start gate receives its
+  expected timeout through a lazy `Effect` evaluated only after the gate returns
+  a timeout. That authorization derives schedule-to-start from the canonical arm
+  acknowledgement or start-to-close from canonical `Started`, then requires an
+  exact match across activity, attempt, timer, kind, duration, and deadline. Its
+  boundary remains entry into the native Activity RPC immediately before
+  handler preparation, not acquisition of a future distributed worker queue or
+  lease. The canonical `Started` acknowledgement pins the start-to-close
+  duration and absolute deadline, so redelivery cannot extend it. Persisted
+  version `2` `Succeeded` and `ApplicationFailed` outcomes carry `completedAt`;
+  arbitration compares it with the canonical deadline and selects timeout for
+  an at-or-after-deadline completion even when native timer delivery is late. An
+  attempt timeout remains a distinct `AttemptTimedOut`
+  terminal rather than an application failure and cannot enter BPMN Boundary
+  Error routing. Losing scheduled resolutions are not cancelled and can consume
+  backend timer capacity until their deadline even though first-wins makes them
+  semantically inert. These primitives still do not provide authenticated
+  deferred tokens, worker leases, heartbeat expiry, cancellation propagation,
+  machine-crash or multi-worker proof, or proof that an external side effect
+  stopped, so this remains backend evidence rather than a complete BPMN
+  Activity or boundary-event implementation; and
 - machine-readable requirement/coverage schemas that record the named mapping
   slice separately while declaring no BPMN conformance claim.
 

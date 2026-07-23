@@ -414,7 +414,7 @@ const builtIn = (
 ) => ({
   _tag: "BuiltIn" as const,
   contractReferenceVersion: 1 as const,
-  vocabularyVersion: 1 as const,
+  vocabularyVersion: 2 as const,
   schema
 })
 

@@ -3,8 +3,8 @@
 Status: accepted direction; semantic core, runnable process-local protocol-v2
 authority, BPMN semantic/data/DI/XML-slice/token foundations, and process-local
 durable reference authorities plus a thin protocol-v3 native Effect Workflow
-host implemented; complete native primitive mappings and execution semantics
-planned\
+host with initial durable attempt-timeout handshakes implemented; complete
+native mappings and execution semantics planned\
 Scope: `@effect/workflow-builder`\
 Last reviewed: 2026-07-23
 
@@ -105,8 +105,12 @@ public `effect/unstable/workflow` API. Workflow Builder will not implement
 `WorkflowEngine.Encoded`, clone the cluster mailbox, or create competing
 activity-result, deferred, clock, child-suspension, sharding, or failover
 machinery. An application supplies a `WorkflowEngine` layer: the native memory
-layer is suitable for tests, while `ClusterWorkflowEngine` can supply production
+layer is suitable for tests, while `ClusterWorkflowEngine` can supply
 distribution and persistence without becoming a dependency of this package.
+Its availability is not itself production evidence: the present Builder
+contract tests use the memory engine and the cluster implementation with its
+in-memory driver, so they do not prove machine-crash recovery, empty-cache
+restart, multi-worker failover, or a production storage configuration.
 
 The fork extends that native boundary with explicit token-addressed deferred
 polling, canonical first-wins resolution, and idempotent absolute scheduled
@@ -155,6 +159,42 @@ The first adapter must obey these invariants:
   sleeps are never silently treated as durable BPMN timers.
 - A native deferred token is an address, not authorization. External completion
   crosses Builder admission policy before the token is completed.
+- Managed retry uses first-wins start and terminal deferred gates per timed
+  attempt and adds an arm gate when schedule-to-start is configured. Before
+  scheduling its clock or dispatching the activity, the adapter first persists
+  one canonical `ScheduleToStartArmed` acknowledgement containing the activity
+  and timer digests, attempt, `armedAt`, duration, and absolute deadline. Replay
+  reuses that acknowledgement and its deadline instead of reading a new budget
+  origin. The start gate executes immediately inside the native Activity RPC
+  before handler preparation. Its expected-timeout authorization is a lazy
+  `Effect`, evaluated only if the gate proposes a timeout. It derives the exact
+  schedule-to-start expectation from the canonical arm acknowledgement or the
+  exact start-to-close expectation from canonical `Started`, then verifies
+  activity, attempt, timer, kind, duration, and deadline. The authorization is
+  therefore dynamic without becoming caller-selected or allowing an unanchored
+  timeout. This is an exact native execution boundary, not an assertion that a
+  future distributed queue lease was acquired. A canonical `Started`
+  acknowledgement carries `startedAt` plus the start-to-close timer digest,
+  duration, and absolute deadline. Redelivery idempotently re-arms that same
+  deadline and cannot silently grant a fresh attempt budget.
+- Schedule-to-start and start-to-close produce a distinct `AttemptTimedOut`
+  outcome. The retry classifier may inspect its closed attempt-timeout cause,
+  but explicit application-error tag/code rules do not apply and the BPMN
+  bridge never turns it into `BusinessFailed` or routes it through Boundary
+  Error.
+- Persisted version `2` `Succeeded` and `ApplicationFailed` attempt outcomes
+  carry `completedAt`. The terminal gate compares it with the canonical
+  start-to-close deadline, so a typed outcome completed at or beyond the
+  deadline becomes the timeout even if native timer delivery is late. Native
+  defects instead retain their full `Cause` and currently carry no equivalent
+  persisted completion timestamp. Deterministic arbitration of a late defect
+  against a late-delivered start-to-close timer therefore remains an explicit
+  conformance gap.
+- The native absolute schedules behind losing first-wins contenders are not
+  cancelled. Their later resolution is semantically inert, but the timer
+  remains operational backend load until its deadline. This protocol is not a
+  worker lease, heartbeat, queue fence, cancellation transport, or proof that
+  an already-started external effect stopped.
 - A semantic race commits ordered participants and returns an identified
   winner. Its `InterruptWaiters` disposition interrupts losing wait fibers; it
   does not assert cancellation, compensation, or rollback of external work
@@ -229,8 +269,8 @@ machine failure.
 | `SemanticOperationV3.ts`          | Content-addressed operations with closed node-handler/classifier/jitter/time-observation activity purposes, coherent exact artifact-codec/node-output-aggregate/versioned-built-in result contracts, typed-owner timer generations, separately success/error-schema-and-codec-pinned deferred generations, and derived ordered race membership; exact occurrence provenance, persisted nested verification, and native-coordinate projection make drift detectable before side effects.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `SemanticExecutableRegistryV3.ts` | Immutable Effect service that atomically resolves every build-pinned node handler, codec/schema, and retry classifier required by one exact `VerifiedArtifact`; executable constructors and resolved activity/deferred/race views retain process provenance and captured contexts, dynamically derive exact race result schemas, and admit neither persistence, caching, nor fallback lookup.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `EffectWorkflowSemanticV3.ts`     | Authenticated one-shot static-DAG occurrence admission plus semantic-to-native mapping: descriptor-binding guard activities, checked replay drift, semantic attempts through native `Activity.CurrentAttempt`, explicitly selected infrastructure interruption policy, positive timers through forced-durable native `DurableClock`, authenticated deferred completion, and identified `FirstSettled`/`FirstSuccess` races without a second backend.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `EffectWorkflowRetryV3.ts`        | Descriptor-safe managed retry over the native semantic mapper: exact node-attempt activities persist one closed success-or-application-failure outcome, handler typed failures are encoded and classified once, explicit non-retryable identities precede the exact captured classifier, and attempt/elapsed admission budgets, replay-recorded internal jitter, and native durable-clock backoff produce closed success, `NonRetryable`, or `Exhausted` results. A content-addressed schedule-to-close controller durably acknowledges one stable injected-engine clock before time observation or node execution. Detached contenders publish success-only envelopes to one native first-wins deferred; clock reads fence every attempt and final publication, and the coordinate-, timestamp-, classifier-, and policy-checked winner is replayed without joining loser shutdown. Timeout fences semantic completion without claiming external rollback. The injected engine/persistence remains the record-integrity trust boundary because native Effect Workflow exposes no independent read-only activity-journal proof API. Schedule-to-start and start-to-close remain rejected until persistent worker start/lease acknowledgement exists; `maximumElapsed` remains an admission budget, not an in-flight attempt deadline. |
-| `EffectWorkflowBpmnV3.ts`         | Trusted native-Effect-to-BPMN Task bridge. It validates an accessor-safe target, exact compiled-kernel authority, immutable task binding, and opaque retry-invocation artifact/node pins before dispatch; executes the retry composition once; and returns a strict portable `resolveTask` command together with the raw outcome for data mapping and observability. Only `NonRetryable`/`Exhausted` business terminals become `BusinessFailed`; schedule-to-close timeout, defects, interruption, and adapter failures remain outside BPMN Error routing. Command application is deliberately left to a serialized or compare-and-swap durable coordinator, and task-binding admission is not yet integrated into the XML executable facade.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `EffectWorkflowRetryV3.ts`        | Descriptor-safe managed retry over the native semantic mapper: exact node-attempt activities persist one closed success, application-failure, or attempt-timeout outcome; handler typed failures are encoded and classified once, explicit non-retryable identities precede the exact captured classifier, and attempt/elapsed admission budgets, replay-recorded internal jitter, and native durable-clock backoff produce closed success, `NonRetryable`, `Exhausted`, or `AttemptTimedOut` results. A content-addressed schedule-to-close controller durably acknowledges one stable injected-engine clock before time observation or node execution. Schedule-to-start persists a canonical armed acknowledgement before scheduling or dispatch and reuses its deadline on replay; start-to-close pins its deadline in `Started`. Policy selects arm, start, and terminal first-wins gates with exact timeout identity. Persisted v2 success/application-failure `completedAt` timestamps arbitrate typed completion against late timers. Native defects preserve `Cause`; their late-defect/late-timer ordering remains open. Loser shutdown is not joined, schedules are not cancelled, and timeout claims no external rollback. The injected engine remains the integrity boundary; no crash or multi-worker proof is claimed. |
+| `EffectWorkflowBpmnV3.ts`         | Trusted native-Effect-to-BPMN Task bridge. It validates an accessor-safe target, exact compiled-kernel authority, immutable task binding, and opaque retry-invocation artifact/node pins before dispatch; executes the retry composition once; and returns a strict portable `resolveTask` command together with the raw outcome for data mapping and observability. Only `NonRetryable`/`Exhausted` application-failure terminals become `BusinessFailed`; schedule-to-start/start-to-close `AttemptTimedOut`, schedule-to-close timeout, defects, interruption, and adapter failures remain typed operational failures outside BPMN Error routing. Command application is deliberately left to a serialized or compare-and-swap durable coordinator, and task-binding admission is not yet integrated into the XML executable facade.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `IdentityV3.ts`                   | Collision-free tuple-framed child call, run, start, schedule, projection, cancellation, abandon, and start-failure identities for protocol version `3`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `DecisionV2.ts`                   | Exact prepared plan/artifact provenance and deterministic static-DAG protocol-v2 decisions for scheduling, retry, failure, cancellation, signal consumption, and terminal completion.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | `CommandEventV2.ts`               | Public preview materialization accepts only the exact immutable batch produced by `DecisionV2.decide` for the exact reducer head; canonical command identity is validation rather than authorization. The unrestricted storage translator is package-internal, and the execution authority remains the atomic commit boundary.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
@@ -285,7 +325,14 @@ machine failure.
 | `ActivityWorker.ts`               | Durable worker boundary that cross-checks recovered run, dispatch, artifact route, definition object, deployment registry, and handler build before execution, then commits under the worker fence; its cancellation-aware path registers the exact handler fiber first.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `ActivityBrokerWorker.ts`         | One-shot acquire/execute/complete/settle boundary, with a cancellation-aware variant, that acknowledges only durable completion or authoritative suppression, delays retryable delivery failures, audits poison work through dead-letter settlement, and preserves interruption.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 
-There is currently no production Effect Workflow adapter.
+For the `EffectWorkflowRetryV3.ts` row, timestamp arbitration applies to
+persisted version `2` success and application-failure outcomes through their
+`completedAt`; it does not yet timestamp a native defect. The defect keeps its
+native `Cause`, and deterministic ordering against a late-delivered
+start-to-close timer remains pending.
+
+There is a thin protocol-v3 Effect Workflow adapter, but no
+production-certified adapter deployment or backend conformance evidence yet.
 `ExecutionStore.makeMemory` specifies the version `1` transaction/race model,
 while `ExecutionAuthorityV2.makeMemory` runs exact protocol-v2 static-DAG
 starts, decisions, retries, activity timeouts, due timers, cancellation, and
@@ -549,7 +596,8 @@ database clock before commit. Numeric-offset aliases and sub-millisecond text
 are rejected instead of being silently normalized or truncated, matching the
 whole-millisecond timeout and backoff units.
 
-Owner creation and its required timer mutations are one transaction boundary:
+For an authority backed by transactionally materialized timer rows, owner
+creation and its required timer mutations are one transaction boundary:
 activity scheduling creates schedule-to-start and schedule-to-close timers;
 attempt start cancels schedule-to-start and creates start-to-close; attempt
 completion cancels live attempt timers; retry admission creates its backoff
@@ -557,8 +605,20 @@ timer; and signal acceptance, signal-wait start, and sleep start create their
 respective timers. For attempt timeout, the fire transaction should append
 `TimerFired` and its attributed `ActivityAttemptTimedOut` consequence together.
 This removes a crash window in which a later worker result or second timer could
-interleave before the winning timeout was materialized. Every terminal event
-requires all remaining timers to have been resolved earlier in the same batch.
+interleave before the winning timeout was materialized. Every terminal event in
+that authority requires all remaining timers to have been resolved earlier in
+the same batch.
+
+The current protocol-v3 native adapter deliberately uses Effect Workflow's
+absolute scheduled deferred resolution instead of adding such a timer store.
+Its arm gate when schedule-to-start is enabled, plus its start and terminal
+gates, provide the canonical persisted facts. The arm acknowledgement is
+resolved before clock scheduling and activity dispatch, and replay reuses its
+original absolute deadline. The public native primitive does not cancel a
+losing schedule. The losing delivery is harmless to semantic state and still
+remains backend work until its deadline. Any future cancellation optimization
+must preserve the persisted first-wins result and cannot be documented as
+cancellation of handler I/O.
 
 These choices adopt Temporal's distinction between a logical activity and its
 physical task deliveries, Azure Durable Task's durable timers and event
@@ -709,8 +769,12 @@ At the worker boundary the runtime will:
    compatibility failures, not valid node failures.
 
 Timeouts are not one undifferentiated number. Activity policy independently
-defines schedule-to-start (queue wait), start-to-close (one attempt),
-schedule-to-close (the total retry budget), and heartbeat/liveness timeouts.
+defines schedule-to-start (admission-to-worker-start), start-to-close (one
+attempt), schedule-to-close (the total retry budget), and heartbeat/liveness
+timeouts. In the current protocol-v3 native adapter, “worker start” is precisely
+the gate inside the native Activity RPC immediately before handler preparation.
+It is not yet an authenticated distributed-queue acquisition boundary; a future
+queue adapter must name and enforce that wider interval separately.
 Logical activity facts and attempt facts remain distinct. A completion carries
 the current attempt identity and lease/fencing token, so an abandoned or retried
 attempt cannot commit after ownership changes. Heartbeats are operational unless
@@ -1054,7 +1118,7 @@ stabilization.
 | 1. IR evolution (partial)                       | `Fingerprint` is implemented; `PlanMigration`, `Control`, nested-region compiler, resource analysis, and atomic Workflow Patterns catalogue expansion remain                                                                                                                                                                        | Golden wire migrations; canonical fingerprint fixtures; structured-control property tests; atomic pattern requirement/status mapping; old v1 plans remain accepted without changed meaning |
 | 2. Semantic core and direct execution (partial) | Version `1` direct execution, process-local exact-generation cancellation delivery, protocol-v3 child relation contracts, and protocol-v2 process-local static-DAG decisions/retries/timers/signals are implemented; structured control, child authority execution, V2 cancellation integration, and complete BPMN execution remain | Golden replay tests; reducer/decision determinism; direct/backend parity; cancellation/retry/parallel/control conformance                                                                  |
 | 3. Durable substrate (partial reference model)  | `DecisionCommit`, `ExecutionStore`, and `ExecutionAuthorityV2` specify strict atomic boundaries in memory; SQL persistence, shared execution/signal transactions, verified checkpoints/read models, cross-process timer and wake services, `BlobStore`, and `DurableBackend` remain                                                 | Crash injection at every commit/delivery boundary; duplicate/reordered delivery tests; multi-orchestrator fencing; restore and replay from empty caches                                    |
-| 4. Effect Workflow and operations               | Optional Effect Workflow adapter, worker/client/query APIs, tracing/metrics, administrative inspection and repair tools                                                                                                                                                                                                             | Adapter passes the backend conformance suite; rolling-upgrade/replay tests; telemetry correlation and documented repair/runbooks                                                           |
+| 4. Effect Workflow and operations (partial)     | Thin optional Effect Workflow host, semantic operation mapping, durable race/retry primitives, and attempt timeout handshakes are implemented; production worker/client/query APIs, tracing/metrics, authenticated worker lifecycle, and administrative inspection and repair tools remain                                          | Adapter passes persistent crash/restart and multi-worker backend conformance; rolling-upgrade/replay tests; telemetry correlation and documented repair/runbooks                           |
 | 5. Production hardening                         | Tenant policy, retention/redaction, quotas/backpressure, compatibility tooling, migration CLI/APIs                                                                                                                                                                                                                                  | Security review, malicious-plan fuzzing, load/soak/chaos tests, disaster recovery exercise, and support window documented                                                                  |
 
 No phase should expose a public API that implies the next phase's guarantee. In
