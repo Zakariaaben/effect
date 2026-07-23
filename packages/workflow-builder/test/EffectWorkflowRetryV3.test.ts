@@ -22,6 +22,7 @@ import * as CompilerV2 from "../src/CompilerV2.ts"
 import * as Deployment from "../src/Deployment.ts"
 import * as DeploymentHandlers from "../src/DeploymentHandlers.ts"
 import * as DigestV3 from "../src/DigestV3.ts"
+import * as NativeName from "../src/EffectWorkflowOperationV3.ts"
 import * as Retry from "../src/EffectWorkflowRetryV3.ts"
 import * as NativeSemantic from "../src/EffectWorkflowSemanticV3.ts"
 import * as LinkPolicy from "../src/LinkPolicy.ts"
@@ -185,6 +186,8 @@ const expectSuccess = <A, E>(result: Result.Result<A, E>): A => {
 
 interface FixtureOptions {
   readonly scheduleToStart?: ActivityPolicyV3.Timeout
+  readonly startToClose?: ActivityPolicyV3.Timeout
+  readonly scheduleToClose?: ActivityPolicyV3.Timeout
   readonly handler?: Node.Handler<typeof retryNode>
   readonly classifier?: (
     failure: ActivityPolicyV3.RetryFailureCause
@@ -227,8 +230,8 @@ const policy = (
   },
   timeouts: {
     scheduleToStart: options.scheduleToStart ?? { _tag: "Disabled" },
-    startToClose: { _tag: "Disabled" },
-    scheduleToClose: { _tag: "Disabled" }
+    startToClose: options.startToClose ?? { _tag: "Disabled" },
+    scheduleToClose: options.scheduleToClose ?? { _tag: "Disabled" }
   }
 })
 
@@ -812,35 +815,659 @@ describe("EffectWorkflowRetryV3 contracts", () => {
       )
     }).pipe(provideCrypto))
 
-  it.effect("rejects enabled native timeouts rather than silently ignoring them", () =>
+  it.effect("rejects unsupported schedule-to-start and start-to-close dimensions", () =>
+    Effect.gen(function*() {
+      for (
+        const testCase of [
+          {
+            id: "unsupported-schedule-to-start",
+            dimension: "scheduleToStart",
+            options: {
+              scheduleToStart: {
+                _tag: "After",
+                durationMillis: 1_000
+              }
+            }
+          },
+          {
+            id: "unsupported-start-to-close",
+            dimension: "startToClose",
+            options: {
+              startToClose: {
+                _tag: "After",
+                durationMillis: 1_000
+              }
+            }
+          }
+        ] as const
+      ) {
+        const fixture = yield* makeFixture(testCase.options)
+        const preparedOccurrence = yield* occurrence(
+          fixture,
+          testCase.id
+        )
+        const failure = yield* Retry.prepare({
+          artifact: fixture.resolved,
+          occurrence: preparedOccurrence,
+          input: {
+            _tag: "Inline",
+            value: {}
+          }
+        }).pipe(Effect.flip)
+        assert.strictEqual(
+          failure.code,
+          Retry.ErrorCodes.UnsupportedTimeoutPolicy
+        )
+        assert.include(failure.message, testCase.dimension)
+      }
+    }).pipe(provideCrypto))
+
+  it.effect("prepares a content-addressed schedule-to-close controller", () =>
     Effect.gen(function*() {
       const fixture = yield* makeFixture({
-        scheduleToStart: {
+        scheduleToClose: {
+          _tag: "After",
+          durationMillis: 250
+        }
+      })
+      const preparedOccurrence = yield* occurrence(
+        fixture,
+        "schedule-to-close-controller"
+      )
+      const first = yield* Retry.prepare({
+        artifact: fixture.resolved,
+        occurrence: preparedOccurrence,
+        input: { _tag: "Inline", value: { request: 1 } }
+      })
+      const replay = yield* Retry.prepare({
+        artifact: fixture.resolved,
+        occurrence: preparedOccurrence,
+        input: { _tag: "Inline", value: { request: 1 } }
+      })
+      const changedInput = yield* Retry.prepare({
+        artifact: fixture.resolved,
+        occurrence: preparedOccurrence,
+        input: { _tag: "Inline", value: { request: 2 } }
+      })
+
+      assert.match(
+        first.scheduleToCloseControllerDigest ?? "",
+        /^sha256:[0-9a-f]{64}$/
+      )
+      assert.strictEqual(
+        first.scheduleToCloseControllerDigest,
+        replay.scheduleToCloseControllerDigest
+      )
+      assert.notStrictEqual(
+        first.scheduleToCloseControllerDigest,
+        changedInput.scheduleToCloseControllerDigest
+      )
+    }).pipe(provideCrypto))
+})
+
+describe("EffectWorkflowRetryV3 managed runtime", () => {
+  it.effect("completes the managed loop before an armed schedule-to-close deadline", () =>
+    Effect.gen(function*() {
+      const attempts: Array<number> = []
+      const fixture = yield* makeFixture({
+        handler: ((
+          request: Node.HandlerRequest<typeof retryNode>
+        ) =>
+          Effect.sync(() => {
+            attempts.push(request.context.attempt)
+            return { value: 7 }
+          })) as Node.Handler<typeof retryNode>,
+        scheduleToClose: {
+          _tag: "After",
+          durationMillis: 100
+        }
+      })
+      const preparedOccurrence = yield* occurrence(
+        fixture,
+        "schedule-to-close-completes"
+      )
+      const invocation = yield* Retry.prepare({
+        artifact: fixture.resolved,
+        occurrence: preparedOccurrence,
+        input: { _tag: "Inline", value: {} }
+      })
+      const registration = RuntimeWorkflow.toLayer(() => retryExecution(invocation))
+
+      yield* Effect.gen(function*() {
+        const executionId = yield* RuntimeWorkflow.execute(
+          { id: "schedule-to-close-completes" },
+          { discard: true }
+        )
+        const terminal = yield* pollUntilComplete(
+          RuntimeWorkflow,
+          executionId
+        )
+        assert(Exit.isSuccess(terminal.exit))
+        if (Exit.isSuccess(terminal.exit)) {
+          assert.deepStrictEqual(terminal.exit.value, { value: 7 })
+        }
+        assert.deepStrictEqual(attempts, [1])
+      }).pipe(
+        Effect.provide(
+          registration.pipe(
+            Layer.provideMerge(WorkflowEngine.layerMemory)
+          )
+        )
+      )
+    }).pipe(provideCrypto))
+
+  it.effect("does not dispatch an attempt when the armed deadline is already due", () =>
+    Effect.gen(function*() {
+      const clockArmed = yield* Deferred.make<void>()
+      const releaseClockAcknowledgement = yield* Deferred.make<void>()
+      let handlerRuns = 0
+      const fixture = yield* makeFixture({
+        handler: (() =>
+          Effect.sync(() => {
+            handlerRuns++
+            return { value: 31 }
+          })) as Node.Handler<typeof retryNode>,
+        scheduleToClose: {
+          _tag: "After",
+          durationMillis: 100
+        }
+      })
+      const preparedOccurrence = yield* occurrence(
+        fixture,
+        "schedule-to-close-already-due"
+      )
+      const invocation = yield* Retry.prepare({
+        artifact: fixture.resolved,
+        occurrence: preparedOccurrence,
+        input: { _tag: "Inline", value: {} }
+      })
+      const registration = RuntimeWorkflow.toLayer(() => retryExecution(invocation))
+      const delayedEngine = Layer.effect(
+        WorkflowEngine.WorkflowEngine
+      )(
+        Effect.map(
+          WorkflowEngine.WorkflowEngine,
+          (delegate) => {
+            let wrapped: typeof delegate
+            wrapped = {
+              ...delegate,
+              register: ((workflow, execute) =>
+                delegate.register(
+                  workflow,
+                  (payload, executionId) =>
+                    execute(payload, executionId).pipe(
+                      Effect.provideService(
+                        WorkflowEngine.WorkflowEngine,
+                        wrapped
+                      )
+                    )
+                )) as typeof delegate.register,
+              scheduleClock: (workflow, options) =>
+                Effect.gen(function*() {
+                  // Delegate first: the native backend has durably armed the
+                  // deadline before this acknowledgement is held back.
+                  yield* delegate.scheduleClock(workflow, options)
+                  yield* Deferred.succeed(clockArmed, undefined)
+                  yield* Deferred.await(releaseClockAcknowledgement)
+                })
+            }
+            return wrapped
+          }
+        )
+      ).pipe(
+        Layer.provide(WorkflowEngine.layerMemory)
+      )
+
+      yield* Effect.gen(function*() {
+        yield* TestClock.setTime(
+          Date.parse("2026-01-02T03:04:05.006Z")
+        )
+        const executionId = yield* RuntimeWorkflow.execute(
+          { id: "schedule-to-close-already-due" },
+          { discard: true }
+        )
+        yield* Deferred.await(clockArmed)
+
+        // The backend clock is armed, but scheduleClock has not yet returned
+        // to the retry controller, so no observation or attempt can start.
+        yield* TestClock.adjust(100)
+        yield* Deferred.succeed(releaseClockAcknowledgement, undefined)
+        const terminal = yield* pollUntilComplete(
+          RuntimeWorkflow,
+          executionId
+        )
+        const failure = failReason(terminal.exit)
+        assert.strictEqual(
+          (failure as { readonly _tag?: unknown })._tag,
+          "ScheduleToCloseTimedOut"
+        )
+        assert.strictEqual(handlerRuns, 0)
+      }).pipe(
+        Effect.provide(
+          registration.pipe(
+            Layer.provideMerge(delayedEngine)
+          )
+        )
+      )
+    }).pipe(provideCrypto))
+
+  it.effect("returns and replays timeout without joining an uninterruptible active attempt", () =>
+    Effect.gen(function*() {
+      const started = yield* Deferred.make<void>()
+      const blocked = yield* Deferred.make<void>()
+      let handlerRuns = 0
+      let workflowPasses = 0
+      const fixture = yield* makeFixture({
+        handler: (() =>
+          Effect.uninterruptible(
+            Effect.gen(function*() {
+              handlerRuns++
+              yield* Deferred.succeed(started, undefined)
+              yield* Deferred.await(blocked)
+              return { value: 99 }
+            })
+          )) as Node.Handler<typeof retryNode>,
+        scheduleToClose: {
+          _tag: "After",
+          durationMillis: 100
+        }
+      })
+      const preparedOccurrence = yield* occurrence(
+        fixture,
+        "schedule-to-close-active-attempt"
+      )
+      const invocation = yield* Retry.prepare({
+        artifact: fixture.resolved,
+        occurrence: preparedOccurrence,
+        input: { _tag: "Inline", value: {} }
+      })
+      const gate = NativeDeferred.make(
+        "WorkflowBuilder/EffectWorkflowRetryV3/UninterruptibleTimeoutReplayGate"
+      )
+      const gateToken = yield* Deferred.make<NativeDeferred.Token>()
+      const registration = ReplayWorkflow.toLayer(() =>
+        Effect.gen(function*() {
+          workflowPasses++
+          const result = yield* Effect.exit(
+            retryExecution(invocation)
+          )
+          yield* Deferred.succeed(
+            gateToken,
+            yield* NativeDeferred.token(gate)
+          )
+          yield* NativeDeferred.await(gate)
+          return yield* result
+        })
+      )
+
+      yield* Effect.gen(function*() {
+        yield* TestClock.setTime(
+          Date.parse("2026-01-02T03:04:05.006Z")
+        )
+        const executionId = yield* ReplayWorkflow.execute(
+          { id: "schedule-to-close-active-attempt" },
+          { discard: true }
+        )
+        yield* Deferred.await(started)
+        yield* TestClock.adjust(99)
+        const beforeDeadline = yield* ReplayWorkflow.poll(executionId)
+        assert.isTrue(
+          Option.isNone(beforeDeadline) ||
+            beforeDeadline.value._tag === "Suspended"
+        )
+        yield* TestClock.adjust(1)
+        const token = yield* Deferred.await(gateToken)
+
+        // Reaching the gate proves Retry.execute already returned timeout even
+        // though the uninterruptible handler is still physically blocked.
+        assert.strictEqual(handlerRuns, 1)
+        assert.strictEqual(workflowPasses, 1)
+        const beforeUnblock = yield* ReplayWorkflow.poll(executionId)
+        assert.isTrue(
+          Option.isNone(beforeUnblock) ||
+            beforeUnblock.value._tag === "Suspended"
+        )
+
+        yield* Deferred.succeed(blocked, undefined)
+        const suspended = yield* pollUntilObserved(
+          ReplayWorkflow,
+          executionId
+        )
+        assert.strictEqual(suspended._tag, "Suspended")
+        yield* NativeDeferred.succeed(gate, {
+          token,
+          value: undefined
+        })
+        const terminal = yield* pollUntilComplete(
+          ReplayWorkflow,
+          executionId
+        )
+        const failure = failReason(terminal.exit)
+        assert.strictEqual(
+          (failure as { readonly _tag?: unknown })._tag,
+          "ScheduleToCloseTimedOut"
+        )
+        const timedOut = failure as Retry.ScheduleToCloseTimedOut
+        assert.strictEqual(timedOut.timeoutKind, "ScheduleToClose")
+        assert.strictEqual(timedOut.durationMillis, 100)
+        assert.strictEqual(
+          timedOut.controllerOperationDigest,
+          invocation.scheduleToCloseControllerDigest
+        )
+        assert.strictEqual(handlerRuns, 1)
+        assert.strictEqual(workflowPasses, 2)
+      }).pipe(
+        Effect.provide(
+          registration.pipe(
+            Layer.provideMerge(WorkflowEngine.layerMemory)
+          )
+        )
+      )
+    }).pipe(provideCrypto))
+
+  it.effect("publishes timeout when a handler finishes after the durable deadline", () =>
+    Effect.gen(function*() {
+      const started = yield* Deferred.make<void>()
+      let handlerRuns = 0
+      const fixture = yield* makeFixture({
+        handler: (() =>
+          Effect.gen(function*() {
+            handlerRuns++
+            yield* Deferred.succeed(started, undefined)
+            yield* Effect.sleep(101)
+            return { value: 101 }
+          })) as Node.Handler<typeof retryNode>,
+        scheduleToClose: {
+          _tag: "After",
+          durationMillis: 100
+        }
+      })
+      const preparedOccurrence = yield* occurrence(
+        fixture,
+        "schedule-to-close-late-success"
+      )
+      const invocation = yield* Retry.prepare({
+        artifact: fixture.resolved,
+        occurrence: preparedOccurrence,
+        input: { _tag: "Inline", value: {} }
+      })
+      const registration = RuntimeWorkflow.toLayer(() => retryExecution(invocation))
+
+      yield* Effect.gen(function*() {
+        yield* TestClock.setTime(
+          Date.parse("2026-01-02T03:04:05.006Z")
+        )
+        const executionId = yield* RuntimeWorkflow.execute(
+          { id: "schedule-to-close-late-success" },
+          { discard: true }
+        )
+        yield* Deferred.await(started)
+        yield* TestClock.adjust(101)
+        const terminal = yield* pollUntilComplete(
+          RuntimeWorkflow,
+          executionId
+        )
+        const failure = failReason(terminal.exit)
+        assert.strictEqual(
+          (failure as { readonly _tag?: unknown })._tag,
+          "ScheduleToCloseTimedOut"
+        )
+        assert.strictEqual(handlerRuns, 1)
+      }).pipe(
+        Effect.provide(
+          registration.pipe(
+            Layer.provideMerge(WorkflowEngine.layerMemory)
+          )
+        )
+      )
+    }).pipe(provideCrypto))
+
+  it.effect("lets schedule-to-close win during durable retry backoff", () =>
+    Effect.gen(function*() {
+      const classified = yield* Deferred.make<void>()
+      const attempts: Array<number> = []
+      const fixture = yield* makeFixture({
+        handler: ((
+          request: Node.HandlerRequest<typeof retryNode>
+        ) =>
+          Effect.sync(() => {
+            attempts.push(request.context.attempt)
+            return businessFailure("BACKOFF_TIMEOUT")
+          }).pipe(Effect.flip)) as Node.Handler<typeof retryNode>,
+        classifier: () =>
+          Deferred.succeed(classified, undefined).pipe(
+            Effect.as({
+              _tag: "Retryable" as const,
+              classificationVersion: 1 as const
+            })
+          ),
+        maximumAttempts: 3,
+        delayMillis: 200,
+        scheduleToClose: {
+          _tag: "After",
+          durationMillis: 100
+        }
+      })
+      const preparedOccurrence = yield* occurrence(
+        fixture,
+        "schedule-to-close-backoff"
+      )
+      const invocation = yield* Retry.prepare({
+        artifact: fixture.resolved,
+        occurrence: preparedOccurrence,
+        input: { _tag: "Inline", value: {} }
+      })
+      const registration = RuntimeWorkflow.toLayer(() => retryExecution(invocation))
+
+      yield* Effect.gen(function*() {
+        yield* TestClock.setTime(
+          Date.parse("2026-01-02T03:04:05.006Z")
+        )
+        const executionId = yield* RuntimeWorkflow.execute(
+          { id: "schedule-to-close-backoff" },
+          { discard: true }
+        )
+        yield* Deferred.await(classified)
+        yield* TestClock.adjust(100)
+        const terminal = yield* pollUntilComplete(
+          RuntimeWorkflow,
+          executionId
+        )
+        const failure = failReason(terminal.exit)
+        assert.strictEqual(
+          (failure as { readonly _tag?: unknown })._tag,
+          "ScheduleToCloseTimedOut"
+        )
+        assert.deepStrictEqual(attempts, [1])
+      }).pipe(
+        Effect.provide(
+          registration.pipe(
+            Layer.provideMerge(WorkflowEngine.layerMemory)
+          )
+        )
+      )
+    }).pipe(provideCrypto))
+
+  it.effect("replays a persisted completion winner without rerunning the handler", () =>
+    Effect.gen(function*() {
+      let handlerRuns = 0
+      let workflowPasses = 0
+      const fixture = yield* makeFixture({
+        handler: (() =>
+          Effect.sync(() => {
+            handlerRuns++
+            return { value: 17 }
+          })) as Node.Handler<typeof retryNode>,
+        scheduleToClose: {
           _tag: "After",
           durationMillis: 1_000
         }
       })
       const preparedOccurrence = yield* occurrence(
         fixture,
-        "unsupported-timeout"
+        "schedule-to-close-winner-replay"
       )
-      const failure = yield* Retry.prepare({
+      const invocation = yield* Retry.prepare({
         artifact: fixture.resolved,
         occurrence: preparedOccurrence,
-        input: {
-          _tag: "Inline",
-          value: {}
-        }
-      }).pipe(Effect.flip)
-      assert.strictEqual(
-        failure.code,
-        Retry.ErrorCodes.UnsupportedTimeoutPolicy
+        input: { _tag: "Inline", value: {} }
+      })
+      const gate = NativeDeferred.make(
+        "WorkflowBuilder/EffectWorkflowRetryV3/ScheduleToCloseReplayGate"
       )
-      assert.include(failure.message, "scheduleToStart")
-    }).pipe(provideCrypto))
-})
+      const gateToken = yield* Deferred.make<NativeDeferred.Token>()
+      const registration = ReplayWorkflow.toLayer(() =>
+        Effect.gen(function*() {
+          workflowPasses++
+          const output = yield* retryExecution(invocation)
+          yield* Deferred.succeed(
+            gateToken,
+            yield* NativeDeferred.token(gate)
+          )
+          yield* NativeDeferred.await(gate)
+          return output
+        })
+      )
 
-describe("EffectWorkflowRetryV3 managed runtime", () => {
+      yield* Effect.gen(function*() {
+        const executionId = yield* ReplayWorkflow.execute(
+          { id: "schedule-to-close-winner-replay" },
+          { discard: true }
+        )
+        const token = yield* Deferred.await(gateToken)
+        const suspended = yield* pollUntilObserved(
+          ReplayWorkflow,
+          executionId
+        )
+        assert.strictEqual(suspended._tag, "Suspended")
+        assert.strictEqual(handlerRuns, 1)
+        assert.strictEqual(workflowPasses, 1)
+
+        yield* NativeDeferred.succeed(gate, {
+          token,
+          value: undefined
+        })
+        const terminal = yield* pollUntilComplete(
+          ReplayWorkflow,
+          executionId
+        )
+        assert(Exit.isSuccess(terminal.exit))
+        if (Exit.isSuccess(terminal.exit)) {
+          assert.deepStrictEqual(terminal.exit.value, {
+            value: 17
+          })
+        }
+        assert.strictEqual(workflowPasses, 2)
+        assert.strictEqual(handlerRuns, 1)
+      }).pipe(
+        Effect.provide(
+          registration.pipe(
+            Layer.provideMerge(WorkflowEngine.layerMemory)
+          )
+        )
+      )
+    }).pipe(provideCrypto))
+
+  it.effect("defects on a persisted winner whose internal attempt coordinates are corrupt", () =>
+    Effect.gen(function*() {
+      let handlerRuns = 0
+      const fixture = yield* makeFixture({
+        handler: (() =>
+          Effect.sync(() => {
+            handlerRuns++
+            return { value: 23 }
+          })) as Node.Handler<typeof retryNode>,
+        scheduleToClose: {
+          _tag: "After",
+          durationMillis: 1_000
+        }
+      })
+      const preparedOccurrence = yield* occurrence(
+        fixture,
+        "schedule-to-close-corrupt-winner"
+      )
+      const invocation = yield* Retry.prepare({
+        artifact: fixture.resolved,
+        occurrence: preparedOccurrence,
+        input: { _tag: "Inline", value: {} }
+      })
+      const registration = DefectWorkflow.toLayer(() => retryExecution(invocation))
+      const operationName = expectSuccess(NativeName.name({
+        _tag: "RetryScheduleToClose",
+        coordinateVersion: NativeName.CoordinateVersion,
+        occurrenceDigest: preparedOccurrence.occurrenceDigest,
+        operationId: "workflow-builder.retry.schedule-to-close",
+        generation: 0
+      }))
+      const durableWinner = NativeDeferred.make(
+        `raceAll/${operationName}`,
+        {
+          success: Retry.RetryScheduleToCloseWinner,
+          error: Schema.Never
+        }
+      )
+
+      yield* Effect.gen(function*() {
+        const payload = {
+          id: "schedule-to-close-corrupt-winner"
+        }
+        const executionId = yield* DefectWorkflow.executionId(payload)
+        const token = new NativeDeferred.TokenParsed({
+          workflowName: DefectWorkflow._tag,
+          executionId,
+          deferredName: durableWinner.name
+        }).asToken
+        yield* NativeDeferred.succeed(durableWinner, {
+          token,
+          value: {
+            _tag: "RetryScheduleToCloseWinner",
+            outcomeEnvelopeVersion: 1,
+            controllerOperationDigest: invocation.scheduleToCloseControllerDigest!,
+            exit: Exit.succeed({
+              _tag: "Succeeded",
+              outcomeVersion: 1,
+              attempt: 1,
+              activityDigest: digest("f") as Wire.OperationDigest,
+              output: {
+                _tag: "Inline",
+                value: { value: 999 }
+              }
+            })
+          }
+        })
+
+        yield* DefectWorkflow.execute(payload, { discard: true })
+        const terminal = yield* pollUntilComplete(
+          DefectWorkflow,
+          executionId
+        )
+        assert(Exit.isFailure(terminal.exit))
+        if (Exit.isFailure(terminal.exit)) {
+          const died = terminal.exit.cause.reasons.find(
+            (reason) => reason._tag === "Die"
+          )
+          assert.isDefined(died)
+          if (died?._tag === "Die") {
+            assert.strictEqual(
+              (died.defect as { readonly _tag?: unknown })._tag,
+              "EffectWorkflowRetryError"
+            )
+            assert.strictEqual(
+              (died.defect as { readonly code?: unknown }).code,
+              Retry.ErrorCodes.OperationPreparationFailed
+            )
+          }
+        }
+        assert.strictEqual(handlerRuns, 0)
+      }).pipe(
+        Effect.provide(
+          registration.pipe(
+            Layer.provideMerge(WorkflowEngine.layerMemory)
+          )
+        )
+      )
+    }).pipe(provideCrypto))
+
   it.effect("retries through internal jitter and a durable timer without rerunning the handler, classifier, or failure encoder on replay", () =>
     Effect.gen(function*() {
       const attempts: Array<number> = []

@@ -2714,6 +2714,8 @@ const expectedRaceContracts = (
       }
     case "Race":
       return undefined
+    case "RetryScheduleToClose":
+      return undefined
   }
 }
 

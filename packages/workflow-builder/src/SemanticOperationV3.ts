@@ -1032,6 +1032,88 @@ export const RacePreparation = Schema.TaggedStruct("Race", {
  */
 export type RacePreparation = Schema.Schema.Type<typeof RacePreparation>
 
+const retryScheduleToCloseIssues = (
+  spec: Schema.Schema.Type<typeof RetryScheduleToCloseSpecStruct>
+): ReadonlyArray<Schema.FilterIssue> => {
+  const issues: Array<Schema.FilterIssue> = []
+  if (spec.activityPolicy.timeouts.scheduleToStart._tag !== "Disabled") {
+    issues.push({
+      path: ["activityPolicy", "timeouts", "scheduleToStart"],
+      issue: "Retry schedule-to-close controllers require scheduleToStart to be disabled"
+    })
+  }
+  if (spec.activityPolicy.timeouts.startToClose._tag !== "Disabled") {
+    issues.push({
+      path: ["activityPolicy", "timeouts", "startToClose"],
+      issue: "Retry schedule-to-close controllers require startToClose to be disabled"
+    })
+  }
+  const scheduleToClose = spec.activityPolicy.timeouts.scheduleToClose
+  if (scheduleToClose._tag !== "After") {
+    issues.push({
+      path: ["activityPolicy", "timeouts", "scheduleToClose"],
+      issue: "Retry schedule-to-close controllers require an enabled scheduleToClose timeout"
+    })
+  } else if (scheduleToClose.durationMillis !== spec.durationMillis) {
+    issues.push({
+      path: ["durationMillis"],
+      issue: "Controller duration must equal the exact activity-policy scheduleToClose duration"
+    })
+  }
+  return issues
+}
+
+const RetryScheduleToCloseSpecStruct = Schema.TaggedStruct(
+  "RetryScheduleToClose",
+  {
+    ...CommonSpec,
+    generation: Wire.NonNegativeSafeInt,
+    controllerVersion: Schema.Literal(1),
+    firstActivityDigest: Wire.OperationDigest,
+    initialObservationDigest: Wire.OperationDigest,
+    nodeDefinitionKey: Wire.Identifier,
+    handlerBuildDigest: Wire.BuildDigest,
+    input: Wire.InlineEncodedPayload,
+    activityPolicy: ActivityPolicyV3.Policy,
+    timeoutKind: Schema.Literal("ScheduleToClose"),
+    durationMillis: Wire.PositiveSemanticDelayMillis,
+    outcomeContractVersion: Schema.Literal(1),
+    loserDisposition: RaceLoserDisposition
+  }
+)
+
+/**
+ * One content-addressed controller that fences a complete managed retry loop
+ * with an exact schedule-to-close duration.
+ *
+ * **Details**
+ *
+ * The nested occurrence pins the artifact and dynamic node coordinates. The
+ * descriptor repeats the exact handler, inline input, complete activity
+ * policy, first managed-attempt digest, timeout kind, duration, outcome
+ * contract, and honest waiter-interruption disposition so its native name can
+ * never silently acquire different retry or timeout meaning.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const RetryScheduleToCloseSpec = RetryScheduleToCloseSpecStruct.check(
+  Schema.makeFilter(retryScheduleToCloseIssues)
+).annotate({
+  identifier: "WorkflowSemanticOperationV3RetryScheduleToCloseSpec",
+  parseOptions: strictParseOptions
+})
+
+/**
+ * The decoded type of {@link RetryScheduleToCloseSpec}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type RetryScheduleToCloseSpec = Schema.Schema.Type<
+  typeof RetryScheduleToCloseSpec
+>
+
 /**
  * Closed semantic operation specification vocabulary currently admitted by
  * version `1`.
@@ -1043,7 +1125,8 @@ export const OperationSpec = Schema.Union([
   ActivitySpec,
   TimerSpec,
   DeferredSpec,
-  RaceSpec
+  RaceSpec,
+  RetryScheduleToCloseSpec
 ]).annotate({
   identifier: "WorkflowSemanticOperationV3Spec",
   parseOptions: strictParseOptions
@@ -1139,6 +1222,36 @@ export const RaceDocument = Schema.TaggedStruct("Race", {
 })
 
 /**
+ * Content-addressed durable schedule-to-close retry-controller document.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const RetryScheduleToCloseDocument = Schema.TaggedStruct(
+  "RetryScheduleToClose",
+  {
+    ...CommonDocument,
+    generation: Wire.NonNegativeSafeInt,
+    controllerVersion: Schema.Literal(1),
+    firstActivityDigest: Wire.OperationDigest,
+    initialObservationDigest: Wire.OperationDigest,
+    nodeDefinitionKey: Wire.Identifier,
+    handlerBuildDigest: Wire.BuildDigest,
+    input: Wire.InlineEncodedPayload,
+    activityPolicy: ActivityPolicyV3.Policy,
+    timeoutKind: Schema.Literal("ScheduleToClose"),
+    durationMillis: Wire.PositiveSemanticDelayMillis,
+    outcomeContractVersion: Schema.Literal(1),
+    loserDisposition: RaceLoserDisposition
+  }
+).check(
+  Schema.makeFilter(retryScheduleToCloseIssues)
+).annotate({
+  identifier: "WorkflowSemanticOperationV3RetryScheduleToCloseDocument",
+  parseOptions: strictParseOptions
+})
+
+/**
  * Complete semantic operation digest preimage.
  *
  * @category schemas
@@ -1148,7 +1261,8 @@ export const OperationDocument = Schema.Union([
   ActivityDocument,
   TimerDocument,
   DeferredDocument,
-  RaceDocument
+  RaceDocument,
+  RetryScheduleToCloseDocument
 ]).annotate({
   identifier: "WorkflowSemanticOperationV3Document",
   parseOptions: strictParseOptions
@@ -1520,6 +1634,8 @@ const raceParticipantNativeKey = (
       ])
     case "Race":
       return "unsupported"
+    case "RetryScheduleToClose":
+      return "unsupported"
   }
 }
 
@@ -1579,6 +1695,11 @@ const deriveRaceParticipant = (
       return Result.fail(error(
         ErrorCodes.InvalidSpec,
         "Nested Race operations are not participants in race descriptor version 1"
+      ))
+    case "RetryScheduleToClose":
+      return Result.fail(error(
+        ErrorCodes.InvalidSpec,
+        "Retry schedule-to-close controllers are not race participants"
       ))
   }
 }
@@ -1799,6 +1920,14 @@ export const nativeCoordinates = (
     case "Race":
       return Result.succeed({
         _tag: "Race",
+        coordinateVersion: 3,
+        occurrenceDigest: document.occurrence.occurrenceDigest,
+        operationId: document.operationId,
+        generation: document.generation
+      })
+    case "RetryScheduleToClose":
+      return Result.succeed({
+        _tag: "RetryScheduleToClose",
         coordinateVersion: 3,
         occurrenceDigest: document.occurrence.occurrenceDigest,
         operationId: document.operationId,

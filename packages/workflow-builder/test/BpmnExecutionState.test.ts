@@ -1,15 +1,26 @@
 import { assert, describe, it } from "@effect/vitest"
 import * as Result from "effect/Result"
 import * as Schema from "effect/Schema"
+import * as BpmnActivityV3 from "../src/BpmnActivityV3.ts"
 import * as BpmnExecutionState from "../src/BpmnExecutionState.ts"
 import * as BpmnModel from "../src/BpmnModel.ts"
 import * as ProtocolV2Wire from "../src/ProtocolV2Wire.ts"
+import * as ProtocolV3Wire from "../src/ProtocolV3Wire.ts"
 
 const emptyExtensions = (): Array<BpmnModel.ExtensionElement> => []
 
 const executableFingerprint = Schema.decodeUnknownSync(
   ProtocolV2Wire.BpmnExecutableFingerprint
 )(`sha256:${"3".repeat(64)}`)
+const artifactDigest = Schema.decodeUnknownSync(
+  ProtocolV3Wire.ArtifactDigest
+)(`sha256:${"a".repeat(64)}`)
+const operationDigest = Schema.decodeUnknownSync(
+  ProtocolV3Wire.OperationDigest
+)(`sha256:${"b".repeat(64)}`)
+const occurrenceDigest = Schema.decodeUnknownSync(
+  ProtocolV3Wire.OccurrenceDigest
+)(`sha256:${"c".repeat(64)}`)
 
 const expression = (source: string): BpmnModel.Expression => ({
   language: "feel",
@@ -395,6 +406,7 @@ const state = (): BpmnExecutionState.BpmnExecutionState => ({
     position: { _tag: "AtNode", nodeId: "gateway-main" },
     createdAt: "2026-07-23T10:00:03.000Z"
   }],
+  activityResolutions: [],
   gatewayFrames: [{
     frameId: "frame-gateway",
     gatewayId: "gateway-main",
@@ -583,6 +595,56 @@ describe("BpmnExecutionState", () => {
     assert.isTrue(Result.isSuccess(validExclusive))
   })
 
+  it("cross-validates exact durable protocol-v3 task resolutions", () => {
+    const resolved = state()
+    const token = resolved.tokens[0]!
+    token.position = { _tag: "AtNode", nodeId: "task-review" }
+    token.status = "consumed"
+    token.consumedAt = "2026-07-23T10:00:05.000Z"
+    resolved.activityResolutions = [{
+      resolutionVersion: BpmnActivityV3.ResolutionVersion,
+      tokenId: token.tokenId,
+      taskNodeId: "task-review",
+      scopeInstanceId: token.scopeInstanceId,
+      outcome: {
+        _tag: "Succeeded",
+        outcomeVersion: BpmnActivityV3.OutcomeVersion,
+        artifactDigest,
+        semanticNodeId: "semantic-task",
+        occurrenceDigest,
+        firstActivityDigest: operationDigest,
+        attempt: 1,
+        completedActivityDigest: operationDigest
+      },
+      resolvedAt: token.consumedAt
+    }]
+
+    const valid = BpmnExecutionState.validate(model(), resolved)
+    assert(Result.isSuccess(valid))
+
+    const dangling = structuredClone(resolved)
+    dangling.activityResolutions[0]!.tokenId = "missing-token"
+    const invalidDangling = BpmnExecutionState.validate(model(), dangling)
+    assert(Result.isFailure(invalidDangling))
+    assert(
+      invalidDangling.failure.diagnostics.some((diagnostic) =>
+        diagnostic.code ===
+          BpmnExecutionState.Codes.UnknownActivityResolutionTokenRef
+      )
+    )
+
+    const active = structuredClone(resolved)
+    active.tokens[0]!.status = "active"
+    delete active.tokens[0]!.consumedAt
+    const invalidActive = BpmnExecutionState.validate(model(), active)
+    assert(Result.isFailure(invalidActive))
+    assert(
+      invalidActive.failure.diagnostics.some((diagnostic) =>
+        diagnostic.code === BpmnExecutionState.Codes.InvalidActivityResolution
+      )
+    )
+  })
+
   it("rejects cross-scope tokens and duplicate gateway arrivals within one join epoch", () => {
     const forged = state()
     forged.tokens[0]!.scopeInstanceId = "scope-sub-pack"
@@ -635,6 +697,24 @@ describe("BpmnExecutionState", () => {
     assert(
       invalidTerminal.failure.diagnostics.some((diagnostic) =>
         diagnostic.code === BpmnExecutionState.Codes.InvalidGatewayFrame
+      )
+    )
+  })
+
+  it("requires a failed execution to retain a failed root scope", () => {
+    const failed = state()
+    failed.status = "failed"
+    failed.completedAt = "2026-07-23T10:10:00.000Z"
+    failed.scopeInstances[0]!.status = "completed"
+    failed.scopeInstances[0]!.exitedAt = failed.completedAt
+
+    const result = BpmnExecutionState.validate(model(), failed)
+
+    assert(Result.isFailure(result))
+    assert(
+      result.failure.diagnostics.some((diagnostic) =>
+        diagnostic.code === BpmnExecutionState.Codes.InvalidState &&
+        diagnostic.message.includes("failed root scope")
       )
     )
   })

@@ -53,7 +53,8 @@ Today the package provides:
 - a durable BPMN execution-state foundation with token positions, scope and
   invocation identity, gateway/loop/multi-instance/call frames, subscriptions,
   timers, work items, compensation registrations, and cancellation regions,
-  whose version `2` model reference is pinned to an executable fingerprint;
+  whose state version `3` carries a version `2` executable fingerprint
+  reference and exact protocol-v3 task-resolution records;
 - a normalized BPMN data/IO/interface slice and BPMNDI/DI/DC representation
   with aggregate reference, geometry, and semantic-kind validation;
 - a resource-bounded namespace-aware XML infoset plus strict named profile
@@ -65,6 +66,15 @@ Today the package provides:
   tasks, ordinary subprocesses, conditional/default flows, and
   exclusive/parallel gateways, together with machine-readable coverage gates
   that still declare no formal BPMN conformance claim;
+- an explicitly bounded protocol-v3 Task/Boundary Error execution slice.
+  Immutable task bindings and exact failure-identity-to-Error mappings are part
+  of the executable fingerprint. `resolveTask` routes exact success normally,
+  catches a mapped business failure through at most one matching interrupting
+  Boundary Error, and fails the root execution for unmapped or uncaught
+  failures. Durable resolutions are idempotent and causally replayed. This does
+  not yet cover the complete BPMN Activity lifecycle, parent-scope Error
+  propagation, timers, BPMN Cancel, non-interrupting boundaries, or event
+  subprocesses;
 - a strict BPMN executable facade proving the named XML profile can be imported,
   compiled directly to that token kernel, executed through conditional/default
   and parallel/subprocess paths, replayed, canonically exported, re-imported,
@@ -152,11 +162,19 @@ Today the package provides:
   non-retryable identities, the exact classifier, attempt and elapsed admission
   budgets, replay-recorded internal jitter, and native durable-clock backoff,
   and returns closed `NonRetryable` or `Exhausted` terminal explanations.
-  Enabled hard activity timeouts are currently rejected rather than emulated:
-  schedule-to-start/start-to-close/schedule-to-close enforcement and
-  cancellation propagation require a later lifecycle milestone, while
-  `maximumElapsed` currently prevents admission of another attempt and does not
-  interrupt one already running;
+  An exact content-addressed schedule-to-close controller arms one stable
+  injected-engine clock and obtains its durable acknowledgement before the
+  initial time observation or any node attempt. Completion and clock contenders
+  publish success-only envelopes to one native durable deferred; its backend
+  first-wins result covers encoded success, terminal business failure, timeout,
+  and non-interrupt defect. Attempts and final publication are clock-fenced,
+  winner coordinates and deterministic policy facts are revalidated, and loser
+  interruption is fire-and-forget rather than joined. The timeout fences
+  semantic completion but cannot promise rollback of an external side effect
+  already dispatched. Schedule-to-start and start-to-close remain rejected
+  until a persistent worker start/lease acknowledgement exists;
+  `maximumElapsed` remains an admission budget and does not interrupt an
+  attempt already running;
 - protocol-v3 child-workflow collision-free identities, exact
   artifact/contract/deployment/build and bounded lineage pins,
   inline-or-blob inputs/results, a closed command/event vocabulary, and a pure

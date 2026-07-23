@@ -5,12 +5,14 @@
  *
  * This module models one live or terminal BPMN execution snapshot against a
  * validated {@link BpmnModel.BpmnModel}. It records tokens, scope instances,
- * and durable control frames without claiming full BPMN execution conformance.
+ * exact protocol-v3 task resolutions, and durable control frames without
+ * claiming full BPMN execution conformance.
  *
  * @since 4.0.0
  */
 import * as Result from "effect/Result"
 import * as Schema from "effect/Schema"
+import * as BpmnActivityV3 from "./BpmnActivityV3.ts"
 import * as BpmnModel from "./BpmnModel.ts"
 import * as Diagnostic from "./Diagnostic.ts"
 import * as Json from "./internal/json.ts"
@@ -108,7 +110,7 @@ const codeError = (
  * @category constants
  * @since 4.0.0
  */
-export const BpmnExecutionStateVersion = 2 as const
+export const BpmnExecutionStateVersion = 3 as const
 
 /**
  * Version of the executable BPMN fingerprint preimage.
@@ -116,7 +118,7 @@ export const BpmnExecutionStateVersion = 2 as const
  * @category constants
  * @since 4.0.0
  */
-export const BpmnExecutableFingerprintVersion = 1 as const
+export const BpmnExecutableFingerprintVersion = 2 as const
 
 /**
  * Version of the token-kernel semantics committed by an execution.
@@ -124,7 +126,7 @@ export const BpmnExecutableFingerprintVersion = 1 as const
  * @category constants
  * @since 4.0.0
  */
-export const BpmnKernelSemanticVersion = "1" as const
+export const BpmnKernelSemanticVersion = "2" as const
 
 /**
  * Execution snapshot identity pinned to one BPMN semantic model version.
@@ -542,6 +544,7 @@ export const BpmnExecutionState = Schema.Struct({
   extensionElements: Schema.Array(BpmnModel.ExtensionElement),
   scopeInstances: Schema.Array(ScopeInstance),
   tokens: Schema.Array(Token),
+  activityResolutions: Schema.Array(BpmnActivityV3.ActivityResolution),
   gatewayFrames: Schema.Array(GatewayFrame),
   loopFrames: Schema.Array(LoopFrame),
   multiInstanceGroups: Schema.Array(MultiInstanceGroup),
@@ -586,6 +589,8 @@ export const Codes = {
   UnknownTokenScopeRef: "UnknownTokenScopeRef",
   InvalidTokenPosition: "InvalidTokenPosition",
   InvalidTokenInvocation: "InvalidTokenInvocation",
+  UnknownActivityResolutionTokenRef: "UnknownActivityResolutionTokenRef",
+  InvalidActivityResolution: "InvalidActivityResolution",
   UnknownGatewayRef: "UnknownGatewayRef",
   InvalidGatewayFrame: "InvalidGatewayFrame",
   UnknownLoopActivityRef: "UnknownLoopActivityRef",
@@ -787,6 +792,13 @@ export const validate = (
     diagnostics.push(codeError(
       Codes.InvalidState,
       "A completed BPMN execution requires a completed root scope",
+      ["scopeInstances"]
+    ))
+  }
+  if (state.status === "failed" && rootScope !== undefined && rootScope.status !== "failed") {
+    diagnostics.push(codeError(
+      Codes.InvalidState,
+      "A failed BPMN execution requires a failed root scope",
       ["scopeInstances"]
     ))
   }
@@ -1059,6 +1071,64 @@ export const validate = (
         Codes.InvalidTokenPosition,
         `Active token '${token.tokenId}' cannot belong to terminal scope '${scope.scopeInstanceId}'`,
         ["tokens", index, "scopeInstanceId"]
+      ))
+    }
+  }
+
+  const resolvedTokenIds = new Set<string>()
+  for (let index = 0; index < state.activityResolutions.length; index++) {
+    const resolution = state.activityResolutions[index]!
+    const path = ["activityResolutions", index] as const
+    if (resolvedTokenIds.has(resolution.tokenId)) {
+      diagnostics.push(codeError(
+        Codes.InvalidActivityResolution,
+        `Task token '${resolution.tokenId}' has more than one durable activity resolution`,
+        [...path, "tokenId"]
+      ))
+    } else {
+      resolvedTokenIds.add(resolution.tokenId)
+    }
+    const token = tokens.get(resolution.tokenId)
+    if (token === undefined) {
+      diagnostics.push(codeError(
+        Codes.UnknownActivityResolutionTokenRef,
+        `Activity resolution references unknown task token '${resolution.tokenId}'`,
+        [...path, "tokenId"]
+      ))
+      continue
+    }
+    const node = token.position._tag === "AtNode"
+      ? nodeById.get(token.position.nodeId)
+      : undefined
+    if (
+      node?._tag !== "Task" ||
+      node.id !== resolution.taskNodeId ||
+      token.scopeInstanceId !== resolution.scopeInstanceId
+    ) {
+      diagnostics.push(codeError(
+        Codes.InvalidActivityResolution,
+        `Activity resolution for token '${resolution.tokenId}' does not match its exact task wait`,
+        path
+      ))
+    }
+    if (token.status === "active" || token.consumedAt === undefined) {
+      diagnostics.push(codeError(
+        Codes.InvalidActivityResolution,
+        `Resolved task token '${resolution.tokenId}' must be inactive`,
+        [...path, "tokenId"]
+      ))
+    } else if (token.consumedAt !== resolution.resolvedAt) {
+      diagnostics.push(codeError(
+        Codes.InvalidActivityResolution,
+        `Activity resolution for token '${resolution.tokenId}' must share its terminal token timestamp`,
+        [...path, "resolvedAt"]
+      ))
+    }
+    if (resolution.resolvedAt < token.createdAt) {
+      diagnostics.push(codeError(
+        Codes.InvalidActivityResolution,
+        `Activity resolution for token '${resolution.tokenId}' predates its task wait`,
+        [...path, "resolvedAt"]
       ))
     }
   }

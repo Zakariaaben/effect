@@ -175,6 +175,33 @@ export const Race = Schema.TaggedStruct("Race", {
 export type Race = Schema.Schema.Type<typeof Race>
 
 /**
+ * Coordinates for one durable schedule-to-close retry controller.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const RetryScheduleToClose = Schema.TaggedStruct(
+  "RetryScheduleToClose",
+  {
+    ...CommonCoordinates,
+    generation: Wire.NonNegativeSafeInt
+  }
+).annotate({
+  identifier: "WorkflowEffectOperationV3RetryScheduleToClose",
+  parseOptions: strictParseOptions
+})
+
+/**
+ * The decoded type of {@link RetryScheduleToClose}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type RetryScheduleToClose = Schema.Schema.Type<
+  typeof RetryScheduleToClose
+>
+
+/**
  * Closed coordinate vocabulary currently mapped to names by adapter version
  * `1`.
  *
@@ -185,7 +212,8 @@ export const Coordinates = Schema.Union([
   Activity,
   Timer,
   Deferred,
-  Race
+  Race,
+  RetryScheduleToClose
 ]).annotate({
   identifier: "WorkflowEffectOperationV3Coordinates",
   parseOptions: strictParseOptions

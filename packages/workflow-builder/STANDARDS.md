@@ -68,10 +68,18 @@ Implemented foundations:
   validation;
 - a separate durable execution-state schema for token markings, scope
   invocations, gateway/loop/multi-instance/call frames, catch subscriptions,
-  timers, work items, compensation registrations, and cancellation regions;
+  timers, work items, compensation registrations, cancellation regions, and
+  exact protocol-v3 task resolutions;
 - a replayable bounded token kernel for an explicitly admitted subset of none
   start/end events, tasks, embedded subprocesses, conditional/default sequence
-  flows, and exclusive/parallel gateways; and
+  flows, and exclusive/parallel gateways;
+- an atomic protocol-v3 Task/Boundary Error slice whose executable fingerprint
+  commits immutable task bindings and exact business-failure identity mappings.
+  Exact success follows the normal route; an explicitly promoted failure may
+  be caught by one matching interrupting Boundary Error; unmapped or uncaught
+  failure deterministically fails the root. Resolution idempotency, terminal
+  cleanup, and causal replay are enforced without claiming the complete
+  Activity or event lifecycle; and
 - a resource-bounded namespace-aware XML 1.0 infoset parser, semantic
   validator, and serializer;
 - strict profile `bpmn-2.0.2-core-process-di-v2`, which fails closed while
@@ -89,8 +97,8 @@ Implemented foundations:
 - an Effectful executable-preparation boundary whose domain-separated
   SHA-256 fingerprint commits to the normalized semantic model, root process,
   kernel semantic version, limits, named profile, and exact evaluator-build
-  manifest; version `2` markings and versioned journal headers fail closed on a
-  model/profile mismatch;
+  manifest; state version `3`, fingerprint version `2`, and versioned journal
+  headers fail closed on a model/profile mismatch;
 - a strict Effect evaluator registry with full language/version/build/limit
   tuple resolution and no compatibility or latest fallback, plus exact
   evaluator-binding and bounded usage evidence in condition journal events; an
@@ -123,10 +131,18 @@ Implemented foundations:
   human-work semantics; and
 - managed native retry for exact node attempts, including policy-pinned failure
   identity, classifier resolution, attempt and elapsed admission budgets,
-  replay-recorded jitter, and durable-clock backoff. Hard activity timeouts and
-  cancellation propagation are rejected until the required lifecycle
-  semantics exist, so this is backend evidence rather than a complete BPMN
-  Activity or boundary-event implementation; and
+  replay-recorded jitter, durable-clock backoff, and a content-addressed
+  schedule-to-close controller around the complete retry loop. A stable
+  persistent clock is acknowledged before time observation or node execution;
+  contenders publish success-only envelopes to one native first-wins deferred,
+  attempts and publication are clock-fenced, and the recorded
+  completion/timeout/defect winner is coordinate- and policy-checked. Loser
+  interruption is never joined; timeout fences semantic completion without
+  claiming rollback of an external side effect.
+  Schedule-to-start, start-to-close, and cancellation propagation remain
+  rejected until the required worker lifecycle protocol exists, so this is
+  backend evidence rather than a complete BPMN Activity or boundary-event
+  implementation; and
 - machine-readable requirement/coverage schemas that record the named mapping
   slice separately while declaring no BPMN conformance claim.
 

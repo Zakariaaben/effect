@@ -14,12 +14,21 @@
  *
  * @since 4.0.0
  */
+import * as Cause from "effect/Cause"
+import * as Clock from "effect/Clock"
 import * as Context from "effect/Context"
 import type * as Crypto from "effect/Crypto"
+import * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
+import * as Exit from "effect/Exit"
+import * as Option from "effect/Option"
 import * as Result from "effect/Result"
 import * as Schema from "effect/Schema"
+import * as NativeClock from "effect/unstable/workflow/DurableClock"
+import * as NativeDeferred from "effect/unstable/workflow/DurableDeferred"
+import * as NativeWorkflowEngine from "effect/unstable/workflow/WorkflowEngine"
 import * as ActivityPolicyV3 from "./ActivityPolicyV3.ts"
+import * as NativeName from "./EffectWorkflowOperationV3.ts"
 import * as EffectWorkflowSemanticV3 from "./EffectWorkflowSemanticV3.ts"
 import * as Json from "./internal/json.ts"
 import * as PlanStoreV3 from "./PlanStoreV3.ts"
@@ -39,7 +48,8 @@ const OperationIds = {
   FailureTime: "workflow-builder.retry.failure-time",
   Classifier: "workflow-builder.retry.classifier",
   Delay: "workflow-builder.retry.delay",
-  Backoff: "workflow-builder.retry.backoff"
+  Backoff: "workflow-builder.retry.backoff",
+  ScheduleToClose: "workflow-builder.retry.schedule-to-close"
 } as const
 
 /**
@@ -252,15 +262,45 @@ export const Exhausted = Schema.TaggedStruct("Exhausted", {
 export type Exhausted = Schema.Schema.Type<typeof Exhausted>
 
 /**
- * Closed terminal business-failure vocabulary implemented before timeout
- * support.
+ * A durable schedule-to-close deadline that won before semantic completion.
+ *
+ * **Details**
+ *
+ * The timeout fences the managed retry composition and interrupts the losing
+ * workflow waiter. It does not claim to roll back an external side effect
+ * already dispatched by an activity handler.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const ScheduleToCloseTimedOut = Schema.TaggedStruct(
+  "ScheduleToCloseTimedOut",
+  {
+    timeoutVersion: Schema.Literal(1),
+    timeoutKind: Schema.Literal("ScheduleToClose"),
+    controllerOperationDigest: Wire.OperationDigest,
+    firstActivityDigest: Wire.OperationDigest,
+    durationMillis: Wire.PositiveSemanticDelayMillis
+  }
+).annotate({
+  identifier: "WorkflowEffectWorkflowRetryV3ScheduleToCloseTimedOut",
+  parseOptions: strictParseOptions
+})
+
+export type ScheduleToCloseTimedOut = Schema.Schema.Type<
+  typeof ScheduleToCloseTimedOut
+>
+
+/**
+ * Closed public terminal vocabulary of managed retry execution.
  *
  * @category schemas
  * @since 4.0.0
  */
 export const TerminalFailure = Schema.Union([
   NonRetryable,
-  Exhausted
+  Exhausted,
+  ScheduleToCloseTimedOut
 ]).annotate({
   identifier: "WorkflowEffectWorkflowRetryV3TerminalFailure",
   parseOptions: strictParseOptions
@@ -268,6 +308,61 @@ export const TerminalFailure = Schema.Union([
 
 export type TerminalFailure = Schema.Schema.Type<
   typeof TerminalFailure
+>
+
+/**
+ * Closed semantic completion values persisted by a schedule-to-close
+ * controller before any business output is decoded.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const RetryScheduleToCloseOutcome = Schema.Union([
+  NodeAttemptSucceeded,
+  NonRetryable,
+  Exhausted,
+  ScheduleToCloseTimedOut
+]).annotate({
+  identifier: "WorkflowEffectWorkflowRetryV3ScheduleToCloseOutcome",
+  parseOptions: strictParseOptions
+})
+
+export type RetryScheduleToCloseOutcome = Schema.Schema.Type<
+  typeof RetryScheduleToCloseOutcome
+>
+
+const RetryScheduleToCloseWinnerStruct = Schema.Struct({
+  _tag: Schema.Literal("RetryScheduleToCloseWinner"),
+  outcomeEnvelopeVersion: Schema.Literal(1),
+  controllerOperationDigest: Wire.OperationDigest,
+  exit: Schema.Exit(
+    RetryScheduleToCloseOutcome,
+    Schema.Never,
+    Schema.Defect()
+  )
+})
+
+/**
+ * Canonical persisted winner for one schedule-to-close retry controller.
+ *
+ * **Details**
+ *
+ * Semantic success, terminal business failure, and timeout are successful
+ * values inside the canonical `Exit`. Non-interrupt defects retain their
+ * complete native cause. Pure interruption is never converted into a winner.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const RetryScheduleToCloseWinner = RetryScheduleToCloseWinnerStruct.pipe(
+  Schema.decodeTo(Schema.toType(RetryScheduleToCloseWinnerStruct))
+).annotate({
+  identifier: "WorkflowEffectWorkflowRetryV3ScheduleToCloseWinner",
+  parseOptions: strictParseOptions
+})
+
+export type RetryScheduleToCloseWinner = Schema.Schema.Type<
+  typeof RetryScheduleToCloseWinner
 >
 
 /**
@@ -287,6 +382,7 @@ export interface PreparedRetryInvocation {
   readonly occurrenceDigest: Wire.OccurrenceDigest
   readonly nodeId: Wire.AtomicIdentifier
   readonly firstActivityDigest: Wire.OperationDigest
+  readonly scheduleToCloseControllerDigest?: Wire.OperationDigest | undefined
 }
 
 /**
@@ -322,6 +418,19 @@ interface PreparedAttempt {
   readonly resolution: SemanticExecutableRegistryV3.ResolvedNodeAttemptActivity
 }
 
+type PreparedScheduleToCloseOperation = SemanticOperationV3.PreparedOperation & {
+  readonly document: Extract<
+    SemanticOperationV3.OperationDocument,
+    { readonly _tag: "RetryScheduleToClose" }
+  >
+}
+
+interface PreparedScheduleToClose {
+  readonly operation: PreparedScheduleToCloseOperation
+  readonly operationName: string
+  readonly durationMillis: Wire.PositiveSemanticDelayMillis
+}
+
 interface InvocationState {
   readonly artifact: SemanticExecutableRegistryV3.ResolvedArtifactExecutables
   readonly occurrence: SemanticOccurrenceV3.PreparedOccurrence
@@ -329,6 +438,7 @@ interface InvocationState {
   readonly input: Wire.InlineEncodedPayload
   readonly firstAttempt: PreparedAttempt
   readonly initialObservation: SemanticExecutableRegistryV3.ResolvedTimeObservationActivity
+  readonly scheduleToClose: PreparedScheduleToClose | undefined
 }
 
 const invocationStates = new WeakMap<object, InvocationState>()
@@ -738,6 +848,85 @@ const prepareBackoff = (
     }
   )
 
+const prepareScheduleToClose = (
+  state: Pick<
+    InvocationState,
+    "occurrence" | "node" | "input"
+  >,
+  firstAttempt: PreparedAttempt,
+  initialObservation: SemanticExecutableRegistryV3.ResolvedTimeObservationActivity,
+  durationMillis: Wire.PositiveSemanticDelayMillis
+): Effect.Effect<
+  PreparedScheduleToClose,
+  EffectWorkflowRetryError,
+  Crypto.Crypto
+> =>
+  Effect.gen(function*() {
+    const operation = yield* prepareOperation(
+      state.occurrence,
+      state.node.binding.nodeId,
+      OperationIds.ScheduleToClose,
+      {
+        _tag: "RetryScheduleToClose",
+        operationVersion: SemanticOperationV3.OperationVersion,
+        executionProtocolVersion: SemanticOperationV3.ExecutionProtocolVersion,
+        operationId: OperationIds.ScheduleToClose,
+        generation: 0,
+        controllerVersion: 1,
+        firstActivityDigest: firstAttempt.operation.operationDigest,
+        initialObservationDigest: initialObservation.operation.operationDigest,
+        nodeDefinitionKey: state.node.binding.nodeDefinitionKey,
+        handlerBuildDigest: state.node.binding.handlerBuild.buildDigest,
+        input: state.input,
+        activityPolicy: state.node.binding.activityPolicy,
+        timeoutKind: "ScheduleToClose",
+        durationMillis,
+        outcomeContractVersion: 1,
+        loserDisposition: "InterruptWaiters"
+      }
+    )
+    if (operation.document._tag !== "RetryScheduleToClose") {
+      return yield* Effect.fail(retryError(
+        ErrorCodes.OperationPreparationFailed,
+        "Prepared retry controller did not retain its dedicated operation tag",
+        {
+          nodeId: state.node.binding.nodeId,
+          operationId: OperationIds.ScheduleToClose,
+          operationDigest: operation.operationDigest
+        }
+      ))
+    }
+    const coordinates = SemanticOperationV3.nativeCoordinates(operation)
+    if (Result.isFailure(coordinates)) {
+      return yield* Effect.fail(retryError(
+        ErrorCodes.OperationPreparationFailed,
+        `Could not derive retry controller coordinates: ${coordinates.failure.message}`,
+        {
+          nodeId: state.node.binding.nodeId,
+          operationId: OperationIds.ScheduleToClose,
+          operationDigest: operation.operationDigest
+        }
+      ))
+    }
+    const operationName = NativeName.name(coordinates.success)
+    if (Result.isFailure(operationName)) {
+      return yield* Effect.fail(retryError(
+        ErrorCodes.OperationPreparationFailed,
+        `Could not derive retry controller name: ${operationName.failure.message}`,
+        {
+          nodeId: state.node.binding.nodeId,
+          operationId: OperationIds.ScheduleToClose,
+          operationDigest: operation.operationDigest
+        }
+      ))
+    }
+    return Object.freeze({
+      operation: operation as PreparedScheduleToCloseOperation,
+      operationName: operationName.success,
+      durationMillis
+    })
+  })
+
 const unsupportedTimeout = (
   policy: ActivityPolicyV3.TimeoutPolicy
 ): string | undefined => {
@@ -746,9 +935,6 @@ const unsupportedTimeout = (
   }
   if (policy.startToClose._tag !== "Disabled") {
     return "startToClose"
-  }
-  if (policy.scheduleToClose._tag !== "Disabled") {
-    return "scheduleToClose"
   }
   return undefined
 }
@@ -760,8 +946,9 @@ const unsupportedTimeout = (
  *
  * The three capability-bearing options are captured through own data-property
  * descriptors before any value is read. Getters, symbols, extra properties,
- * exotic prototypes, copied capabilities, blobs, and enabled timeouts fail
- * closed.
+ * exotic prototypes, copied capabilities, blobs, schedule-to-start, and
+ * start-to-close timeouts fail closed. An exact schedule-to-close policy is
+ * compiled into a dedicated durable controller.
  *
  * @category constructors
  * @since 4.0.0
@@ -876,19 +1063,34 @@ export const prepare = (
         kind: "Initial"
       }
     )
+    const scheduleToClosePolicy = node.binding.activityPolicy.timeouts.scheduleToClose
+    const scheduleToClose = scheduleToClosePolicy._tag === "After"
+      ? yield* prepareScheduleToClose(
+        base,
+        firstAttempt,
+        initialObservation,
+        scheduleToClosePolicy.durationMillis
+      )
+      : undefined
     const invocation = Object.freeze({
       invocationVersion: 1,
       artifactDigest: artifact.artifactDigest,
       occurrenceDigest: occurrence.occurrenceDigest,
       nodeId: node.binding.nodeId,
-      firstActivityDigest: firstAttempt.operation.operationDigest
+      firstActivityDigest: firstAttempt.operation.operationDigest,
+      ...(scheduleToClose === undefined
+        ? undefined
+        : {
+          scheduleToCloseControllerDigest: scheduleToClose.operation.operationDigest
+        })
     }) satisfies PreparedRetryInvocation
     invocationStates.set(
       invocation,
       Object.freeze({
         ...base,
         firstAttempt,
-        initialObservation
+        initialObservation,
+        scheduleToClose
       })
     )
     return invocation
@@ -909,25 +1111,27 @@ const retryDefect = (
   })
 
 const decodeSucceededOutput = (
-  attempt: PreparedAttempt,
+  state: InvocationState,
   outcome: SemanticOperationV3.NodeAttemptSucceeded
 ): Effect.Effect<unknown> =>
   Schema.decodeUnknownEffect(
-    attempt.resolution.node.contract.successSchema,
+    state.node.contract.successSchema,
     strictParseOptions
   )(outcome.output.value).pipe(
     Effect.updateContext((current) =>
       Context.merge(
-        attempt.resolution.node.contract.resultCodecContext,
+        state.node.contract.resultCodecContext,
         current
       ) as Context.Context<any>
     ),
     Effect.mapError((cause) =>
-      retryDefect(
-        attempt,
-        DefectCodes.InvalidOutputDecoding,
-        `Persisted node-attempt output is incompatible with its exact codecs: ${cause.message}`
-      )
+      new EffectWorkflowRetryDefect({
+        code: DefectCodes.InvalidOutputDecoding,
+        message: `Persisted node-attempt output is incompatible with its exact codecs: ${cause.message}`,
+        nodeId: state.node.binding.nodeId,
+        operationId: OperationIds.NodeAttempt,
+        operationDigest: outcome.activityDigest
+      })
     ),
     Effect.orDie
   ) as Effect.Effect<unknown>
@@ -1031,55 +1235,59 @@ const exhaustedTerminal = (
     reason
   })
 
-/**
- * Executes an opaque prepared invocation through native durable activities and
- * timers.
- *
- * **Details**
- *
- * Explicit non-retryable lists are evaluated before the exact durable
- * classifier. Retryable failures pass through deterministic range evaluation,
- * internally sampled replay-recorded jitter, and a durable positive backoff
- * timer. Zero-delay transitions do not allocate a timer.
- *
- * `maximumElapsed` is an admission budget for scheduling another attempt, not
- * a hard deadline for an already-running attempt.
- *
- * @category execution
- * @since 4.0.0
- */
-export const execute = (
-  invocation: PreparedRetryInvocation,
-  options: ExecutionOptions
+type RetryLoopOutcome =
+  | SemanticOperationV3.NodeAttemptSucceeded
+  | NonRetryable
+  | Exhausted
+  | ScheduleToCloseTimedOut
+
+type RetryTimer = (
+  operation: SemanticOperationV3.PreparedOperation
+) => Effect.Effect<
+  void,
+  | EffectWorkflowRetryError
+  | EffectWorkflowSemanticV3.EffectWorkflowSemanticError,
+  EffectWorkflowSemanticV3.Requirements
+>
+
+type AttemptFence = () => Effect.Effect<
+  ScheduleToCloseTimedOut | undefined,
+  never,
+  EffectWorkflowSemanticV3.Requirements
+>
+
+const retryLoop = (
+  state: InvocationState,
+  options: ExecutionOptions,
+  initialObservation?: Wire.Timestamp | undefined,
+  sleep: RetryTimer = EffectWorkflowSemanticV3.sleep,
+  attemptFence?: AttemptFence | undefined
 ): Effect.Effect<
-  unknown,
-  | TerminalFailure
+  RetryLoopOutcome,
   | EffectWorkflowRetryError
   | EffectWorkflowSemanticV3.EffectWorkflowSemanticError,
   | Crypto.Crypto
   | EffectWorkflowSemanticV3.Requirements
-> => {
-  const state = invocationStates.get(invocation)
-  if (state === undefined) {
-    return Effect.fail(retryError(
-      ErrorCodes.InvalidInvocation,
-      "Retry execution requires the exact PreparedRetryInvocation returned by prepare"
-    ))
-  }
-  return Effect.gen(function*() {
-    const initialObservedAt = yield* EffectWorkflowSemanticV3.timeObservation(
-      state.initialObservation,
-      options
-    )
+> =>
+  Effect.gen(function*() {
+    const initialObservedAt = initialObservation ??
+      (yield* EffectWorkflowSemanticV3.timeObservation(
+        state.initialObservation,
+        options
+      ))
     let attempt = state.firstAttempt
 
     while (true) {
+      if (attemptFence !== undefined) {
+        const timedOut = yield* attemptFence()
+        if (timedOut !== undefined) return timedOut
+      }
       const outcome = yield* EffectWorkflowSemanticV3.nodeAttempt(
         attempt.resolution,
         options
       )
       if (outcome._tag === "Succeeded") {
-        return yield* decodeSucceededOutput(attempt, outcome)
+        return outcome
       }
       const failure = outcome.failure
       const failureObservation = yield* prepareTimeObservation(state, {
@@ -1114,13 +1322,13 @@ export const execute = (
         disposition.success._tag ===
           "ExplicitNonRetryable"
       ) {
-        return yield* Effect.fail(explicitTerminal(
+        return explicitTerminal(
           failure,
           initialObservedAt,
           failedObservedAt,
           elapsedMillis,
           disposition.success
-        ))
+        )
       }
 
       const classifier = yield* prepareClassifier(
@@ -1133,13 +1341,13 @@ export const execute = (
         options
       )
       if (classification._tag === "NonRetryable") {
-        return yield* Effect.fail(classifiedTerminal(
+        return classifiedTerminal(
           failure,
           initialObservedAt,
           failedObservedAt,
           elapsedMillis,
           classifier
-        ))
+        )
       }
 
       const delayInput = {
@@ -1159,14 +1367,14 @@ export const execute = (
         ))
       }
       if (decision.success._tag === "DoNotRetry") {
-        return yield* Effect.fail(exhaustedTerminal(
+        return exhaustedTerminal(
           failure,
           initialObservedAt,
           failedObservedAt,
           elapsedMillis,
           classifier,
           decision.success.reason
-        ))
+        )
       }
 
       const delayResolution = yield* prepareDelaySelection(
@@ -1185,7 +1393,7 @@ export const execute = (
           attempt,
           delay
         )
-        yield* EffectWorkflowSemanticV3.sleep(timer)
+        yield* sleep(timer)
       }
       attempt = yield* prepareAttempt(
         state,
@@ -1193,4 +1401,859 @@ export const execute = (
       )
     }
   })
+
+const completeRetryOutcome = (
+  state: InvocationState,
+  outcome: RetryScheduleToCloseOutcome
+): Effect.Effect<unknown, TerminalFailure> => {
+  switch (outcome._tag) {
+    case "Succeeded":
+      return decodeSucceededOutput(state, outcome)
+    case "NonRetryable":
+    case "Exhausted":
+    case "ScheduleToCloseTimedOut":
+      return Effect.fail(outcome)
+  }
+}
+
+const scheduleToCloseWinner = (
+  controller: PreparedScheduleToClose,
+  exit: Exit.Exit<RetryScheduleToCloseOutcome, never>
+): RetryScheduleToCloseWinner => ({
+  _tag: "RetryScheduleToCloseWinner",
+  outcomeEnvelopeVersion: 1,
+  controllerOperationDigest: controller.operation.operationDigest,
+  exit
+})
+
+const retryWinner = (
+  state: InvocationState,
+  controller: PreparedScheduleToClose,
+  options: ExecutionOptions,
+  initialObservedAt: Wire.Timestamp,
+  attemptFence: AttemptFence
+): Effect.Effect<
+  RetryScheduleToCloseWinner,
+  never,
+  | Crypto.Crypto
+  | EffectWorkflowSemanticV3.Requirements
+> =>
+  retryLoop(
+    state,
+    options,
+    initialObservedAt,
+    (operation) => nonSuspendingTimer(state, operation),
+    attemptFence
+  ).pipe(
+    // Once the business terminal values have been closed into the success
+    // channel, only adapter/protocol failures remain typed. They are defects
+    // of this authenticated controller, never application failures.
+    Effect.orDie,
+    Effect.matchCauseEffect({
+      onFailure: (cause) => {
+        if (Cause.hasInterruptsOnly(cause)) {
+          return Effect.failCause(cause)
+        }
+        const reasons = cause.reasons.filter(
+          (reason) => !Cause.isInterruptReason(reason)
+        )
+        if (reasons.length === 0) {
+          return Effect.failCause(cause)
+        }
+        return Effect.succeed(scheduleToCloseWinner(
+          controller,
+          Exit.failCause(Cause.fromReasons(reasons))
+        ))
+      },
+      onSuccess: (outcome) =>
+        Effect.succeed(scheduleToCloseWinner(
+          controller,
+          Exit.succeed(outcome)
+        ))
+    })
+  ) as Effect.Effect<
+    RetryScheduleToCloseWinner,
+    never,
+    | Crypto.Crypto
+    | EffectWorkflowSemanticV3.Requirements
+  >
+
+const timeoutOutcome = (
+  controller: PreparedScheduleToClose
+): ScheduleToCloseTimedOut => ({
+  _tag: "ScheduleToCloseTimedOut",
+  timeoutVersion: 1,
+  timeoutKind: "ScheduleToClose",
+  controllerOperationDigest: controller.operation.operationDigest,
+  firstActivityDigest: controller.operation.document.firstActivityDigest,
+  durationMillis: controller.durationMillis
+})
+
+const timeoutWinner = (
+  controller: PreparedScheduleToClose
+): RetryScheduleToCloseWinner =>
+  scheduleToCloseWinner(
+    controller,
+    Exit.succeed(timeoutOutcome(controller))
+  )
+
+const invalidWinnerCoordinates = (
+  state: InvocationState,
+  controller: PreparedScheduleToClose,
+  message: string
+): EffectWorkflowRetryError =>
+  retryError(
+    ErrorCodes.OperationPreparationFailed,
+    message,
+    {
+      nodeId: state.node.binding.nodeId,
+      operationId: OperationIds.ScheduleToClose,
+      operationDigest: controller.operation.operationDigest
+    }
+  )
+
+const validateWinnerCoordinates = (
+  state: InvocationState,
+  controller: PreparedScheduleToClose,
+  outcome: RetryScheduleToCloseOutcome,
+  options: ExecutionOptions
+): Effect.Effect<
+  void,
+  | EffectWorkflowRetryError
+  | EffectWorkflowSemanticV3.EffectWorkflowSemanticError,
+  Crypto.Crypto | EffectWorkflowSemanticV3.Requirements
+> =>
+  Effect.gen(function*() {
+    if (outcome._tag === "ScheduleToCloseTimedOut") {
+      if (
+        outcome.controllerOperationDigest !==
+          controller.operation.operationDigest ||
+        outcome.firstActivityDigest !==
+          controller.operation.document.firstActivityDigest ||
+        outcome.durationMillis !== controller.durationMillis
+      ) {
+        return yield* Effect.fail(invalidWinnerCoordinates(
+          state,
+          controller,
+          "Persisted schedule-to-close timeout coordinates do not match its exact controller"
+        ))
+      }
+      return
+    }
+
+    const attemptNumber = outcome._tag === "Succeeded"
+      ? outcome.attempt
+      : outcome.cause.attempt
+    const activityDigest = outcome._tag === "Succeeded"
+      ? outcome.activityDigest
+      : outcome.cause.activityDigest
+    const attempt = yield* prepareAttempt(state, attemptNumber)
+    if (attempt.operation.operationDigest !== activityDigest) {
+      return yield* Effect.fail(invalidWinnerCoordinates(
+        state,
+        controller,
+        "Persisted retry winner activity coordinates do not match the exact managed attempt"
+      ))
+    }
+
+    if (outcome._tag === "Succeeded") return
+
+    const initialObservedAt = yield* EffectWorkflowSemanticV3.timeObservation(
+      state.initialObservation,
+      options
+    )
+    const failureObservation = yield* prepareTimeObservation(state, {
+      operationId: OperationIds.FailureTime,
+      attempt: attempt.attempt,
+      owner: attempt.operation,
+      kind: "Failure"
+    })
+    const failedObservedAt = yield* EffectWorkflowSemanticV3.timeObservation(
+      failureObservation,
+      options
+    )
+    const elapsedMillis = yield* Effect.fromResult(
+      elapsedBetween(
+        state.node.binding.nodeId,
+        initialObservedAt,
+        failedObservedAt
+      )
+    )
+    if (
+      outcome.initialObservedAt !== initialObservedAt ||
+      outcome.failedObservedAt !== failedObservedAt ||
+      outcome.elapsedMillis !== elapsedMillis
+    ) {
+      return yield* Effect.fail(invalidWinnerCoordinates(
+        state,
+        controller,
+        "Persisted terminal retry timestamps do not match their replay-recorded observations"
+      ))
+    }
+
+    const disposition = ActivityPolicyV3.failureDisposition(
+      state.node.binding.activityPolicy,
+      outcome.cause.identity
+    )
+    if (Result.isFailure(disposition)) {
+      return yield* Effect.fail(invalidWinnerCoordinates(
+        state,
+        controller,
+        "Persisted terminal retry policy could not be evaluated deterministically"
+      ))
+    }
+    if (
+      outcome._tag === "NonRetryable" &&
+      outcome.decision._tag === "PolicyOverride"
+    ) {
+      if (
+        disposition.success._tag !== "ExplicitNonRetryable" ||
+        disposition.success.matchedBy !== outcome.decision.matchedBy
+      ) {
+        return yield* Effect.fail(invalidWinnerCoordinates(
+          state,
+          controller,
+          "Persisted non-retryable policy override does not match the exact activity policy"
+        ))
+      }
+      return
+    }
+    if (disposition.success._tag === "ExplicitNonRetryable") {
+      return yield* Effect.fail(invalidWinnerCoordinates(
+        state,
+        controller,
+        "Persisted classifier terminal contradicts an exact non-retryable policy override"
+      ))
+    }
+
+    if (
+      outcome._tag === "NonRetryable" &&
+      outcome.decision._tag === "Classifier"
+    ) {
+      const classifier = yield* prepareClassifier(
+        state,
+        attempt,
+        outcome.cause
+      )
+      if (
+        classifier.operation.operationDigest !==
+          outcome.decision.classificationActivityDigest
+      ) {
+        return yield* Effect.fail(invalidWinnerCoordinates(
+          state,
+          controller,
+          "Persisted non-retryable classifier coordinates do not match its exact failed attempt"
+        ))
+      }
+      const classification = yield* EffectWorkflowSemanticV3.retryClassifier(
+        classifier,
+        options
+      )
+      if (classification._tag !== "NonRetryable") {
+        return yield* Effect.fail(invalidWinnerCoordinates(
+          state,
+          controller,
+          "Persisted non-retryable terminal contradicts its replay-recorded classifier result"
+        ))
+      }
+    } else if (outcome._tag === "Exhausted") {
+      const classifier = yield* prepareClassifier(
+        state,
+        attempt,
+        outcome.cause
+      )
+      if (
+        classifier.operation.operationDigest !==
+          outcome.classificationActivityDigest
+      ) {
+        return yield* Effect.fail(invalidWinnerCoordinates(
+          state,
+          controller,
+          "Persisted exhausted classifier coordinates do not match its exact failed attempt"
+        ))
+      }
+      const classification = yield* EffectWorkflowSemanticV3.retryClassifier(
+        classifier,
+        options
+      )
+      if (classification._tag !== "Retryable") {
+        return yield* Effect.fail(invalidWinnerCoordinates(
+          state,
+          controller,
+          "Persisted exhausted terminal contradicts its replay-recorded classifier result"
+        ))
+      }
+      const decision = ActivityPolicyV3.retryDelayRange(
+        state.node.binding.activityPolicy,
+        {
+          evaluationVersion: 1,
+          failedAttempt: attempt.attempt,
+          elapsedMillis
+        }
+      )
+      if (
+        Result.isFailure(decision) ||
+        decision.success._tag !== "DoNotRetry" ||
+        decision.success.reason !== outcome.reason
+      ) {
+        return yield* Effect.fail(invalidWinnerCoordinates(
+          state,
+          controller,
+          "Persisted exhausted terminal does not match the exact retry policy decision"
+        ))
+      }
+    }
+  })
+
+const remainingScheduleToClose = (
+  state: InvocationState,
+  initialObservedAt: Wire.Timestamp,
+  durationMillis: Wire.PositiveSemanticDelayMillis
+): Effect.Effect<number, EffectWorkflowRetryError> =>
+  Effect.flatMap(Clock.currentTimeMillis, (now) => {
+    const initial = Date.parse(initialObservedAt)
+    if (
+      !Number.isSafeInteger(initial) ||
+      !Number.isSafeInteger(now)
+    ) {
+      return Effect.fail(retryError(
+        ErrorCodes.ClockRegression,
+        "Schedule-to-close time could not be represented as safe epoch milliseconds",
+        { nodeId: state.node.binding.nodeId }
+      ))
+    }
+    if (now < initial) {
+      return Effect.fail(retryError(
+        ErrorCodes.ClockRegression,
+        "Current time precedes the replay-recorded schedule-to-close observation",
+        { nodeId: state.node.binding.nodeId }
+      ))
+    }
+    return Effect.succeed(
+      Math.max(0, durationMillis - (now - initial))
+    )
+  })
+
+const MaximumDeferredPollMillis = 1_000
+const MinimumDeferredPollMillis = 10
+const ImmediateDeferredPolls = 64
+
+const adaptivePollDelay = (
+  estimateDeadline: number,
+  nextDelay: number,
+  now: number
+): number => {
+  const untilEstimate = Math.max(0, estimateDeadline - now)
+  return untilEstimate === 0
+    ? MinimumDeferredPollMillis
+    : Math.max(
+      1,
+      Math.min(nextDelay, untilEstimate)
+    )
+}
+
+const awaitScheduledClock = (
+  engine: NativeWorkflowEngine.WorkflowEngine["Service"],
+  clock: NativeClock.DurableClock,
+  estimatedRemainingMillis: number
+): Effect.Effect<void, never, NativeWorkflowEngine.WorkflowInstance> =>
+  Effect.gen(function*() {
+    const estimatedDeadline = (yield* Clock.currentTimeMillis) + estimatedRemainingMillis
+    let nextDelay = MinimumDeferredPollMillis
+    while (true) {
+      const completed = yield* engine.deferredResult(clock.deferred)
+      if (Option.isSome(completed)) {
+        return yield* completed.value
+      }
+      // Durable clock delivery is the sole timeout authority. The estimate
+      // only reduces reads; every execution polls before sleeping, then uses
+      // bounded adaptive delays and lands exactly on its local estimate.
+      const delay = adaptivePollDelay(
+        estimatedDeadline,
+        nextDelay,
+        yield* Clock.currentTimeMillis
+      )
+      yield* Effect.sleep(Duration.millis(delay))
+      nextDelay = Math.min(
+        nextDelay * 2,
+        MaximumDeferredPollMillis
+      )
+    }
+  })
+
+const timeoutIfClockCompleted = (
+  engine: NativeWorkflowEngine.WorkflowEngine["Service"],
+  clock: NativeClock.DurableClock,
+  controller: PreparedScheduleToClose
+): Effect.Effect<
+  ScheduleToCloseTimedOut | undefined,
+  never,
+  NativeWorkflowEngine.WorkflowInstance
+> =>
+  Effect.flatMap(
+    engine.deferredResult(clock.deferred),
+    (completed) =>
+      Option.isNone(completed)
+        ? Effect.succeed(undefined)
+        : Effect.as(
+          completed.value,
+          timeoutOutcome(controller)
+        )
+  )
+
+const nativeOperationName = (
+  state: InvocationState,
+  operation: SemanticOperationV3.PreparedOperation
+): Effect.Effect<string, EffectWorkflowRetryError> => {
+  const coordinates = SemanticOperationV3.nativeCoordinates(operation)
+  if (Result.isFailure(coordinates)) {
+    return Effect.fail(retryError(
+      ErrorCodes.OperationPreparationFailed,
+      `Could not derive durable timer coordinates: ${coordinates.failure.message}`,
+      {
+        nodeId: state.node.binding.nodeId,
+        operationId: operation.document.operationId,
+        operationDigest: operation.operationDigest
+      }
+    ))
+  }
+  const name = NativeName.name(coordinates.success)
+  return Result.isFailure(name)
+    ? Effect.fail(retryError(
+      ErrorCodes.OperationPreparationFailed,
+      `Could not derive durable timer name: ${name.failure.message}`,
+      {
+        nodeId: state.node.binding.nodeId,
+        operationId: operation.document.operationId,
+        operationDigest: operation.operationDigest
+      }
+    ))
+    : Effect.succeed(name.success)
+}
+
+const nonSuspendingTimer = (
+  state: InvocationState,
+  operation: SemanticOperationV3.PreparedOperation
+): Effect.Effect<
+  void,
+  | EffectWorkflowRetryError
+  | EffectWorkflowSemanticV3.EffectWorkflowSemanticError,
+  EffectWorkflowSemanticV3.Requirements
+> =>
+  Effect.gen(function*() {
+    if (operation.document._tag !== "Timer") {
+      return yield* Effect.fail(retryError(
+        ErrorCodes.OperationPreparationFailed,
+        "Managed retry backoff requires an exact Timer operation",
+        {
+          nodeId: state.node.binding.nodeId,
+          operationId: operation.document.operationId,
+          operationDigest: operation.operationDigest
+        }
+      ))
+    }
+    yield* EffectWorkflowSemanticV3.bind(operation)
+    const engine = yield* NativeWorkflowEngine.WorkflowEngine
+    const instance = yield* NativeWorkflowEngine.WorkflowInstance
+    const clock = NativeClock.make({
+      name: yield* nativeOperationName(state, operation),
+      duration: Duration.millis(operation.document.delayMillis)
+    })
+    yield* engine.scheduleClock(instance.workflow, {
+      executionId: instance.executionId,
+      clock
+    })
+    return yield* awaitScheduledClock(
+      engine,
+      clock,
+      operation.document.delayMillis
+    )
+  })
+
+const persistControllerWinner = <R>(
+  engine: NativeWorkflowEngine.WorkflowEngine["Service"],
+  instance: NativeWorkflowEngine.WorkflowInstance["Service"],
+  deferred: NativeDeferred.DurableDeferred<
+    typeof RetryScheduleToCloseWinner,
+    typeof Schema.Never
+  >,
+  contender: Effect.Effect<RetryScheduleToCloseWinner, never, R>
+): Effect.Effect<void, never, R> =>
+  Effect.flatMap(
+    contender,
+    (winner) =>
+      engine.deferredDone(deferred, {
+        workflowName: instance.workflow._tag,
+        executionId: instance.executionId,
+        deferredName: deferred.name,
+        exit: Exit.succeed(winner)
+      })
+  )
+
+const readControllerWinner = (
+  state: InvocationState,
+  controller: PreparedScheduleToClose,
+  engine: NativeWorkflowEngine.WorkflowEngine["Service"],
+  deferred: NativeDeferred.DurableDeferred<
+    typeof RetryScheduleToCloseWinner,
+    typeof Schema.Never
+  >
+): Effect.Effect<
+  Option.Option<RetryScheduleToCloseWinner>,
+  never,
+  NativeWorkflowEngine.WorkflowInstance
+> =>
+  Effect.gen(function*() {
+    const recorded = yield* engine.deferredResult(deferred)
+    if (Option.isNone(recorded)) return Option.none()
+    if (Exit.isFailure(recorded.value)) {
+      return yield* Effect.die(invalidWinnerCoordinates(
+        state,
+        controller,
+        Cause.hasInterrupts(recorded.value.cause)
+          ? "Persisted retry controller deferred must never contain interruption"
+          : "Persisted retry controller deferred must use its success-only winner envelope"
+      ))
+    }
+    return Option.some(recorded.value.value)
+  })
+
+const awaitControllerWinner = (
+  state: InvocationState,
+  controller: PreparedScheduleToClose,
+  engine: NativeWorkflowEngine.WorkflowEngine["Service"],
+  deferred: NativeDeferred.DurableDeferred<
+    typeof RetryScheduleToCloseWinner,
+    typeof Schema.Never
+  >,
+  estimatedRemainingMillis: number
+): Effect.Effect<
+  RetryScheduleToCloseWinner,
+  never,
+  NativeWorkflowEngine.WorkflowInstance
+> =>
+  Effect.gen(function*() {
+    const estimatedDeadline = (yield* Clock.currentTimeMillis) + estimatedRemainingMillis
+    let immediatePolls = 0
+    let nextDelay = MinimumDeferredPollMillis
+    while (true) {
+      const winner = yield* readControllerWinner(
+        state,
+        controller,
+        engine,
+        deferred
+      )
+      if (Option.isSome(winner)) return winner.value
+      if (immediatePolls < ImmediateDeferredPolls) {
+        immediatePolls++
+        yield* Effect.yieldNow
+        continue
+      }
+      const delay = adaptivePollDelay(
+        estimatedDeadline,
+        nextDelay,
+        yield* Clock.currentTimeMillis
+      )
+      yield* Effect.sleep(Duration.millis(delay))
+      nextDelay = Math.min(
+        nextDelay * 2,
+        MaximumDeferredPollMillis
+      )
+    }
+  })
+
+const clockWinner = (
+  controller: PreparedScheduleToClose,
+  clock: Effect.Effect<
+    void,
+    never,
+    NativeWorkflowEngine.WorkflowInstance
+  >
+): Effect.Effect<
+  RetryScheduleToCloseWinner,
+  never,
+  NativeWorkflowEngine.WorkflowInstance
+> =>
+  clock.pipe(
+    Effect.matchCauseEffect({
+      onFailure: (cause) =>
+        Cause.hasInterrupts(cause)
+          ? Effect.failCause(cause)
+          : Effect.succeed(scheduleToCloseWinner(
+            controller,
+            Exit.failCause(cause)
+          )),
+      onSuccess: () => Effect.succeed(timeoutWinner(controller))
+    })
+  )
+
+const scheduleToClose = (
+  state: InvocationState,
+  controller: PreparedScheduleToClose,
+  options: ExecutionOptions
+): Effect.Effect<
+  unknown,
+  | TerminalFailure
+  | EffectWorkflowRetryError
+  | EffectWorkflowSemanticV3.EffectWorkflowSemanticError,
+  | Crypto.Crypto
+  | EffectWorkflowSemanticV3.Requirements
+> =>
+  Effect.gen(function*() {
+    // Descriptor binding always precedes cached-winner lookup, so replay
+    // cannot consume an old winner under changed policy, input, or duration.
+    yield* EffectWorkflowSemanticV3.bind(controller.operation)
+
+    const engine = yield* NativeWorkflowEngine.WorkflowEngine
+    const instance = yield* NativeWorkflowEngine.WorkflowInstance
+    const durableWinner = NativeDeferred.make(
+      `raceAll/${controller.operationName}`,
+      {
+        success: RetryScheduleToCloseWinner,
+        error: Schema.Never
+      }
+    )
+    const recorded = yield* readControllerWinner(
+      state,
+      controller,
+      engine,
+      durableWinner
+    )
+    let winner: RetryScheduleToCloseWinner
+    if (Option.isSome(recorded)) {
+      winner = recorded.value
+    } else {
+      // The stable native clock acknowledgement is the durable budget origin.
+      // It precedes time observation and every attempt; replaying this call
+      // retains the backend's original same-name schedule.
+      const clock = NativeClock.make({
+        name: controller.operationName,
+        duration: Duration.millis(controller.durationMillis)
+      })
+      yield* engine.scheduleClock(instance.workflow, {
+        executionId: instance.executionId,
+        clock
+      })
+
+      const completedBeforeObservation = yield* timeoutIfClockCompleted(
+        engine,
+        clock,
+        controller
+      )
+      if (completedBeforeObservation !== undefined) {
+        yield* persistControllerWinner(
+          engine,
+          instance,
+          durableWinner,
+          Effect.succeed(timeoutWinner(controller))
+        )
+        winner = yield* awaitControllerWinner(
+          state,
+          controller,
+          engine,
+          durableWinner,
+          0
+        )
+      } else {
+        const initialObservedAt = yield* EffectWorkflowSemanticV3.timeObservation(
+          state.initialObservation,
+          options
+        )
+        const remainingMillis = yield* remainingScheduleToClose(
+          state,
+          initialObservedAt,
+          controller.durationMillis
+        )
+        const timeoutPublisher = persistControllerWinner(
+          engine,
+          instance,
+          durableWinner,
+          clockWinner(
+            controller,
+            awaitScheduledClock(
+              engine,
+              clock,
+              remainingMillis
+            )
+          )
+        )
+        const timeoutFiber = yield* timeoutPublisher.pipe(
+          Effect.forkDetach({ startImmediately: true })
+        )
+        const contenderFibers = [timeoutFiber]
+
+        // Re-read the persistent clock immediately before the first attempt.
+        // A due-but-late local poll may never dispatch a post-deadline side
+        // effect.
+        const completedBeforeAttempt = yield* timeoutIfClockCompleted(
+          engine,
+          clock,
+          controller
+        )
+        if (
+          remainingMillis === 0 ||
+          completedBeforeAttempt !== undefined
+        ) {
+          if (completedBeforeAttempt !== undefined) {
+            yield* persistControllerWinner(
+              engine,
+              instance,
+              durableWinner,
+              Effect.succeed(timeoutWinner(controller))
+            )
+          }
+        } else {
+          const attemptFence = () =>
+            timeoutIfClockCompleted(
+              engine,
+              clock,
+              controller
+            )
+          const businessContender = Effect.flatMap(
+            retryWinner(
+              state,
+              controller,
+              options,
+              initialObservedAt,
+              attemptFence
+            ),
+            (candidate) =>
+              Effect.map(
+                // This final clock read fences success and defects before
+                // either may publish to the first-wins controller deferred.
+                attemptFence(),
+                (timedOut) =>
+                  timedOut === undefined
+                    ? candidate
+                    : timeoutWinner(controller)
+              )
+          )
+          contenderFibers.push(
+            yield* persistControllerWinner(
+              engine,
+              instance,
+              durableWinner,
+              businessContender
+            ).pipe(
+              Effect.forkDetach({ startImmediately: true })
+            )
+          )
+        }
+
+        winner = yield* awaitControllerWinner(
+          state,
+          controller,
+          engine,
+          durableWinner,
+          remainingMillis
+        ).pipe(
+          Effect.ensuring(
+            // On normal completion the first-wins ACK has already been read.
+            // The same immediate cleanup also prevents detached contenders
+            // leaking when the controller itself is interrupted or defects.
+            Effect.sync(() => {
+              for (const fiber of contenderFibers) {
+                fiber.interruptUnsafe()
+              }
+            })
+          )
+        )
+      }
+    }
+    if (
+      winner.controllerOperationDigest !==
+        controller.operation.operationDigest
+    ) {
+      return yield* Effect.die(retryError(
+        ErrorCodes.OperationPreparationFailed,
+        "Persisted retry schedule-to-close winner belongs to a different controller descriptor",
+        {
+          nodeId: state.node.binding.nodeId,
+          operationId: OperationIds.ScheduleToClose,
+          operationDigest: controller.operation.operationDigest
+        }
+      ))
+    }
+    if (
+      Exit.isFailure(winner.exit) &&
+      Cause.hasInterrupts(winner.exit.cause)
+    ) {
+      return yield* Effect.die(invalidWinnerCoordinates(
+        state,
+        controller,
+        "Persisted retry winner Exit must never contain interruption"
+      ))
+    }
+    const outcome = yield* winner.exit
+    yield* validateWinnerCoordinates(
+      state,
+      controller,
+      outcome,
+      options
+    ).pipe(Effect.orDie)
+    return yield* completeRetryOutcome(state, outcome)
+  })
+
+/**
+ * Executes an opaque prepared invocation through native durable activities and
+ * timers.
+ *
+ * **Details**
+ *
+ * Explicit non-retryable lists are evaluated before the exact durable
+ * classifier. Retryable failures pass through deterministic range evaluation,
+ * internally sampled replay-recorded jitter, and a durable positive backoff
+ * timer. Zero-delay transitions do not allocate a timer.
+ *
+ * `maximumElapsed` remains an admission budget for scheduling another
+ * attempt. When configured, `scheduleToClose` is a separate hard semantic
+ * deadline around the complete managed loop. The acknowledgement of one
+ * stable native clock fixes the durable budget origin before the
+ * replay-recorded initial observation or any node attempt.
+ *
+ * Contenders publish success-only values to one native durable deferred, whose
+ * backend first-wins rule closes the result. After that winner is durably read,
+ * loser fibers receive a fire-and-forget interruption request; their physical
+ * shutdown is never joined and cannot delay the semantic terminal. Native
+ * Effect Workflow does not promise rollback of an external side effect that a
+ * handler already dispatched.
+ *
+ * The injected `WorkflowEngine` and its persistence are a trust boundary.
+ * Descriptor binding, exact coordinate reconstruction, timestamp checks, and
+ * interruption rejection detect schema-valid drift available through public
+ * reads, but Effect Workflow currently exposes no independent read-only
+ * activity-journal proof API.
+ *
+ * @category execution
+ * @since 4.0.0
+ */
+export const execute = (
+  invocation: PreparedRetryInvocation,
+  options: ExecutionOptions
+): Effect.Effect<
+  unknown,
+  | TerminalFailure
+  | EffectWorkflowRetryError
+  | EffectWorkflowSemanticV3.EffectWorkflowSemanticError,
+  | Crypto.Crypto
+  | EffectWorkflowSemanticV3.Requirements
+> => {
+  const state = invocationStates.get(invocation)
+  if (state === undefined) {
+    return Effect.fail(retryError(
+      ErrorCodes.InvalidInvocation,
+      "Retry execution requires the exact PreparedRetryInvocation returned by prepare"
+    ))
+  }
+  if (state.scheduleToClose !== undefined) {
+    return scheduleToClose(
+      state,
+      state.scheduleToClose,
+      options
+    )
+  }
+  return Effect.flatMap(
+    retryLoop(state, options),
+    (outcome) => completeRetryOutcome(state, outcome)
+  )
 }

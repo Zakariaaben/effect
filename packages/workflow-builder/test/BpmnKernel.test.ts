@@ -4,12 +4,14 @@ import * as Effect from "effect/Effect"
 import * as Result from "effect/Result"
 import * as Schema from "effect/Schema"
 import { createHash } from "node:crypto"
-import type * as BpmnExpression from "../src/BpmnExpression.ts"
+import * as BpmnActivityV3 from "../src/BpmnActivityV3.ts"
 import * as BpmnExecutionState from "../src/BpmnExecutionState.ts"
+import type * as BpmnExpression from "../src/BpmnExpression.ts"
 import * as BpmnKernel from "../src/BpmnKernel.ts"
 import * as BpmnModel from "../src/BpmnModel.ts"
 import type * as Diagnostic from "../src/Diagnostic.ts"
 import * as ProtocolV2Wire from "../src/ProtocolV2Wire.ts"
+import * as ProtocolV3Wire from "../src/ProtocolV3Wire.ts"
 
 const processId = "process-main"
 
@@ -40,15 +42,104 @@ const limits: BpmnKernel.KernelLimits = {
 
 const testCrypto = Crypto.make({
   randomBytes: (size) => new Uint8Array(size),
-  digest: (_algorithm, data) =>
-    Effect.sync(() =>
-      new Uint8Array(createHash("sha256").update(data).digest())
-    )
+  digest: (_algorithm, data) => Effect.sync(() => new Uint8Array(createHash("sha256").update(data).digest()))
 })
 
 const evaluatorBuildDigest = Schema.decodeUnknownSync(
   ProtocolV2Wire.BuildDigest
 )(`sha256:${"1".repeat(64)}`)
+
+const artifactDigest = Schema.decodeUnknownSync(
+  ProtocolV3Wire.ArtifactDigest
+)(`sha256:${"a".repeat(64)}`)
+const occurrenceDigest = Schema.decodeUnknownSync(
+  ProtocolV3Wire.OccurrenceDigest
+)(`sha256:${"b".repeat(64)}`)
+const firstActivityDigest = Schema.decodeUnknownSync(
+  ProtocolV3Wire.OperationDigest
+)(`sha256:${"c".repeat(64)}`)
+const completedActivityDigest = Schema.decodeUnknownSync(
+  ProtocolV3Wire.OperationDigest
+)(`sha256:${"d".repeat(64)}`)
+const failedActivityDigest = Schema.decodeUnknownSync(
+  ProtocolV3Wire.OperationDigest
+)(`sha256:${"e".repeat(64)}`)
+const classificationActivityDigest = Schema.decodeUnknownSync(
+  ProtocolV3Wire.OperationDigest
+)(`sha256:${"f".repeat(64)}`)
+const semanticNodeId = Schema.decodeUnknownSync(
+  ProtocolV3Wire.AtomicIdentifier
+)("semantic-task")
+
+const taskBinding = (
+  taskNodeId: string,
+  errorMappings: ReadonlyArray<{
+    readonly errorTag: string
+    readonly errorCode?: string | null
+    readonly errorRef: string
+  }> = []
+): BpmnActivityV3.TaskBinding =>
+  Schema.decodeUnknownSync(BpmnActivityV3.TaskBinding)({
+    bindingVersion: BpmnActivityV3.BindingVersion,
+    executionProtocolVersion: 3,
+    taskNodeId,
+    artifactDigest,
+    semanticNodeId,
+    errorMappings: errorMappings.map((mapping) => ({
+      identity: {
+        failureIdentityVersion: 1,
+        errorTag: mapping.errorTag,
+        errorCode: mapping.errorCode ?? null
+      },
+      errorRef: mapping.errorRef
+    }))
+  })
+
+const succeededOutcome = (
+  overrides: Partial<BpmnActivityV3.TaskSucceeded> = {}
+): BpmnActivityV3.TaskSucceeded =>
+  Schema.decodeUnknownSync(BpmnActivityV3.TaskSucceeded)({
+    _tag: "Succeeded",
+    outcomeVersion: BpmnActivityV3.OutcomeVersion,
+    artifactDigest,
+    semanticNodeId,
+    occurrenceDigest,
+    firstActivityDigest,
+    attempt: 2,
+    completedActivityDigest,
+    ...overrides
+  })
+
+const failedOutcome = (
+  errorTag: string,
+  errorCode: string | null = null,
+  overrides: Partial<BpmnActivityV3.TaskBusinessFailed> = {}
+): BpmnActivityV3.TaskBusinessFailed =>
+  Schema.decodeUnknownSync(BpmnActivityV3.TaskBusinessFailed)({
+    _tag: "BusinessFailed",
+    outcomeVersion: BpmnActivityV3.OutcomeVersion,
+    artifactDigest,
+    semanticNodeId,
+    occurrenceDigest,
+    firstActivityDigest,
+    terminal: {
+      _tag: "NonRetryable",
+      terminalVersion: 1,
+      decision: {
+        _tag: "Classifier",
+        decisionVersion: 1,
+        classificationActivityDigest
+      }
+    },
+    failedActivityDigest,
+    attempt: 2,
+    identity: {
+      failureIdentityVersion: 1,
+      errorTag,
+      errorCode
+    },
+    ...overrides
+  })
 
 const evaluatorBindings = (
   value: BpmnModel.BpmnModel
@@ -201,6 +292,30 @@ const task = (
   ...overrides
 })
 
+const boundaryError = (
+  id: string,
+  attachedToRef: string,
+  outgoingSequenceFlowId: string,
+  errorRef?: string,
+  overrides?: Partial<BpmnModel.BoundaryEvent>
+): BpmnModel.BoundaryEvent => ({
+  _tag: "BoundaryEvent",
+  id,
+  processId,
+  parentScopeId: processId,
+  incomingSequenceFlowIds: [],
+  outgoingSequenceFlowIds: [outgoingSequenceFlowId],
+  eventDefinitions: [{
+    _tag: "ErrorEventDefinition",
+    ...(errorRef === undefined ? {} : { errorRef })
+  }],
+  eventDefinitionRefs: [],
+  attachedToRef,
+  cancelActivity: true,
+  extensionElements: emptyExtensions(),
+  ...overrides
+})
+
 const subProcess = (
   id: string,
   parentScopeId: string,
@@ -258,22 +373,35 @@ const prepareResult = (
   value: BpmnModel.BpmnModel,
   selectedLimits: BpmnKernel.KernelLimits = limits,
   profileId = "test-bpmn-model-v1",
-  selectedEvaluatorBindings = evaluatorBindings(value)
+  selectedEvaluatorBindings = evaluatorBindings(value),
+  selectedTaskBindings?: ReadonlyArray<BpmnActivityV3.TaskBinding>
 ): Result.Result<BpmnKernel.CompiledKernel, Diagnostic.CompilationError> =>
   Effect.runSync(
     BpmnKernel.prepare(value, {
       profileId,
       rootProcessId: processId,
       limits: selectedLimits,
-      evaluatorBindings: selectedEvaluatorBindings
+      evaluatorBindings: selectedEvaluatorBindings,
+      ...(selectedTaskBindings === undefined
+        ? {}
+        : { taskBindings: selectedTaskBindings })
     }).pipe(
       Effect.provideService(Crypto.Crypto, testCrypto),
       Effect.result
     )
-) as Result.Result<BpmnKernel.CompiledKernel, Diagnostic.CompilationError>
+  ) as Result.Result<BpmnKernel.CompiledKernel, Diagnostic.CompilationError>
 
-const compile = (value: BpmnModel.BpmnModel): BpmnKernel.CompiledKernel => {
-  const compiled = prepareResult(value)
+const compile = (
+  value: BpmnModel.BpmnModel,
+  selectedTaskBindings?: ReadonlyArray<BpmnActivityV3.TaskBinding>
+): BpmnKernel.CompiledKernel => {
+  const compiled = prepareResult(
+    value,
+    limits,
+    "test-bpmn-model-v1",
+    evaluatorBindings(value),
+    selectedTaskBindings
+  )
   if (Result.isFailure(compiled)) {
     throw new Error(JSON.stringify(
       compiled.failure.diagnostics.map((diagnostic) => ({
@@ -320,6 +448,433 @@ describe("BpmnKernel", () => {
         token.status === "active" && token.position._tag === "OnSequenceFlow"
       ),
       []
+    )
+  })
+
+  it("resolves a protocol-v3-bound task success and replays the exact durable outcome", () => {
+    const definition = model(
+      [
+        startEvent("start", processId, ["flow-start-task"]),
+        task("task", processId, ["flow-start-task"], ["flow-task-end"]),
+        endEvent("end", processId, ["flow-task-end"])
+      ],
+      [
+        flow("flow-start-task", processId, "start", "task", "normal"),
+        flow("flow-task-end", processId, "task", "end", "normal")
+      ]
+    )
+    const binding = taskBinding("task")
+    const compiled = compile(definition, [binding])
+    const initialized = BpmnKernel.initialize(compiled, services())
+    assert(Result.isSuccess(initialized))
+    const token = initialized.success.state.tokens.find((candidate) =>
+      candidate.status === "active" &&
+      candidate.position._tag === "AtNode" &&
+      candidate.position.nodeId === "task"
+    )
+    if (token === undefined) {
+      throw new Error("expected bound task token")
+    }
+
+    const legacyCompletion = BpmnKernel.completeTask(
+      compiled,
+      initialized.success.state,
+      {
+        scopeInstanceId: token.scopeInstanceId,
+        taskNodeId: "task",
+        tokenId: token.tokenId
+      },
+      services()
+    )
+    assert(Result.isFailure(legacyCompletion))
+    assert(
+      legacyCompletion.failure.diagnostics.some((diagnostic) => diagnostic.code === BpmnKernel.Codes.InvalidCommand)
+    )
+
+    const outcome = succeededOutcome()
+    const command: BpmnKernel.ResolveTaskCommand = {
+      commandVersion: BpmnActivityV3.CommandVersion,
+      scopeInstanceId: token.scopeInstanceId,
+      taskNodeId: "task",
+      tokenId: token.tokenId,
+      outcome
+    }
+    const resolved = BpmnKernel.resolveTask(
+      compiled,
+      initialized.success.state,
+      command,
+      services()
+    )
+    assert(Result.isSuccess(resolved))
+    assert.strictEqual(resolved.success.state.status, "completed")
+    assert.deepStrictEqual(resolved.success.state.activityResolutions, [{
+      resolutionVersion: BpmnActivityV3.ResolutionVersion,
+      tokenId: token.tokenId,
+      taskNodeId: "task",
+      scopeInstanceId: token.scopeInstanceId,
+      outcome,
+      resolvedAt: now
+    }])
+    assert(
+      resolved.success.events.some((event) =>
+        event._tag === "TokenConsumed" &&
+        event.tokenId === token.tokenId &&
+        event.reason === "task-succeeded"
+      )
+    )
+
+    const missingResolution = structuredClone(resolved.success.state)
+    missingResolution.activityResolutions = []
+    const rejectedMissingResolution = BpmnKernel.advance(
+      compiled,
+      missingResolution,
+      services()
+    )
+    assert(Result.isFailure(rejectedMissingResolution))
+    assert(
+      rejectedMissingResolution.failure.diagnostics.some((diagnostic) =>
+        diagnostic.code === BpmnKernel.Codes.InvalidKernelState &&
+        diagnostic.message.includes("successful activity resolution")
+      )
+    )
+
+    const journal = [
+      ...initialized.success.events,
+      ...resolved.success.events
+    ]
+    const replayedState = BpmnKernel.replay(compiled, journal)
+    assert(Result.isSuccess(replayedState))
+    assert.deepStrictEqual(replayedState.success, resolved.success.state)
+    const forgedLegacyReplay = BpmnKernel.replay(compiled, [
+      ...journal,
+      {
+        _tag: "TaskCompletionReplayed",
+        tokenId: token.tokenId,
+        observedAt: now
+      }
+    ])
+    assert(Result.isFailure(forgedLegacyReplay))
+    assert(
+      forgedLegacyReplay.failure.diagnostics.some((diagnostic) =>
+        diagnostic.code === BpmnKernel.Codes.InvalidTransitionJournal
+      )
+    )
+
+    const replayedOutcome = BpmnKernel.resolveTask(
+      compiled,
+      resolved.success.state,
+      command,
+      services()
+    )
+    assert(Result.isSuccess(replayedOutcome))
+    assert.deepStrictEqual(replayedOutcome.success.events, [{
+      _tag: "TaskOutcomeReplayed",
+      tokenId: token.tokenId,
+      occurrenceDigest,
+      observedAt: now
+    }])
+
+    const conflictingOutcome = BpmnKernel.resolveTask(
+      compiled,
+      resolved.success.state,
+      {
+        ...command,
+        outcome: succeededOutcome({ attempt: 3 })
+      },
+      services()
+    )
+    assert(Result.isFailure(conflictingOutcome))
+    assert(
+      conflictingOutcome.failure.diagnostics.some((diagnostic) => diagnostic.code === BpmnKernel.Codes.InvalidCommand)
+    )
+  })
+
+  it("catches an exactly mapped business failure at one interrupting Boundary Error and replays it", () => {
+    const errorRef = "error-validation"
+    const definition: BpmnModel.BpmnModel = {
+      ...model(
+        [
+          startEvent("start", processId, ["flow-start-task"]),
+          task("task", processId, ["flow-start-task"], ["flow-task-success"]),
+          boundaryError("boundary-error", "task", "flow-error-end", errorRef),
+          endEvent("end-success", processId, ["flow-task-success"]),
+          endEvent("end-error", processId, ["flow-error-end"])
+        ],
+        [
+          flow("flow-start-task", processId, "start", "task", "normal"),
+          flow("flow-task-success", processId, "task", "end-success", "normal"),
+          flow("flow-error-end", processId, "boundary-error", "end-error", "normal")
+        ]
+      ),
+      errors: [{ id: errorRef, errorCode: "VALIDATION" }]
+    }
+    const binding = taskBinding("task", [{
+      errorTag: "ValidationError",
+      errorCode: "E_VALIDATION",
+      errorRef
+    }])
+    const compiled = compile(definition, [binding])
+    const initialized = BpmnKernel.initialize(compiled, services())
+    assert(Result.isSuccess(initialized))
+    const token = initialized.success.state.tokens.find((candidate) =>
+      candidate.status === "active" &&
+      candidate.position._tag === "AtNode" &&
+      candidate.position.nodeId === "task"
+    )
+    if (token === undefined) {
+      throw new Error("expected bound task token")
+    }
+    const outcome = failedOutcome("ValidationError", "E_VALIDATION")
+    const resolved = BpmnKernel.resolveTask(
+      compiled,
+      initialized.success.state,
+      {
+        commandVersion: BpmnActivityV3.CommandVersion,
+        scopeInstanceId: token.scopeInstanceId,
+        taskNodeId: "task",
+        tokenId: token.tokenId,
+        outcome
+      },
+      services()
+    )
+
+    assert(Result.isSuccess(resolved))
+    assert.strictEqual(resolved.success.state.status, "completed")
+    assert.strictEqual(
+      resolved.success.state.tokens.find((candidate) => candidate.tokenId === token.tokenId)?.status,
+      "withdrawn"
+    )
+    assert(
+      resolved.success.events.some((event) =>
+        event._tag === "BoundaryErrorCaught" &&
+        event.taskNodeId === "task" &&
+        event.boundaryEventId === "boundary-error" &&
+        event.errorRef === errorRef
+      )
+    )
+    assert.isFalse(
+      resolved.success.events.some((event) => event._tag === "ExecutionFailed")
+    )
+    const replayed = BpmnKernel.replay(compiled, [
+      ...initialized.success.events,
+      ...resolved.success.events
+    ])
+    assert(Result.isSuccess(replayed))
+    assert.deepStrictEqual(replayed.success, resolved.success.state)
+
+    const forgedUnmappedCatch = structuredClone(resolved.success.state)
+    const forgedOutcome = forgedUnmappedCatch.activityResolutions[0]?.outcome
+    if (forgedOutcome?._tag !== "BusinessFailed") {
+      throw new Error("expected durable business-failure resolution")
+    }
+    forgedOutcome.identity.errorTag = "OtherError"
+    const rejectedForgery = BpmnKernel.advance(
+      compiled,
+      forgedUnmappedCatch,
+      services()
+    )
+    assert(Result.isFailure(rejectedForgery))
+    assert(
+      rejectedForgery.failure.diagnostics.some((diagnostic) => diagnostic.code === BpmnKernel.Codes.InvalidKernelState)
+    )
+  })
+
+  it("keeps an unmapped business failure terminal even when the Boundary Error is catch-all", () => {
+    const mappedErrorRef = "error-mapped"
+    const definition: BpmnModel.BpmnModel = {
+      ...model(
+        [
+          startEvent("start", processId, ["flow-start-task"]),
+          task("task", processId, ["flow-start-task"], ["flow-task-success"]),
+          boundaryError("boundary-catch-all", "task", "flow-error-end"),
+          endEvent("end-success", processId, ["flow-task-success"]),
+          endEvent("end-error", processId, ["flow-error-end"])
+        ],
+        [
+          flow("flow-start-task", processId, "start", "task", "normal"),
+          flow("flow-task-success", processId, "task", "end-success", "normal"),
+          flow("flow-error-end", processId, "boundary-catch-all", "end-error", "normal")
+        ]
+      ),
+      errors: [{ id: mappedErrorRef }]
+    }
+    const compiled = compile(definition, [
+      taskBinding("task", [{
+        errorTag: "MappedError",
+        errorRef: mappedErrorRef
+      }])
+    ])
+    const initialized = BpmnKernel.initialize(compiled, services())
+    assert(Result.isSuccess(initialized))
+    const token = initialized.success.state.tokens.find((candidate) =>
+      candidate.status === "active" &&
+      candidate.position._tag === "AtNode" &&
+      candidate.position.nodeId === "task"
+    )
+    if (token === undefined) {
+      throw new Error("expected bound task token")
+    }
+    const resolved = BpmnKernel.resolveTask(
+      compiled,
+      initialized.success.state,
+      {
+        commandVersion: BpmnActivityV3.CommandVersion,
+        scopeInstanceId: token.scopeInstanceId,
+        taskNodeId: "task",
+        tokenId: token.tokenId,
+        outcome: failedOutcome("UnmappedError")
+      },
+      services()
+    )
+
+    assert(Result.isSuccess(resolved))
+    assert.strictEqual(resolved.success.state.status, "failed")
+    assert.isFalse(
+      resolved.success.events.some((event) => event._tag === "BoundaryErrorCaught")
+    )
+    assert(
+      resolved.success.events.some((event) =>
+        event._tag === "ExecutionFailed" &&
+        event.failureKind === "UnmappedBusinessFailure" &&
+        event.taskNodeId === "task"
+      )
+    )
+    assert(
+      resolved.success.state.scopeInstances.every((scope) => scope.status === "failed" || scope.status === "cancelled")
+    )
+    assert(
+      resolved.success.state.tokens.every((candidate) => candidate.status !== "active")
+    )
+    const replayed = BpmnKernel.replay(compiled, [
+      ...initialized.success.events,
+      ...resolved.success.events
+    ])
+    assert(Result.isSuccess(replayed))
+    assert.deepStrictEqual(replayed.success, resolved.success.state)
+  })
+
+  it("fails a mapped but uncaught BPMN Error and keeps near-match error codes unmapped", () => {
+    const mappedErrorRef = "error-validation"
+    const otherErrorRef = "error-other"
+    const definition: BpmnModel.BpmnModel = {
+      ...model(
+        [
+          startEvent("start", processId, ["flow-start-task"]),
+          task("task", processId, ["flow-start-task"], ["flow-task-success"]),
+          boundaryError(
+            "boundary-other",
+            "task",
+            "flow-other-end",
+            otherErrorRef
+          ),
+          endEvent("end-success", processId, ["flow-task-success"]),
+          endEvent("end-other", processId, ["flow-other-end"])
+        ],
+        [
+          flow("flow-start-task", processId, "start", "task", "normal"),
+          flow("flow-task-success", processId, "task", "end-success", "normal"),
+          flow("flow-other-end", processId, "boundary-other", "end-other", "normal")
+        ]
+      ),
+      errors: [{ id: mappedErrorRef }, { id: otherErrorRef }]
+    }
+    const compiled = compile(definition, [
+      taskBinding("task", [{
+        errorTag: "ValidationError",
+        errorCode: "E_VALIDATION",
+        errorRef: mappedErrorRef
+      }])
+    ])
+
+    const resolveFailure = (
+      errorCode: string
+    ): {
+      readonly initialized: BpmnKernel.TransitionBatch
+      readonly resolved: BpmnKernel.TransitionBatch
+    } => {
+      const initialized = BpmnKernel.initialize(compiled, services())
+      assert(Result.isSuccess(initialized))
+      const token = initialized.success.state.tokens.find((candidate) =>
+        candidate.status === "active" &&
+        candidate.position._tag === "AtNode" &&
+        candidate.position.nodeId === "task"
+      )
+      if (token === undefined) {
+        throw new Error("expected bound task token")
+      }
+      const resolved = BpmnKernel.resolveTask(
+        compiled,
+        initialized.success.state,
+        {
+          commandVersion: BpmnActivityV3.CommandVersion,
+          scopeInstanceId: token.scopeInstanceId,
+          taskNodeId: "task",
+          tokenId: token.tokenId,
+          outcome: failedOutcome("ValidationError", errorCode)
+        },
+        services()
+      )
+      assert(Result.isSuccess(resolved))
+      return {
+        initialized: initialized.success,
+        resolved: resolved.success
+      }
+    }
+
+    const uncaught = resolveFailure("E_VALIDATION")
+    assert.strictEqual(uncaught.resolved.state.status, "failed")
+    assert(
+      uncaught.resolved.events.some((event) =>
+        event._tag === "ExecutionFailed" &&
+        event.failureKind === "UncaughtBpmnError" &&
+        event.errorRef === mappedErrorRef
+      )
+    )
+    assert(
+      uncaught.resolved.events.some((event) =>
+        event._tag === "TokenWithdrawn" &&
+        event.reason === "uncaught-bpmn-error"
+      )
+    )
+    assert(
+      uncaught.resolved.state.tokens.every((token) => token.status !== "active")
+    )
+    assert(
+      uncaught.resolved.state.scopeInstances.every((scope) => scope.status !== "active")
+    )
+    const uncaughtReplay = BpmnKernel.replay(compiled, [
+      ...uncaught.initialized.events,
+      ...uncaught.resolved.events
+    ])
+    assert(Result.isSuccess(uncaughtReplay))
+    assert.deepStrictEqual(
+      uncaughtReplay.success,
+      uncaught.resolved.state
+    )
+
+    const nearMatch = resolveFailure("E_OTHER")
+    assert.strictEqual(nearMatch.resolved.state.status, "failed")
+    assert(
+      nearMatch.resolved.events.some((event) =>
+        event._tag === "ExecutionFailed" &&
+        event.failureKind === "UnmappedBusinessFailure" &&
+        event.errorRef === undefined
+      )
+    )
+    assert(
+      nearMatch.resolved.events.some((event) =>
+        event._tag === "TokenWithdrawn" &&
+        event.reason === "unmapped-business-failure"
+      )
+    )
+    const nearMatchReplay = BpmnKernel.replay(compiled, [
+      ...nearMatch.initialized.events,
+      ...nearMatch.resolved.events
+    ])
+    assert(Result.isSuccess(nearMatchReplay))
+    assert.deepStrictEqual(
+      nearMatchReplay.success,
+      nearMatch.resolved.state
     )
   })
 
@@ -385,9 +940,7 @@ describe("BpmnKernel", () => {
     ])
     assert(Result.isSuccess(routedReplay))
     assert.deepStrictEqual(routedReplay.success, routed.success.state)
-    const conditionEvents = routed.success.events.filter((event) =>
-      event._tag === "ConditionEvaluated"
-    )
+    const conditionEvents = routed.success.events.filter((event) => event._tag === "ConditionEvaluated")
     assert.strictEqual(conditionEvents.length, 2)
     for (const event of conditionEvents) {
       if (event._tag !== "ConditionEvaluated") {
@@ -407,29 +960,22 @@ describe("BpmnKernel", () => {
       ...routed.success.events
     ]
     const changedUsage = structuredClone(committedJournal)
-    const usageEvent = changedUsage.find((event) =>
-      event._tag === "ConditionEvaluated"
-    )
+    const usageEvent = changedUsage.find((event) => event._tag === "ConditionEvaluated")
     if (usageEvent?._tag !== "ConditionEvaluated") {
       throw new Error("expected condition event")
     }
     usageEvent.usage.contextCanonicalBytes++
     const changedBinding = structuredClone(committedJournal)
-    const bindingEvent = changedBinding.find((event) =>
-      event._tag === "ConditionEvaluated"
-    )
+    const bindingEvent = changedBinding.find((event) => event._tag === "ConditionEvaluated")
     if (bindingEvent?._tag !== "ConditionEvaluated") {
       throw new Error("expected condition event")
     }
-    bindingEvent.evaluatorBinding.build.deploymentId =
-      "forged-deployment"
+    bindingEvent.evaluatorBinding.build.deploymentId = "forged-deployment"
     for (const forged of [changedUsage, changedBinding]) {
       const rejected = BpmnKernel.replay(compiled, forged)
       assert(Result.isFailure(rejected))
       assert(
-        rejected.failure.diagnostics.some((diagnostic) =>
-          diagnostic.code === BpmnKernel.Codes.InvalidTransitionJournal
-        )
+        rejected.failure.diagnostics.some((diagnostic) => diagnostic.code === BpmnKernel.Codes.InvalidTransitionJournal)
       )
     }
 
@@ -1151,9 +1697,33 @@ describe("BpmnKernel", () => {
         }
       }))
     )
+    const explicitEmptyBindings = prepareResult(
+      baselineModel,
+      limits,
+      "test-bpmn-model-v1",
+      evaluatorBindings(baselineModel),
+      []
+    )
+    const protocolBound = prepareResult(
+      baselineModel,
+      limits,
+      "test-bpmn-model-v1",
+      evaluatorBindings(baselineModel),
+      [taskBinding("task")]
+    )
     assert(Result.isSuccess(changedProfile))
     assert(Result.isSuccess(changedLimits))
     assert(Result.isSuccess(changedEvaluator))
+    assert(Result.isSuccess(explicitEmptyBindings))
+    assert(Result.isSuccess(protocolBound))
+    assert.strictEqual(
+      explicitEmptyBindings.success.modelReference.executableFingerprint,
+      baseline.modelReference.executableFingerprint
+    )
+    assert.notStrictEqual(
+      protocolBound.success.modelReference.executableFingerprint,
+      baseline.modelReference.executableFingerprint
+    )
 
     const fingerprints = [
       changed.modelReference.executableFingerprint,
@@ -1204,8 +1774,7 @@ describe("BpmnKernel", () => {
     )
 
     const tamperedState = structuredClone(initialized.success.state)
-    tamperedState.model.executableFingerprint =
-      alternateExecutableFingerprint
+    tamperedState.model.executableFingerprint = alternateExecutableFingerprint
     const rejectedState = BpmnKernel.advance(
       baseline,
       tamperedState,
@@ -1224,8 +1793,7 @@ describe("BpmnKernel", () => {
     if (header?._tag !== "JournalStarted") {
       throw new Error("expected journal header")
     }
-    header.model.executableFingerprint =
-      alternateExecutableFingerprint
+    header.model.executableFingerprint = alternateExecutableFingerprint
     const rejectedJournal = BpmnKernel.replay(
       baseline,
       tamperedJournal
@@ -1243,9 +1811,7 @@ describe("BpmnKernel", () => {
     )
     assert(Result.isFailure(headerless))
     assert(
-      headerless.failure.diagnostics.some((diagnostic) =>
-        diagnostic.code === BpmnKernel.Codes.InvalidTransitionJournal
-      )
+      headerless.failure.diagnostics.some((diagnostic) => diagnostic.code === BpmnKernel.Codes.InvalidTransitionJournal)
     )
   })
 
@@ -1337,6 +1903,26 @@ describe("BpmnKernel", () => {
     terminalWithWork.status = "completed"
     terminalWithWork.completedAt = now
 
+    const failureWithoutResolution = structuredClone(
+      initialized.success.state
+    )
+    failureWithoutResolution.status = "failed"
+    failureWithoutResolution.completedAt = now
+    failureWithoutResolution.scopeInstances = failureWithoutResolution.scopeInstances.map((scope) => ({
+      ...scope,
+      status: "failed" as const,
+      exitedAt: now
+    }))
+    failureWithoutResolution.tokens = failureWithoutResolution.tokens.map((token) =>
+      token.status === "active"
+        ? {
+          ...token,
+          status: "withdrawn" as const,
+          consumedAt: now
+        }
+        : token
+    )
+
     const wrongRoot = structuredClone(initialized.success.state)
     wrongRoot.model.rootProcessId = "process-other"
     wrongRoot.status = "completed"
@@ -1350,7 +1936,14 @@ describe("BpmnKernel", () => {
       exitedAt: now
     }))
 
-    for (const forged of [nonTaskPosition, auxiliary, wrongRoot]) {
+    for (
+      const forged of [
+        nonTaskPosition,
+        auxiliary,
+        failureWithoutResolution,
+        wrongRoot
+      ]
+    ) {
       const result = BpmnKernel.advance(compiled, forged, services())
       assert(Result.isFailure(result))
       assert(
@@ -1438,6 +2031,51 @@ describe("BpmnKernel", () => {
         BpmnKernel.Codes.UnsupportedActivity,
         BpmnKernel.Codes.InvalidExecutableStructure
       ])
+    )
+  })
+
+  it("rejects executable Boundary Errors without a protocol binding and duplicate failure mappings", () => {
+    const errorRef = "error-validation"
+    const definition: BpmnModel.BpmnModel = {
+      ...model(
+        [
+          startEvent("start", processId, ["flow-start-task"]),
+          task("task", processId, ["flow-start-task"], ["flow-task-success"]),
+          boundaryError("boundary-error", "task", "flow-error-end", errorRef),
+          endEvent("end-success", processId, ["flow-task-success"]),
+          endEvent("end-error", processId, ["flow-error-end"])
+        ],
+        [
+          flow("flow-start-task", processId, "start", "task", "normal"),
+          flow("flow-task-success", processId, "task", "end-success", "normal"),
+          flow("flow-error-end", processId, "boundary-error", "end-error", "normal")
+        ]
+      ),
+      errors: [{ id: errorRef }]
+    }
+
+    const unbound = prepareResult(definition)
+    assert(Result.isFailure(unbound))
+    assert(
+      unbound.failure.diagnostics.some((diagnostic) => diagnostic.code === BpmnKernel.Codes.UnsupportedEvent)
+    )
+
+    const duplicateMappings = prepareResult(
+      definition,
+      limits,
+      "test-bpmn-model-v1",
+      evaluatorBindings(definition),
+      [taskBinding("task", [
+        { errorTag: "ValidationError", errorRef },
+        { errorTag: "ValidationError", errorRef }
+      ])]
+    )
+    assert(Result.isFailure(duplicateMappings))
+    assert(
+      duplicateMappings.failure.diagnostics.some((diagnostic) =>
+        diagnostic.code === BpmnKernel.Codes.InvalidKernelProfile &&
+        diagnostic.message.includes("repeats failure identity")
+      )
     )
   })
 
