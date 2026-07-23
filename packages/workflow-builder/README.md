@@ -18,7 +18,10 @@ Today the package provides:
 - versioned typed nodes, ports, handler registries, and effectful link policies;
 - aggregate compiler diagnostics, resource admission, cycle rejection, and a
   deterministic dependency schedule;
-- canonical SHA-256 compiled-plan fingerprints;
+- canonical SHA-256 compiled-plan fingerprints, plus compiler-semantic-version
+  `2` documents that remove presentation metadata, normalize unordered
+  collections by code-unit order, retain workflow-boundary contracts and
+  resolved endpoints, and commit the canonical static-DAG schedule;
 - a direct Effect interpreter with fresh configuration decoding, detached frozen
   JSON routing, typed failures, hostile-container validation, bounded
   concurrency, dependency readiness, and structured interruption;
@@ -75,6 +78,19 @@ Today the package provides:
   codec and policy pins, authenticated same-principal idempotency, bounded blob
   verification, atomic accepted-event/expiry-timer commits, receipt recovery,
   and bounded dead-letter overflow;
+- independent protocol-v3 wire primitives and domain-separated artifact,
+  compiled-plan, boundary-contract, executable-build, and encoded-schema
+  digests, together with strict inline-or-immutable-blob payload references;
+- a protocol-v3 activity policy with exact classifier build pins, explicit
+  non-retryable identities, bounded fixed/exponential backoff, deterministic
+  no-jitter or externally recorded jitter ranges, attempt/elapsed budgets, and
+  independent schedule-to-start/start-to-close/schedule-to-close timeouts;
+- protocol-v3 child-workflow collision-free identities, exact
+  artifact/contract/deployment/build and bounded lineage pins,
+  inline-or-blob inputs/results, a closed command/event vocabulary, and a pure
+  immutable relation reducer that enforces start/cancel/terminal races,
+  cause-specific parent-close policy, cancellation fencing, output-contract
+  identity, replay order, and `CancelAndWait` barriers;
 - an atomic process-local history store with optimistic sequencing, batch-level
   exact retry recognition, hostile-input validation, and immutable snapshots;
 - a strict initial command vocabulary plus a pure prepared-plan decision layer
@@ -138,9 +154,13 @@ fixtures, and published conformance evidence remain required. The package
 provides no built-in FEEL, XPath, or other expression implementation; an
 application must install an exact build-pinned evaluator, and strong CPU/heap
 isolation requires a worker, process, or sandbox adapter. A BPMN
-`callActivity` can be represented and round-tripped, but executable admission
-still rejects it until its source QName is resolved to an immutable child
-artifact and the durable parent/child protocol is installed.
+`callActivity` can be represented and round-tripped. Its protocol-v3 relation
+and replay semantics are modeled, but executable admission still rejects it
+until source QNames resolve through a trusted compiler-semantic-version-2
+artifact family and a single transactional parent/child authority is installed.
+The compiler-v2 document and digest primitives do not yet constitute that
+artifact authority: exact definition, handler, codec, and schema build
+attestation plus content-addressed storage and run binding are still required.
 
 See the runnable [typed DAG example](./examples/basic.ts),
 [BPMN XML execution example](./examples/bpmn-executable.ts), and detailed

@@ -5,23 +5,23 @@
  * **Details**
  *
  * This module is deliberately independent from protocol version `2`. It
- * defines only portable pins, lineage, relation state, and collision-free
- * identities. Starting, deciding, projecting, and cancelling child runs remain
- * authority concerns for a later integration layer.
+ * defines portable pins, lineage, relation state, and collision-free
+ * identities. The sibling protocol and reducer modules define exact wire facts
+ * and replay legality; starting child runs and atomically coordinating parent
+ * and child histories remain execution-authority concerns.
  *
  * @since 4.0.0
  */
 import * as Result from "effect/Result"
 import * as Schema from "effect/Schema"
+import * as IdentityV3 from "./IdentityV3.ts"
 import * as Json from "./internal/json.ts"
-import * as Wire from "./ProtocolV2Wire.ts"
+import * as Wire from "./ProtocolV3Wire.ts"
 
 const strictParseOptions = {
   errors: "all",
   onExcessProperty: "error"
 } as const
-
-const namespace = "@effect/workflow-builder" as const
 
 /**
  * Execution protocol selected by child workflow foundations in this module.
@@ -37,7 +37,7 @@ export const ExecutionProtocolVersion = 3 as const
  * @category constants
  * @since 4.0.0
  */
-export const IdentityVersion = 3 as const
+export const IdentityVersion = IdentityV3.IdentityVersion
 
 /**
  * Maximum child depth, and therefore maximum retained ancestry length.
@@ -53,22 +53,13 @@ export const IdentityVersion = 3 as const
  */
 export const MaximumLineageDepth = 64 as const
 
-const identity = (
-  kind: string,
-  ...parts: ReadonlyArray<string | number>
-): string => JSON.stringify([namespace, IdentityVersion, kind, ...parts])
-
 /**
  * Returns the stable identity of one child call site in a parent run.
  *
  * @category constructors
  * @since 4.0.0
  */
-export const childCallId = (
-  tenantId: string,
-  parentRunId: string,
-  nodeInstanceId: string
-): string => identity("ChildCall", tenantId, parentRunId, nodeInstanceId)
+export const childCallId = IdentityV3.childCallId
 
 /**
  * Returns the deterministic run identifier reserved for one child relation.
@@ -76,11 +67,7 @@ export const childCallId = (
  * @category constructors
  * @since 4.0.0
  */
-export const childRunId = (
-  tenantId: string,
-  parentRunId: string,
-  callId: string
-): string => identity("ChildRun", tenantId, parentRunId, callId)
+export const childRunId = IdentityV3.childRunId
 
 /**
  * Returns the deterministic durable-start request identifier for one child.
@@ -88,11 +75,7 @@ export const childRunId = (
  * @category constructors
  * @since 4.0.0
  */
-export const childStartRequestId = (
-  tenantId: string,
-  parentRunId: string,
-  callId: string
-): string => identity("ChildStartRequest", tenantId, parentRunId, callId)
+export const childStartRequestId = IdentityV3.childStartRequestId
 
 /**
  * Returns the shared schedule command and event identity for one child call.
@@ -100,11 +83,7 @@ export const childStartRequestId = (
  * @category constructors
  * @since 4.0.0
  */
-export const scheduleChildCommandId = (
-  tenantId: string,
-  parentRunId: string,
-  callId: string
-): string => identity("ScheduleChild", tenantId, parentRunId, callId)
+export const scheduleChildCommandId = IdentityV3.scheduleChildCommandId
 
 /**
  * Returns the parent projection identity for a canonical child start event.
@@ -112,19 +91,7 @@ export const scheduleChildCommandId = (
  * @category constructors
  * @since 4.0.0
  */
-export const childStartProjectionEventId = (
-  tenantId: string,
-  parentRunId: string,
-  callId: string,
-  childRunStartedEventId: string
-): string =>
-  identity(
-    "ChildStartProjection",
-    tenantId,
-    parentRunId,
-    callId,
-    childRunStartedEventId
-  )
+export const childStartProjectionEventId = IdentityV3.childStartProjectionEventId
 
 /**
  * Returns the parent projection identity for a canonical child terminal event.
@@ -132,19 +99,7 @@ export const childStartProjectionEventId = (
  * @category constructors
  * @since 4.0.0
  */
-export const childTerminalProjectionEventId = (
-  tenantId: string,
-  parentRunId: string,
-  callId: string,
-  childTerminalEventId: string
-): string =>
-  identity(
-    "ChildTerminalProjection",
-    tenantId,
-    parentRunId,
-    callId,
-    childTerminalEventId
-  )
+export const childTerminalProjectionEventId = IdentityV3.childTerminalProjectionEventId
 
 /**
  * Returns the cancellation command identity for one parent close cause.
@@ -152,19 +107,7 @@ export const childTerminalProjectionEventId = (
  * @category constructors
  * @since 4.0.0
  */
-export const requestChildCancellationCommandId = (
-  tenantId: string,
-  parentRunId: string,
-  callId: string,
-  parentCauseEventId: string
-): string =>
-  identity(
-    "RequestChildCancellation",
-    tenantId,
-    parentRunId,
-    callId,
-    parentCauseEventId
-  )
+export const requestChildCancellationCommandId = IdentityV3.requestChildCancellationCommandId
 
 /**
  * Returns the parent acknowledgement identity for a child cancellation fact.
@@ -172,19 +115,7 @@ export const requestChildCancellationCommandId = (
  * @category constructors
  * @since 4.0.0
  */
-export const childCancellationAcceptedEventId = (
-  tenantId: string,
-  parentRunId: string,
-  callId: string,
-  childCancellationEventId: string
-): string =>
-  identity(
-    "ChildCancellationAccepted",
-    tenantId,
-    parentRunId,
-    callId,
-    childCancellationEventId
-  )
+export const childCancellationAcceptedEventId = IdentityV3.childCancellationAcceptedEventId
 
 /**
  * Returns the terminal relation identity when close wins before child start.
@@ -192,19 +123,7 @@ export const childCancellationAcceptedEventId = (
  * @category constructors
  * @since 4.0.0
  */
-export const childCancelledBeforeStartEventId = (
-  tenantId: string,
-  parentRunId: string,
-  callId: string,
-  parentCauseEventId: string
-): string =>
-  identity(
-    "ChildCancelledBeforeStart",
-    tenantId,
-    parentRunId,
-    callId,
-    parentCauseEventId
-  )
+export const childCancelledBeforeStartEventId = IdentityV3.childCancelledBeforeStartEventId
 
 /**
  * Returns the durable abandon identity for one parent close cause.
@@ -212,19 +131,7 @@ export const childCancelledBeforeStartEventId = (
  * @category constructors
  * @since 4.0.0
  */
-export const abandonChildEventId = (
-  tenantId: string,
-  parentRunId: string,
-  callId: string,
-  parentCauseEventId: string
-): string =>
-  identity(
-    "AbandonChild",
-    tenantId,
-    parentRunId,
-    callId,
-    parentCauseEventId
-  )
+export const abandonChildEventId = IdentityV3.abandonChildEventId
 
 /**
  * Returns the durable identity of a permanent child-start failure.
@@ -232,19 +139,15 @@ export const abandonChildEventId = (
  * @category constructors
  * @since 4.0.0
  */
-export const childStartFailedEventId = (
-  tenantId: string,
-  parentRunId: string,
-  callId: string,
-  startRequestId: string
-): string =>
-  identity(
-    "ChildStartFailed",
-    tenantId,
-    parentRunId,
-    callId,
-    startRequestId
-  )
+export const childStartFailedEventId = IdentityV3.childStartFailedEventId
+
+/**
+ * Returns the canonical recursion family identity for one workflow definition.
+ *
+ * @category constructors
+ * @since 4.0.0
+ */
+export const workflowFamilyIdentity = IdentityV3.workflowFamilyIdentity
 
 const ChildDepth = Schema.Int.check(
   Schema.isGreaterThanOrEqualTo(1),
@@ -262,9 +165,7 @@ const AncestorDepth = Schema.Int.check(
  * @category schemas
  * @since 4.0.0
  */
-export const ContractDigest = Wire.Sha256Digest.pipe(
-  Schema.brand("@effect/workflow-builder/ChildWorkflowV3/ContractDigest")
-).annotate({ identifier: "WorkflowChildV3ContractDigest" })
+export const ContractDigest = Wire.ContractDigest
 
 /**
  * The decoded type of {@link ContractDigest}.
@@ -328,7 +229,8 @@ const PlanPin = Schema.Struct({
 const DefinitionPin = Schema.Struct({
   id: Schema.NonEmptyString,
   version: Schema.NonEmptyString,
-  deploymentId: Schema.NonEmptyString
+  deploymentId: Schema.NonEmptyString,
+  buildDigest: Wire.BuildDigest
 }).annotate({
   identifier: "WorkflowChildV3DefinitionPin",
   parseOptions: strictParseOptions
@@ -343,7 +245,7 @@ const ChildTargetPinStruct = Schema.Struct({
   compilerSemanticVersion: Schema.Literal("2"),
   compiledFingerprint: Wire.CompiledFingerprint,
   definition: DefinitionPin,
-  workflowIdentity: Schema.NonEmptyString,
+  workflowFamilyIdentity: Schema.NonEmptyString,
   inputContractDigest: ContractDigest,
   outputContractDigest: ContractDigest,
   closePolicy: ChildClosePolicy,
@@ -354,14 +256,36 @@ const ChildTargetPinStruct = Schema.Struct({
   parseOptions: strictParseOptions
 })
 
+const targetFamilyIdentityMatches = (
+  target: Schema.Schema.Type<typeof ChildTargetPinStruct>
+): boolean =>
+  target.workflowFamilyIdentity ===
+    IdentityV3.workflowFamilyIdentity(target.definition.id)
+
 /**
  * Exact content, compiler, deployment, contract, and close-policy pins for one
  * protocol version `3` child workflow target.
  *
+ * **Details**
+ *
+ * Structural validation proves that the family identity is derived from the
+ * definition identifier. Artifact-content and executable-build verification
+ * remain admission-authority responsibilities; a canonical digest is an
+ * integrity coordinate, not proof that the referenced artifact was resolved
+ * from a trusted store.
+ *
  * @category schemas
  * @since 4.0.0
  */
-export const ChildTargetPin = ChildTargetPinStruct.annotate({
+export const ChildTargetPin = ChildTargetPinStruct.check(
+  Schema.makeFilter(
+    targetFamilyIdentityMatches,
+    {
+      expected:
+        "workflowFamilyIdentity derived from the target definition identifier"
+    }
+  )
+).annotate({
   identifier: "WorkflowChildV3TargetPin",
   parseOptions: strictParseOptions
 })
@@ -386,7 +310,7 @@ export const LineageEntry = Schema.Struct({
   tenantId: Schema.NonEmptyString,
   runId: Schema.NonEmptyString,
   artifactDigest: Wire.ArtifactDigest,
-  workflowIdentity: Schema.NonEmptyString
+  workflowFamilyIdentity: Schema.NonEmptyString
 }).annotate({
   identifier: "WorkflowChildV3LineageEntry",
   parseOptions: strictParseOptions
@@ -427,7 +351,7 @@ const ParentRunLinkStruct = Schema.Struct({
   tenantId: Schema.NonEmptyString,
   parentRunId: Schema.NonEmptyString,
   parentArtifactDigest: Wire.ArtifactDigest,
-  parentWorkflowIdentity: Schema.NonEmptyString,
+  parentWorkflowFamilyIdentity: Schema.NonEmptyString,
   callId: Schema.NonEmptyString,
   nodeId: Schema.NonEmptyString,
   nodeInstanceId: Schema.NonEmptyString,
@@ -574,7 +498,7 @@ const parentLinkIssues = (
     (
       parent.runId !== link.parentRunId ||
       parent.artifactDigest !== link.parentArtifactDigest ||
-      parent.workflowIdentity !== link.parentWorkflowIdentity
+      parent.workflowFamilyIdentity !== link.parentWorkflowFamilyIdentity
     )
   ) {
     issues.push(issue(
@@ -603,16 +527,16 @@ const parentLinkIssues = (
         ["ancestry", index, "artifactDigest"]
       ))
     }
-    if (seenWorkflowIdentities.has(entry.workflowIdentity)) {
+    if (seenWorkflowIdentities.has(entry.workflowFamilyIdentity)) {
       issues.push(issue(
         ValidationCodes.RepeatedWorkflowIdentity,
         "recursion-forbidden ancestry must not repeat a workflow identity",
-        ["ancestry", index, "workflowIdentity"]
+        ["ancestry", index, "workflowFamilyIdentity"]
       ))
     }
     seenRuns.add(entry.runId)
     seenArtifacts.add(entry.artifactDigest)
-    seenWorkflowIdentities.add(entry.workflowIdentity)
+    seenWorkflowIdentities.add(entry.workflowFamilyIdentity)
   }
 
   const expectedCallId = childCallId(
@@ -706,13 +630,22 @@ const relationIssues = (
       ["target", "artifactDigest"]
     ))
   }
+  if (!targetFamilyIdentityMatches(target)) {
+    issues.push(issue(
+      ValidationCodes.IdentityMismatch,
+      "workflowFamilyIdentity must be derived from the target definition id",
+      ["target", "workflowFamilyIdentity"]
+    ))
+  }
   if (
-    parent.ancestry.some((entry) => entry.workflowIdentity === target.workflowIdentity)
+    parent.ancestry.some((entry) =>
+      entry.workflowFamilyIdentity === target.workflowFamilyIdentity
+    )
   ) {
     issues.push(issue(
       ValidationCodes.RepeatedWorkflowIdentity,
       "a recursion-forbidden child target must not repeat an ancestor workflow identity",
-      ["target", "workflowIdentity"]
+      ["target", "workflowFamilyIdentity"]
     ))
   }
 
@@ -1179,11 +1112,22 @@ export const validateChildTargetPin = (
   if (versionIssue !== undefined) {
     return Result.fail(validationError(versionIssue))
   }
-  return decodeSnapshot(
+  const decoded = decodeSnapshot(
     snapshot.success,
     decodeChildTargetPin,
     "child target pin"
   )
+  if (Result.isFailure(decoded)) {
+    return decoded
+  }
+  if (!targetFamilyIdentityMatches(decoded.success)) {
+    return Result.fail(validationError(issue(
+      ValidationCodes.IdentityMismatch,
+      "workflowFamilyIdentity must be derived from the target definition id",
+      ["workflowFamilyIdentity"]
+    )))
+  }
+  return Result.succeed(decoded.success as ChildTargetPin)
 }
 
 /**

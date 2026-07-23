@@ -11,7 +11,7 @@ const parentRunId = "parent-run-1"
 const nodeId = "charge-card"
 const nodeInstanceId = "charge-card#1"
 const rootArtifactDigest = digest("a")
-const rootWorkflowIdentity = "orders:3"
+const rootWorkflowFamilyIdentity = Child.workflowFamilyIdentity("orders")
 
 const closePolicy = () => ({
   closePolicyVersion: 3 as const,
@@ -33,9 +33,10 @@ const target = () => ({
   definition: {
     id: "payment",
     version: "3.1.0",
-    deploymentId: "payment-build-19"
+    deploymentId: "payment-build-19",
+    buildDigest: digest("6")
   },
-  workflowIdentity: "payment:3.1.0",
+  workflowFamilyIdentity: Child.workflowFamilyIdentity("payment"),
   inputContractDigest: digest("d"),
   outputContractDigest: digest("e"),
   closePolicy: closePolicy(),
@@ -50,7 +51,7 @@ const parentLink = () => {
     tenantId,
     parentRunId,
     parentArtifactDigest: rootArtifactDigest,
-    parentWorkflowIdentity: rootWorkflowIdentity,
+    parentWorkflowFamilyIdentity: rootWorkflowFamilyIdentity,
     callId,
     nodeId,
     nodeInstanceId,
@@ -67,7 +68,7 @@ const parentLink = () => {
       tenantId,
       runId: parentRunId,
       artifactDigest: rootArtifactDigest,
-      workflowIdentity: rootWorkflowIdentity
+      workflowFamilyIdentity: rootWorkflowFamilyIdentity
     }]
   }
 }
@@ -81,7 +82,7 @@ const twoLevelParentLink = () => {
     tenantId,
     runId: rootRunId,
     artifactDigest: digest("1"),
-    workflowIdentity: "root:3"
+    workflowFamilyIdentity: Child.workflowFamilyIdentity("root")
   }
   const directParent = {
     lineageEntryVersion: 3 as const,
@@ -89,7 +90,7 @@ const twoLevelParentLink = () => {
     tenantId,
     runId: parentRunId,
     artifactDigest: rootArtifactDigest,
-    workflowIdentity: rootWorkflowIdentity
+    workflowFamilyIdentity: rootWorkflowFamilyIdentity
   }
   return {
     ...parent,
@@ -439,6 +440,17 @@ describe("ChildWorkflowV3", () => {
       }),
       Child.ValidationCodes.InvalidSchema
     )
+    const mismatchedFamily = {
+      ...target(),
+      workflowFamilyIdentity: Child.workflowFamilyIdentity("other")
+    }
+    expectCode(
+      Child.validateChildTargetPin(mismatchedFamily),
+      Child.ValidationCodes.IdentityMismatch
+    )
+    assert.throws(() =>
+      Schema.decodeUnknownSync(Child.ChildTargetPin)(mismatchedFamily)
+    )
   })
 
   it("rejects off-by-one, cross-tenant, root, and parent lineage mismatches", () => {
@@ -548,12 +560,13 @@ describe("ChildWorkflowV3", () => {
 
     const repeatedWorkflowParent = {
       ...parent,
-      workflowIdentity: root.workflowIdentity
+      workflowFamilyIdentity: root.workflowFamilyIdentity
     }
     expectCode(
       Child.validateParentRunLink({
         ...valid,
-        parentWorkflowIdentity: repeatedWorkflowParent.workflowIdentity,
+        parentWorkflowFamilyIdentity:
+          repeatedWorkflowParent.workflowFamilyIdentity,
         ancestry: [root, repeatedWorkflowParent]
       }),
       Child.ValidationCodes.RepeatedWorkflowIdentity
@@ -569,7 +582,9 @@ describe("ChildWorkflowV3", () => {
         tenantId,
         runId: `run-${index}`,
         artifactDigest: numberedDigest(index + 1),
-        workflowIdentity: `workflow-${index}`
+        workflowFamilyIdentity: Child.workflowFamilyIdentity(
+          `workflow-${index}`
+        )
       })
     )
     const valid = parentLink()
@@ -611,7 +626,12 @@ describe("ChildWorkflowV3", () => {
         ...valid,
         target: {
           ...valid.target,
-          workflowIdentity: valid.parent.ancestry[0]!.workflowIdentity
+          definition: {
+            ...valid.target.definition,
+            id: "orders"
+          },
+          workflowFamilyIdentity:
+            valid.parent.ancestry[0]!.workflowFamilyIdentity
         }
       }),
       Child.ValidationCodes.RepeatedWorkflowIdentity

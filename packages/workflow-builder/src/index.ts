@@ -42,6 +42,11 @@ export * as ActivityPolicy from "./ActivityPolicy.ts"
 /**
  * @since 4.0.0
  */
+export * as ActivityPolicyV3 from "./ActivityPolicyV3.ts"
+
+/**
+ * @since 4.0.0
+ */
 export * as ActivityRuntime from "./ActivityRuntime.ts"
 
 /**
@@ -117,6 +122,16 @@ export * as BpmnXmlAst from "./BpmnXmlAst.ts"
 /**
  * @since 4.0.0
  */
+export * as ChildWorkflowProtocolV3 from "./ChildWorkflowProtocolV3.ts"
+
+/**
+ * @since 4.0.0
+ */
+export * as ChildWorkflowStateV3 from "./ChildWorkflowStateV3.ts"
+
+/**
+ * @since 4.0.0
+ */
 export * as ChildWorkflowV3 from "./ChildWorkflowV3.ts"
 
 /**
@@ -152,6 +167,11 @@ export * as Compiler from "./Compiler.ts"
 /**
  * @since 4.0.0
  */
+export * as CompilerV2 from "./CompilerV2.ts"
+
+/**
+ * @since 4.0.0
+ */
 export * as Decision from "./Decision.ts"
 
 /**
@@ -183,6 +203,11 @@ export * as Diagnostic from "./Diagnostic.ts"
  * @since 4.0.0
  */
 export * as DigestV2 from "./DigestV2.ts"
+
+/**
+ * @since 4.0.0
+ */
+export * as DigestV3 from "./DigestV3.ts"
 
 /**
  * @since 4.0.0
@@ -257,6 +282,11 @@ export * as IdentityV2 from "./IdentityV2.ts"
 /**
  * @since 4.0.0
  */
+export * as IdentityV3 from "./IdentityV3.ts"
+
+/**
+ * @since 4.0.0
+ */
 export * as Interpreter from "./Interpreter.ts"
 
 /**
@@ -303,6 +333,11 @@ export * as Port from "./Port.ts"
  * @since 4.0.0
  */
 export * as ProtocolV2Wire from "./ProtocolV2Wire.ts"
+
+/**
+ * @since 4.0.0
+ */
+export * as ProtocolV3Wire from "./ProtocolV3Wire.ts"
 
 /**
  * @since 4.0.0

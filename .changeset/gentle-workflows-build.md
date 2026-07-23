@@ -42,6 +42,16 @@ persistent. Add exact-generation activity cancellation delivery to the
 process-local reference authority, including an issued-generation ledger,
 bounded fenced claims, acknowledgement/release, completion/cancellation race
 tests, and a worker fiber registry that waits for finalizers and closes the
-acquire/register race. Add a separate protocol-v3 child-target, lineage,
-close-policy, canonical-relation, and call-state foundation without widening
-protocol v2 or claiming child execution.
+acquire/register race. Add independent protocol-v3 wire/digest/payload
+primitives, child-target and lineage pins, collision-free relation identities,
+strict schedule/cancel/abandon commands, complete child lifecycle projection
+facts, and a pure immutable relation reducer covering start/cancel/terminal
+races, cause-specific close policies, output-contract fencing, abandonment,
+and parent-close barriers. This does not widen protocol v2 or claim that a
+transactional parent/child execution authority is already installed. Add a
+metadata-independent compiler-semantic-version-2 canonical IR with strict
+external-document validation and deterministic code-unit Kahn scheduling,
+audited domain-separated protocol-v3 artifact/compiled-plan/boundary/build/schema
+digests, exact child definition-build pins, and protocol-v3-native retry,
+fixed/exponential backoff, recorded-jitter, elapsed-budget, classifier-build,
+and independent activity-timeout policy primitives.

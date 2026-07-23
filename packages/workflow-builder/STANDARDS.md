@@ -99,9 +99,10 @@ Implemented foundations:
   interruption-preserving failure handling;
 - a sealed journal artifact whose complete causal payload has an independently
   anchorable history digest; and
-- a separate protocol-version `3` child-target, parent-link, lineage,
-  close-policy, relation-identity, and call-state contract. It deliberately
-  models durable parent/child pins without yet claiming child execution; and
+- separate protocol-version `3` child-target, parent-link, lineage,
+  close-policy, definition-build, command/event, relation-identity, and pure
+  replay contracts. They deliberately model durable parent/child facts without
+  yet claiming transactional child execution; and
 - machine-readable requirement/coverage schemas that record the named mapping
   slice separately while declaring no BPMN conformance claim.
 
@@ -115,9 +116,10 @@ Not yet implemented and therefore not claimed:
   interchange surfaces;
 - token-transition and Activity lifecycle semantics beyond the explicitly
   bounded kernel subset;
-- executable call activities, immutable callable-element resolution,
-  parent/child run linkage, cancellation propagation, and lineage/depth
-  enforcement;
+- executable call activities, immutable callable-element resolution, a
+  transactional parent/child execution authority, and integration of the
+  implemented protocol-v3 linkage, cancellation, lineage, and replay semantics
+  into BPMN token execution;
 - a persistent BPMN execution store, externally authenticated history anchors,
   migration tooling for pre-fingerprint states/journals, and isolated evaluator
   adapters or any bundled FEEL/XPath implementation;

@@ -97,6 +97,15 @@ loss/conformance diagnostic instead of being lowered to a DAG.
 9. **Replay is a compatibility contract.** Old histories and pinned handlers are
    production data, not incidental implementation details.
 
+This package is still pre-release, so draft source APIs do not receive
+compatibility adapters. Once a newer path completely replaces an older
+implementation and every internal caller has migrated, the superseded module
+and tests are removed. That development policy does not erase persisted
+semantics: protocol, identity, artifact, compiler, and history versions remain
+explicit because an admitted production run must replay under the meaning it
+started with. The current version `1` and `2` modules are still used by runnable
+authorities and therefore are not deletion candidates yet.
+
 ## Implemented foundation today
 
 The package currently contains admission, fingerprinting, a deliberately
@@ -115,18 +124,23 @@ machine failure.
 | `LinkPolicy.ts`                   | Explicit effectful data-link authorization, including inspectable ordered rules and deny/allow policies. Contract compatibility remains the compiler's separate responsibility.                                                                                                                                                |
 | `Diagnostic.ts`                   | Strict, detached, immutable, path-addressed diagnostics with safe hostile-input construction, non-negative safe-integer paths, and an aggregate typed `CompilationError`.                                                                                                                                                      |
 | `Compiler.ts`                     | Descriptor-safe detached JSON admission before strict schema decode; config validation; early graph-limit rejection; link authorization; contract/cardinality/fan-out/required-port checks; duplicate/endpoint/root-cycle checks; immutable deterministic topology; and exact result provenance.                               |
+| `CompilerV2.ts`                   | Canonical compiler-semantic-version `2` IR separating metadata-free plan meaning, sorted workflow-boundary contracts, and a resolved static-DAG program; external documents are checked for canonical ordering, exact edge/adjacency correspondence, and a code-unit Kahn schedule.                                            |
 | `Fingerprint.ts`                  | Canonical recursive JSON serialization and a versioned SHA-256 fingerprint document containing the admitted portable plan and compiler-derived schedule.                                                                                                                                                                       |
 | `Interpreter.ts`                  | Explicitly non-durable direct execution with exact compiler/handler provenance, fresh config decoding, detached frozen JSON at every routed boundary, dependency-readiness scheduling, bounded runnable concurrency, captured/ambient Effect services, typed failures, hostile-result validation, and interruption.            |
 | `Identity.ts`                     | One collision-free versioned tuple scheme shared by command, start, result, terminal, and replay boundaries.                                                                                                                                                                                                                   |
 | `Event.ts`                        | Strict semantic-history format version `1`: pinned run start, committed activity scheduling/results, cancellation request, attributed activity failure, and terminal run facts in a versioned JSON envelope.                                                                                                                   |
 | `RunState.ts`                     | Pure fail-closed history replay with exact sequence/run identity, canonical engine event IDs, duplicate event and activity protection, attributed failure matching, legal transition checks, encoded values, and immutable derived run/activity state.                                                                         |
 | `ActivityPolicy.ts`               | Strict immutable protocol version `2` retry classifier, fixed backoff, explicit no-jitter choice, and independent schedule-to-start, start-to-close, and schedule-to-close timeout dimensions.                                                                                                                                 |
+| `ActivityPolicyV3.ts`             | Protocol-v3-native exact classifier build pins, canonical explicit non-retryable identities, attempt/elapsed budgets, fixed or capped exponential backoff, deterministic no-jitter or recorded-range jitter admission, and three independent timeout dimensions.                                                               |
 | `IdentityV2.ts`                   | Tenant-bound version `2` tuple identities separating logical activity, semantic attempt, operationally stable external idempotency, retry, timer, signal, wait, result, and terminal facts.                                                                                                                                    |
 | `EventV2.ts`                      | Separate strict version `2` history vocabulary for attempts, retry, canonical millisecond timers, signal acceptance/wait/consumption facts, cancellation, and terminal attribution, with an explicit artifact/start identity and execution-protocol selector.                                                                  |
 | `CommandV2.ts`                    | Separate tenant/run-bound version `2` decision vocabulary whose timer commands identify a committed anchor and delay but never supply store-owned absolute deadlines or external facts.                                                                                                                                        |
 | `SemanticTime.ts`                 | Clock-free checked materialization of one canonical UTC millisecond deadline from an already-committed timestamp plus a bounded semantic delay, with typed invalid-input and range failures.                                                                                                                                   |
 | `RunStateV2.ts`                   | Pure fail-closed version `2` replay for semantic attempts, retry exhaustion and anchors, timer/result/cancellation races, ordered signal matching and expiry, owner-aware cleanup, canonical identities, nondecreasing time, and immutable derived state.                                                                      |
 | `ProtocolV2Wire.ts`               | Shared nominal digest, timestamp, bounded semantic-duration, payload/blob-reference, and admission-attribution wire primitives for protocol version `2`.                                                                                                                                                                       |
+| `ProtocolV3Wire.ts`               | Protocol-v3-native safe bounds, canonical timestamps, nominal digest domains, and strict inline-or-immutable-blob payload references with no protocol-v2 dependency.                                                                                                                                                           |
+| `DigestV3.ts`                     | Descriptor-safe canonical SHA-256 envelopes with audited, domain-separated artifact, compiler-v2 plan, boundary-contract, executable-build, and encoded-schema identities plus typed crypto/input failures.                                                                                                                    |
+| `IdentityV3.ts`                   | Collision-free tuple-framed child call, run, start, schedule, projection, cancellation, abandon, and start-failure identities for protocol version `3`.                                                                                                                                                                        |
 | `DecisionV2.ts`                   | Exact prepared plan/artifact provenance and deterministic static-DAG protocol-v2 decisions for scheduling, retry, failure, cancellation, signal consumption, and terminal completion.                                                                                                                                          |
 | `CommandEventV2.ts`               | Public preview materialization accepts only the exact immutable batch produced by `DecisionV2.decide` for the exact reducer head; canonical command identity is validation rather than authorization. The unrestricted storage translator is package-internal, and the execution authority remains the atomic commit boundary. |
 | `ExternalEventV2.ts`              | Pure privileged materialization of worker-start, worker-completion, due-timer, and cancellation facts with atomic owner/timer cleanup.                                                                                                                                                                                         |
@@ -149,7 +163,9 @@ machine failure.
 | `BpmnHistory.ts`                  | Strict sealed BPMN journal artifacts whose complete model-bound causal payload is verified through a domain-separated history digest before replay; the digest is content identity, not authentication.                                                                                                                        |
 | `BpmnExecutable.ts`               | Strict no-inference, Effectful admission from the named BPMN XML profile directly into a cryptographically prepared token kernel, preserving diagnostics and proving import/execution/journal replay/export/re-import/recompile equivalence without lowering through the version `1` DAG.                                      |
 | `BpmnConformance.ts`              | Strict machine-readable requirements, coverage, evidence maturity, dependency, and formal-claim gates; checked-in coverage remains incomplete and declares no BPMN conformance claim.                                                                                                                                          |
-| `ChildWorkflowV3.ts`              | Child-workflow protocol-v3 foundation with exact artifact/deployment/contract/close-policy pins, bounded same-tenant lineage, recursion rejection, canonical relation identities, and closed call phases; no authority integration or execution claim yet.                                                                     |
+| `ChildWorkflowV3.ts`              | Child-workflow protocol-v3 foundation with exact artifact/deployment/build/contract/close-policy pins, definition-derived family identity, bounded same-tenant lineage, recursion rejection, canonical relation identities, and closed call phases.                                                                            |
+| `ChildWorkflowProtocolV3.ts`      | Strict relation-bound schedule/cancel/abandon commands and complete child lifecycle projection facts with canonical identity, causation, correlation, contract, inline/blob payload, and descriptor-safe validation boundaries.                                                                                                |
+| `ChildWorkflowStateV3.ts`         | Pure immutable relation replay enforcing schedule-first sequencing, legal start/cancel/terminal races, cause-specific close policies, post-accept cancellation fencing, output-contract pins, abandonment suppression boundaries, and parent close barriers.                                                                   |
 | `HistoryStore.ts`                 | Atomic expected-sequence history contract plus an explicitly process-local memory layer. The memory implementation assigns envelopes once, recognizes exact batch retries after head advancement, rejects ID overlap, validates hostile inputs, and uses persistent collections.                                               |
 | `Command.ts`                      | Strict version `1` scheduling/terminal command vocabulary plus stable collision-free activity, idempotency, and command identity helpers. The vocabulary intentionally contains no retry, timer, or signal commands yet.                                                                                                       |
 | `Decision.ts`                     | Exact prepared-object provenance plus fingerprint pinning and a pure deterministic decision function for static DAG activities: dependency-ready scheduling, encoded routing, explicit cancellation precedence, plan-aware history validation, and frozen command output.                                                      |
@@ -656,6 +672,32 @@ event, command, identity, reducer, decision, and authority family so older
 histories cannot be silently reinterpreted. BPMN `calledElement` remains source
 syntax: admission resolves its expanded QName to an exact child artifact,
 contracts, deployment, close policy, and lineage bound before execution.
+
+The parent-child relation is itself an authoritative sequenced stream. A
+persistent implementation must compare-and-set `(tenantId, parentRunId,
+callId)` and atomically mutate every record named by one relation transition:
+
+- scheduling commits the parent fact, immutable relation and start outbox
+  together;
+- accepting a start creates the exact pinned child run, consumes the start
+  intent, marks the relation running and enqueues the parent projection in one
+  transaction;
+- cancellation before start terminally suppresses the start intent in the same
+  transaction, so a delayed relay cannot create the child afterward;
+- live cancellation commits the relation fact and cancellation outbox
+  together, while abandonment detaches without asserting that the child
+  stopped; and
+- a child terminal projection is deduplicated by its source event identity and
+  cannot be accepted after the relation was abandoned.
+
+Two independently atomic parent and child stores do not satisfy this boundary:
+they permit start-versus-cancel split brain and cross-run partial commits. The
+process-local reference authority therefore uses one state owner, while a
+persistent adapter must provide an equivalent database transaction or an
+explicitly proven coordination protocol. `CancelAndWait` additionally gates the
+parent terminal fact until the child terminal projection commits;
+`RequestCancel` gates only on durable cancellation intent; `Abandon` makes no
+stopping claim.
 
 - Branch selection is recorded before scheduling the chosen region.
 - Iteration/fan-out input and order are recorded or content-addressed. Child
