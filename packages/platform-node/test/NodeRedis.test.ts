@@ -1,9 +1,10 @@
 import { NodeRedis } from "@effect/platform-node"
 import { assert, it } from "@effect/vitest"
 import { RedisContainer } from "@testcontainers/redis"
-import { Effect, Layer, Schema } from "effect"
+import { Effect, Fiber, Latch, Layer, Schema } from "effect"
 import * as PersistedCacheTest from "effect-test/unstable/persistence/PersistedCacheTest"
 import * as PersistedQueueTest from "effect-test/unstable/persistence/PersistedQueueTest"
+import { TestClock } from "effect/testing"
 import { PersistedQueue, Persistence } from "effect/unstable/persistence"
 
 const RedisLayer = Layer.unwrap(
@@ -76,6 +77,82 @@ it.layer(PersistedQueueRedisLayer, { timeout: "30 seconds" })(
         const pending = yield* redis.use((client) => client.hlen(`effectq:${queueName}:pending`))
         assert.strictEqual(pending, 0)
       }))
+
+    it.effect("fences stale completion, requeue, and failed-item finalizers", () =>
+      Effect.gen(function*() {
+        const redis = yield* NodeRedis.NodeRedis
+        const prefix = "effectq-fence:"
+        const store = yield* PersistedQueue.makeStoreRedis({
+          prefix,
+          pollInterval: "10 millis",
+          lockRefreshInterval: "1 hour",
+          lockExpiration: "1 hour"
+        })
+
+        yield* Effect.forEach(
+          ["complete", "requeue", "failed"] as const,
+          Effect.fnUntraced(function*(mode) {
+            const queueName = `same-store-${mode}`
+            const queueKey = `${prefix}${queueName}`
+            const pendingKey = `${queueKey}:pending`
+            const failedKey = `${queueKey}:failed`
+            const maxAttempts = mode === "failed" ? 1 : 10
+            const id = crypto.randomUUID()
+            const lockKey = `${prefix}${id}:lock`
+
+            yield* store.offer({
+              name: queueName,
+              id,
+              element: { n: 42 },
+              isCustomId: false
+            })
+
+            const firstAcquired = Latch.makeUnsafe()
+            const releaseFirst = Latch.makeUnsafe()
+            const first = yield* Effect.scoped(Effect.gen(function*() {
+              yield* store.take({ name: queueName, maxAttempts })
+              yield* firstAcquired.open
+              yield* releaseFirst.await
+              if (mode !== "complete") {
+                return yield* Effect.fail("stale")
+              }
+            })).pipe(Effect.forkScoped)
+            yield* firstAcquired.await
+
+            const pendingPayload = yield* redis.use((client) => client.hget(pendingKey, id))
+            assert.isNotNull(pendingPayload)
+            yield* redis.use((client) => client.del(lockKey))
+            yield* redis.use((client) => client.hdel(pendingKey, id))
+            yield* redis.use((client) => client.rpush(queueKey, pendingPayload))
+
+            const secondAcquired = Latch.makeUnsafe()
+            const releaseSecond = Latch.makeUnsafe()
+            const second = yield* Effect.scoped(Effect.gen(function*() {
+              yield* store.take({ name: queueName, maxAttempts })
+              yield* secondAcquired.open
+              yield* releaseSecond.await
+            })).pipe(Effect.forkScoped)
+            yield* secondAcquired.await
+
+            yield* releaseFirst.open
+            yield* Fiber.await(first)
+
+            assert.isNotNull(yield* redis.use((client) => client.get(lockKey)))
+            assert.isNotNull(yield* redis.use((client) => client.hget(pendingKey, id)))
+            assert.strictEqual(yield* redis.use((client) => client.llen(queueKey)), 0)
+            assert.strictEqual(yield* redis.use((client) => client.llen(failedKey)), 0)
+
+            yield* releaseSecond.open
+            yield* Fiber.join(second)
+
+            assert.isNull(yield* redis.use((client) => client.get(lockKey)))
+            assert.isNull(yield* redis.use((client) => client.hget(pendingKey, id)))
+            assert.strictEqual(yield* redis.use((client) => client.llen(queueKey)), 0)
+            assert.strictEqual(yield* redis.use((client) => client.llen(failedKey)), 0)
+          }),
+          { discard: true }
+        )
+      }).pipe(TestClock.withLive))
   }
 )
 

@@ -353,9 +353,9 @@ export const layerStoreMemory: Layer.Layer<
  *
  * **Details**
  *
- * The store uses Redis lists and hashes with worker locks, periodically
- * refreshes locks while items are being processed, and moves exhausted items
- * to a failed queue.
+ * The store uses Redis lists and hashes with per-acquisition fenced locks,
+ * periodically refreshes the current acquisition while items are being
+ * processed, and moves exhausted items to a failed queue.
  *
  * @category store
  * @since 4.0.0
@@ -391,14 +391,33 @@ export const makeStoreRedis = Effect.fnUntraced(function*(
   const keyLock = (id: string) => `${prefix}${id}:lock`
   const keyPending = (name: string) => `${prefix}${name}:pending`
   const keyFailed = (name: string) => `${prefix}${name}:failed`
-  const workerId = crypto.randomUUID()
 
-  type Element = {
+  type StoredElement = {
     readonly id: string
     readonly element: unknown
     attempts: number
     lastFailure?: string
   }
+
+  type Element = StoredElement & {
+    readonly acquisitionId: string
+  }
+
+  const encodeStoredElement = (
+    element: Element,
+    options?: {
+      readonly attempts?: number | undefined
+      readonly lastFailure?: string | undefined
+    }
+  ) =>
+    JSON.stringify({
+      id: element.id,
+      element: element.element,
+      attempts: options?.attempts ?? element.attempts,
+      ...((options?.lastFailure ?? element.lastFailure) === undefined
+        ? {}
+        : { lastFailure: options?.lastFailure ?? element.lastFailure })
+    })
 
   const requeue = redis.eval(requeueRedis)
   const complete = redis.eval(completeRedis)
@@ -427,8 +446,9 @@ export const makeStoreRedis = Effect.fnUntraced(function*(
                   queueKey,
                   pendingKey,
                   keyLock(element.id),
+                  element.acquisitionId,
                   element.id,
-                  JSON.stringify(element)
+                  encodeStoredElement(element)
                 ), { concurrency: "unbounded", discard: true })
           )
         )
@@ -440,15 +460,26 @@ export const makeStoreRedis = Effect.fnUntraced(function*(
         Effect.forkScoped
       )
 
-      const poll = (size: number) =>
-        take(
-          queueKey,
-          pendingKey,
-          prefix,
-          workerId,
-          size,
-          lockExpirationMillis
+      const poll = (size: number) => {
+        const acquisitionId = crypto.randomUUID()
+        return Effect.map(
+          take(
+            queueKey,
+            pendingKey,
+            prefix,
+            acquisitionId,
+            size,
+            lockExpirationMillis
+          ),
+          (payloads) =>
+            payloads === null
+              ? null
+              : payloads.map((payload) => ({
+                ...JSON.parse(payload) as StoredElement,
+                acquisitionId
+              }))
         )
+      }
 
       yield* Effect.gen(function*() {
         while (true) {
@@ -460,7 +491,7 @@ export const makeStoreRedis = Effect.fnUntraced(function*(
             continue
           }
           takenLatch.closeUnsafe()
-          yield* Queue.offerAll(queue, results.map((json) => JSON.parse(json)))
+          yield* Queue.offerAll(queue, results)
           yield* takenLatch.await
           yield* Effect.yieldNow
         }
@@ -476,12 +507,12 @@ export const makeStoreRedis = Effect.fnUntraced(function*(
     idleTimeToLive: Duration.seconds(30)
   })
 
-  const activeLockKeys = new Set<string>()
+  const activeLocks = new Map<string, string>()
 
   yield* Effect.gen(function*() {
     while (true) {
       yield* Effect.sleep(lockRefreshMillis)
-      yield* Effect.ignore(expireAll(Array.from(activeLockKeys), lockExpirationMillis))
+      yield* Effect.ignore(expireAll(Array.from(activeLocks), lockExpirationMillis))
     }
   }).pipe(
     Effect.forkScoped,
@@ -531,19 +562,24 @@ export const makeStoreRedis = Effect.fnUntraced(function*(
           Effect.scoped,
           Effect.tap((element) => {
             const lock = keyLock(element.id)
-            activeLockKeys.add(lock)
+            activeLocks.set(lock, element.acquisitionId)
+            const releaseActiveLock = () => {
+              if (activeLocks.get(lock) === element.acquisitionId) {
+                activeLocks.delete(lock)
+              }
+            }
             return Effect.addFinalizer(Exit.match({
               onFailure: (cause) => {
-                activeLockKeys.delete(lock)
+                releaseActiveLock()
                 const nextAttempts = element.attempts + 1
                 if (nextAttempts >= options.maxAttempts) {
                   return Effect.orDie(failed(
                     keyPending(options.name),
                     lock,
                     keyFailed(options.name),
+                    element.acquisitionId,
                     element.id,
-                    JSON.stringify({
-                      ...element,
+                    encodeStoredElement(element, {
                       lastFailure: Cause.pretty(cause),
                       attempts: nextAttempts
                     })
@@ -553,23 +589,22 @@ export const makeStoreRedis = Effect.fnUntraced(function*(
                   keyQueue(options.name),
                   keyPending(options.name),
                   lock,
+                  element.acquisitionId,
                   element.id,
-                  JSON.stringify(
-                    Cause.hasInterruptsOnly(cause)
-                      ? element
-                      : {
-                        ...element,
-                        lastFailure: Cause.pretty(cause),
-                        attempts: nextAttempts
-                      }
-                  )
+                  Cause.hasInterruptsOnly(cause)
+                    ? encodeStoredElement(element)
+                    : encodeStoredElement(element, {
+                      lastFailure: Cause.pretty(cause),
+                      attempts: nextAttempts
+                    })
                 ))
               },
               onSuccess: () => {
-                activeLockKeys.delete(lock)
+                releaseActiveLock()
                 return Effect.orDie(complete(
                   keyPending(options.name),
                   lock,
+                  element.acquisitionId,
                   element.id
                 ))
               }
@@ -623,51 +658,84 @@ end
 )
 
 const requeueRedis = Redis.script(
-  (...args: [keyQueue: string, keyPending: string, keyLock: string, id: string, payload: string]) => args,
+  (
+    ...args: [
+      keyQueue: string,
+      keyPending: string,
+      keyLock: string,
+      acquisitionId: string,
+      id: string,
+      payload: string
+    ]
+  ) => args,
   {
     lua: `
 local key_queue = KEYS[1]
 local key_pending = KEYS[2]
 local key_lock = KEYS[3]
-local id = ARGV[1]
-local payload = ARGV[2]
+local acquisition_id = ARGV[1]
+local id = ARGV[2]
+local payload = ARGV[3]
 
+if redis.call("GET", key_lock) ~= acquisition_id then
+  return 0
+end
 redis.call("DEL", key_lock)
 redis.call("HDEL", key_pending, id)
 redis.call("RPUSH", key_queue, payload)
+return 1
 `,
     numberOfKeys: 3
   }
 )
 
 const completeRedis = Redis.script(
-  (...args: [keyPending: string, keyLock: string, id: string]) => args,
+  (...args: [keyPending: string, keyLock: string, acquisitionId: string, id: string]) => args,
   {
     lua: `
 local key_pending = KEYS[1]
 local key_lock = KEYS[2]
-local id = ARGV[1]
+local acquisition_id = ARGV[1]
+local id = ARGV[2]
 
+if redis.call("GET", key_lock) ~= acquisition_id then
+  return 0
+end
 redis.call("DEL", key_lock)
 redis.call("HDEL", key_pending, id)
+return 1
 `,
     numberOfKeys: 2
   }
 )
 
 const failedRedis = Redis.script(
-  (...args: [keyPending: string, keyLock: string, keyFailed: string, id: string, payload: string]) => args,
+  (
+    ...args: [
+      keyPending: string,
+      keyLock: string,
+      keyFailed: string,
+      acquisitionId: string,
+      id: string,
+      payload: string
+    ]
+  ) => args,
   {
     lua: `
 local key_pending = KEYS[1]
 local key_lock = KEYS[2]
 local key_failed = KEYS[3]
-local id = ARGV[1]
-local payload = ARGV[2]
+local acquisition_id = ARGV[1]
+local id = ARGV[2]
+local payload = ARGV[3]
 
+if redis.call("GET", key_lock) ~= acquisition_id then
+  return 0
+end
 redis.call("DEL", key_lock)
 redis.call("HDEL", key_pending, id)
 redis.call("RPUSH", key_failed, payload)
+return 1
 `,
     numberOfKeys: 3
   }
@@ -675,14 +743,21 @@ redis.call("RPUSH", key_failed, payload)
 
 const takeRedis = Redis.script(
   (
-    ...args: [keyQueue: string, keyPending: string, prefix: string, workerId: string, batchSize: number, pttl: number]
+    ...args: [
+      keyQueue: string,
+      keyPending: string,
+      prefix: string,
+      acquisitionId: string,
+      batchSize: number,
+      pttl: number
+    ]
   ) => args,
   {
     lua: `
 local key_queue = KEYS[1]
 local key_pending = KEYS[2]
 local prefix = ARGV[1]
-local worker_id = ARGV[2]
+local acquisition_id = ARGV[2]
 local batch_size = tonumber(ARGV[3])
 local pttl = ARGV[4]
 
@@ -694,7 +769,7 @@ end
 for i, payload in ipairs(payloads) do
   local id = cjson.decode(payload).id
   local key_lock = prefix .. id .. ":lock"
-  redis.call("SET", key_lock, worker_id, "PX", pttl)
+  redis.call("SET", key_lock, acquisition_id, "PX", pttl)
   redis.call("HSET", key_pending, id, payload)
 end
 
@@ -705,13 +780,19 @@ return payloads
 ).withReturnType<Arr.NonEmptyArray<string> | null>()
 
 const expireAllRedis = Redis.script(
-  (keys: ReadonlyArray<string>, ttl: number) => [...keys, ttl],
+  (locks: ReadonlyArray<readonly [key: string, acquisitionId: string]>, ttl: number) => [
+    ...locks.map(([key]) => key),
+    ...locks.map(([, acquisitionId]) => acquisitionId),
+    ttl
+  ],
   {
-    numberOfKeys: (keys) => keys.length,
+    numberOfKeys: (locks) => locks.length,
     lua: `
-local ttl = ARGV[1]
+local ttl = ARGV[#KEYS + 1]
 for i, key in ipairs(KEYS) do
-  redis.call("PEXPIRE", key, ttl)
+  if redis.call("GET", key) == ARGV[i] then
+    redis.call("PEXPIRE", key, ttl)
+  end
 end
 `
   }
@@ -742,8 +823,8 @@ export const layerStoreRedis: (
  * **Details**
  *
  * The store creates the queue table and indexes, acquires rows with
- * per-worker locks, refreshes active locks while scoped takes are running, and
- * retries or completes rows according to the processing exit.
+ * per-acquisition fenced locks, refreshes active locks while scoped takes are
+ * running, and retries or completes rows according to the processing exit.
  *
  * @category store
  * @since 4.0.0
@@ -776,7 +857,6 @@ export const makeStoreSql: (
     Duration.millis(1)
   )
   const lockExpirationSql = sql.literal(Math.ceil(Duration.toSeconds(lockExpiration)).toString())
-  const workerId = crypto.randomUUID()
 
   const sqlNow = sql.onDialectOrElse({
     mssql: () => sql.literal("GETDATE()"),
@@ -928,25 +1008,47 @@ export const makeStoreSql: (
     orElse: () => sql.literal("TRUE")
   })
 
-  const workerIdSql = stringLiteral(workerId)
-  const elementIds = new Set<number>()
+  const elementAcquisitions = new Map<number, string>()
+  const groupAcquisitions = (
+    entries: ReadonlyArray<readonly [sequence: number, acquisitionId: string]>
+  ) => {
+    const groups = new Map<string, Array<number>>()
+    for (const [sequence, acquisitionId] of entries) {
+      const sequences = groups.get(acquisitionId)
+      if (sequences) {
+        sequences.push(sequence)
+      } else {
+        groups.set(acquisitionId, [sequence])
+      }
+    }
+    return groups
+  }
+  const releaseAcquisition = (sequence: number, acquisitionId: string) => {
+    if (elementAcquisitions.get(sequence) === acquisitionId) {
+      elementAcquisitions.delete(sequence)
+    }
+  }
   const refreshLocks: Effect.Effect<void, SqlError> = Effect.suspend((): Effect.Effect<void, SqlError> => {
-    if (elementIds.size === 0) return Effect.void
-    const ids = Array.from(elementIds)
-    return sql`
-      UPDATE ${tableNameSql}
-      SET acquired_at = ${sqlNow}
-      WHERE sequence IN (${sql.literal(ids.join(","))})
-      AND acquired_by = ${workerIdSql}
-    `
+    if (elementAcquisitions.size === 0) return Effect.void
+    return Effect.forEach(
+      groupAcquisitions(Array.from(elementAcquisitions)),
+      ([acquisitionId, sequences]) =>
+        sql`
+          UPDATE ${tableNameSql}
+          SET acquired_at = ${sqlNow}
+          WHERE sequence IN (${sql.literal(sequences.join(","))})
+          AND acquired_by = ${stringLiteral(acquisitionId)}
+        `,
+      { concurrency: "unbounded", discard: true }
+    )
   })
-  const complete = (sequence: number, attempts: number) => {
-    elementIds.delete(sequence)
+  const complete = (sequence: number, acquisitionId: string, attempts: number) => {
+    releaseAcquisition(sequence, acquisitionId)
     return sql`
       UPDATE ${tableNameSql}
       SET acquired_at = NULL, acquired_by = NULL, updated_at = ${sqlNow}, completed = ${sqlTrue}, attempts = ${attempts}
       WHERE sequence = ${sequence}
-      AND acquired_by = ${workerIdSql}
+      AND acquired_by = ${stringLiteral(acquisitionId)}
     `.pipe(
       Effect.retry({
         times: 5,
@@ -955,15 +1057,15 @@ export const makeStoreSql: (
       Effect.orDie
     )
   }
-  const retry = (sequence: number, attempts: number, cause: Cause.Cause<any>) => {
-    elementIds.delete(sequence)
+  const retry = (sequence: number, acquisitionId: string, attempts: number, cause: Cause.Cause<any>) => {
+    releaseAcquisition(sequence, acquisitionId)
     return sql`
       UPDATE ${tableNameSql}
       SET acquired_at = NULL, acquired_by = NULL, updated_at = ${sqlNow}, attempts = ${attempts}, last_failure = ${
       Cause.pretty(cause)
     }
       WHERE sequence = ${sequence}
-      AND acquired_by = ${workerIdSql}
+      AND acquired_by = ${stringLiteral(acquisitionId)}
     `.pipe(
       Effect.retry({
         times: 5,
@@ -972,21 +1074,31 @@ export const makeStoreSql: (
       Effect.orDie
     )
   }
-  const interrupt = (ids: Array<number>) => {
-    for (const id of ids) {
-      elementIds.delete(id)
+  const interrupt = (
+    elements: ReadonlyArray<{
+      readonly sequence: number
+      readonly acquisitionId: string
+    }>
+  ) => {
+    for (const element of elements) {
+      releaseAcquisition(element.sequence, element.acquisitionId)
     }
-    return sql`
-      UPDATE ${tableNameSql}
-      SET acquired_at = NULL, acquired_by = NULL
-      WHERE sequence IN (${sql.literal(ids.join(","))})
-      AND acquired_by = ${workerIdSql}
-    `.pipe(
-      Effect.retry({
-        times: 5,
-        schedule: Schedule.exponential(100, 1.5)
-      }),
-      Effect.orDie
+    return Effect.forEach(
+      groupAcquisitions(elements.map((element) => [element.sequence, element.acquisitionId])),
+      ([acquisitionId, sequences]) =>
+        sql`
+          UPDATE ${tableNameSql}
+          SET acquired_at = NULL, acquired_by = NULL
+          WHERE sequence IN (${sql.literal(sequences.join(","))})
+          AND acquired_by = ${stringLiteral(acquisitionId)}
+        `.pipe(
+          Effect.retry({
+            times: 5,
+            schedule: Schedule.exponential(100, 1.5)
+          }),
+          Effect.orDie
+        ),
+      { concurrency: "unbounded", discard: true }
     )
   }
 
@@ -1002,12 +1114,15 @@ export const makeStoreSql: (
     Effect.forkScoped
   )
 
-  type Element = {
+  type StoredElement = {
     readonly id: string
     sequence: number
     readonly queue_name: string
     element: string
     readonly attempts: number
+  }
+  type Element = StoredElement & {
+    readonly acquisitionId: string
   }
   const mailboxes = yield* RcMap.make({
     lookup: Effect.fnUntraced(function*({ maxAttempts, name }: QueueKey) {
@@ -1019,16 +1134,16 @@ export const makeStoreSql: (
       yield* Effect.addFinalizer(() =>
         Effect.flatMap(Queue.clear(queue), (elements) => {
           if (elements.length === 0) return Effect.void
-          return interrupt(Array.from(elements, (e) => e.sequence))
+          return interrupt(elements)
         })
       )
 
       const poll = sql.onDialectOrElse({
-        pg: () => (size: number) =>
-          sql<Element>`
+        pg: () => (size: number, acquisitionId: string) =>
+          sql<StoredElement>`
             WITH cte AS (
               UPDATE ${tableNameSql}
-              SET acquired_at = ${sqlNow}, acquired_by = ${workerIdSql}
+              SET acquired_at = ${sqlNow}, acquired_by = ${stringLiteral(acquisitionId)}
               WHERE sequence IN (
                 SELECT sequence FROM ${tableNameSql}
                 WHERE queue_name = ${name}
@@ -1044,8 +1159,8 @@ export const makeStoreSql: (
             SELECT sequence, id, queue_name, element, attempts FROM cte
             ORDER BY updated_at ASC, sequence ASC
           `,
-        mysql: () => (size: number) =>
-          sql<Element>`
+        mysql: () => (size: number, acquisitionId: string) =>
+          sql<StoredElement>`
             SELECT sequence, id, queue_name, element, attempts FROM ${tableNameSql} q
             WHERE queue_name = ${name}
             AND completed = FALSE
@@ -1059,14 +1174,14 @@ export const makeStoreSql: (
               if (rows.length === 0) return Effect.void
               return sql`
                 UPDATE ${tableNameSql}
-                SET acquired_at = ${sqlNow}, acquired_by = ${workerIdSql}
+                SET acquired_at = ${sqlNow}, acquired_by = ${stringLiteral(acquisitionId)}
                 WHERE sequence IN (${sql.literal(rows.map((r) => r.sequence).join(","))})
               `.unprepared
             }),
             sql.withTransaction
           ),
-        mssql: () => (size: number) =>
-          sql<Element>`
+        mssql: () => (size: number, acquisitionId: string) =>
+          sql<StoredElement>`
             WITH cte AS (
               SELECT TOP ${sql.literal(size.toString())} sequence FROM ${tableNameSql}
               WHERE queue_name = ${name}
@@ -1076,16 +1191,16 @@ export const makeStoreSql: (
               ORDER BY updated_at ASC, sequence ASC
             )
             UPDATE q
-            SET acquired_at = ${sqlNow}, acquired_by = ${workerIdSql}
+            SET acquired_at = ${sqlNow}, acquired_by = ${stringLiteral(acquisitionId)}
             OUTPUT inserted.sequence, inserted.id, inserted.queue_name, inserted.element, inserted.attempts
             FROM ${tableNameSql} AS q
             INNER JOIN cte ON q.sequence = cte.sequence
           `,
         // sqlite
-        orElse: () => (size: number) =>
-          sql<Element>`
+        orElse: () => (size: number, acquisitionId: string) =>
+          sql<StoredElement>`
             UPDATE ${tableNameSql}
-            SET acquired_at = ${sqlNow}, acquired_by = ${workerIdSql}
+            SET acquired_at = ${sqlNow}, acquired_by = ${stringLiteral(acquisitionId)}
             WHERE queue_name = ${name}
             AND completed = FALSE
             AND attempts < ${maxAttempts}
@@ -1100,17 +1215,22 @@ export const makeStoreSql: (
         while (true) {
           yield* pollLatch.await
           yield* Effect.yieldNow
-          const results = takers.current === 0 ? [] : yield* poll(takers.current)
-          if (results.length === 0) {
+          const acquisitionId = crypto.randomUUID()
+          const storedElements = takers.current === 0 ? [] : yield* poll(takers.current, acquisitionId)
+          if (storedElements.length === 0) {
             yield* Effect.sleep(pollInterval)
             continue
           }
           takenLatch.closeUnsafe()
-          for (let i = 0; i < results.length; i++) {
-            const element = results[i]
-            elementIds.add(element.sequence)
+          const elements = storedElements.map((element): Element => ({
+            ...element,
+            acquisitionId
+          }))
+          for (let i = 0; i < elements.length; i++) {
+            const element = elements[i]
+            elementAcquisitions.set(element.sequence, acquisitionId)
           }
-          yield* Queue.offerAll(queue, results)
+          yield* Queue.offerAll(queue, elements)
           yield* takenLatch.await
           yield* Effect.yieldNow
         }
@@ -1159,9 +1279,9 @@ export const makeStoreSql: (
             Effect.addFinalizer(Exit.match({
               onFailure: (cause) =>
                 Cause.hasInterruptsOnly(cause)
-                  ? interrupt([element.sequence])
-                  : retry(element.sequence, element.attempts + 1, cause),
-              onSuccess: () => complete(element.sequence, element.attempts + 1)
+                  ? interrupt([element])
+                  : retry(element.sequence, element.acquisitionId, element.attempts + 1, cause),
+              onSuccess: () => complete(element.sequence, element.acquisitionId, element.attempts + 1)
             }))
           ),
           Effect.map((element) => ({

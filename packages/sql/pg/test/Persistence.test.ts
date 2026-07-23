@@ -63,6 +63,68 @@ it.layer(PgContainer.layerClient, { timeout: "30 seconds" })("PersistedQueue SQL
       assert.deepStrictEqual(received.element, element)
     }).pipe(TestClock.withLive))
 
+  it.effect("fences a stale finalizer after same-store reacquisition", () =>
+    Effect.gen(function*() {
+      const tableName = "effect_queue_acquisition_fence"
+      const queueName = "acquisition-fence"
+      const store = yield* PersistedQueue.makeStoreSql({
+        tableName,
+        pollInterval: "10 millis",
+        lockRefreshInterval: "1 hour",
+        lockExpiration: "1 second"
+      })
+      const sql = (yield* SqlClient.SqlClient).withoutTransforms()
+      const table = sql(tableName)
+      const id = crypto.randomUUID()
+
+      yield* store.offer({
+        name: queueName,
+        id,
+        element: { message: "hello" },
+        isCustomId: false
+      })
+
+      const firstAcquired = Latch.makeUnsafe()
+      const releaseFirst = Latch.makeUnsafe()
+      const first = yield* Effect.scoped(Effect.gen(function*() {
+        yield* store.take({ name: queueName, maxAttempts: 10 })
+        yield* firstAcquired.open
+        yield* releaseFirst.await
+      })).pipe(Effect.forkScoped)
+      yield* firstAcquired.await
+
+      yield* sql`UPDATE ${table} SET acquired_at = ${new Date(0)} WHERE id = ${id}`
+
+      const secondAcquired = Latch.makeUnsafe()
+      const releaseSecond = Latch.makeUnsafe()
+      const second = yield* Effect.scoped(Effect.gen(function*() {
+        yield* store.take({ name: queueName, maxAttempts: 10 })
+        yield* secondAcquired.open
+        yield* releaseSecond.await
+      })).pipe(Effect.forkScoped)
+      yield* secondAcquired.await
+
+      yield* releaseFirst.open
+      yield* Fiber.join(first)
+
+      const whileSecondOwns = yield* sql<{
+        readonly completed: boolean
+        readonly acquired_by: string | null
+      }>`SELECT completed, acquired_by FROM ${table} WHERE id = ${id}`
+      assert.isFalse(whileSecondOwns[0].completed)
+      assert.isNotNull(whileSecondOwns[0].acquired_by)
+
+      yield* releaseSecond.open
+      yield* Fiber.join(second)
+
+      const afterSecondCompletes = yield* sql<{
+        readonly completed: boolean
+        readonly acquired_by: string | null
+      }>`SELECT completed, acquired_by FROM ${table} WHERE id = ${id}`
+      assert.isTrue(afterSecondCompletes[0].completed)
+      assert.isNull(afterSecondCompletes[0].acquired_by)
+    }).pipe(TestClock.withLive))
+
   it.effect("counts malformed JSON as an attempt and continues", () =>
     Effect.gen(function*() {
       const tableName = "effect_queue_invalid_json"

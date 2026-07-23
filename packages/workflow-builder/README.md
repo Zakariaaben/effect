@@ -241,6 +241,14 @@ artifact-versioned native handlers, authorized deferred completion, stable
 dynamic activity/child identities, forced-durable business timers, and
 cross-process semantic conformance tests.
 
+The forked native `PersistedQueue` Redis and SQL stores now fence every scoped
+take with a fresh acquisition UUID. Lock refresh, completion, requeue,
+interruption release, and failed-item settlement are conditional on that exact
+acquisition, so a finalizer from an expired delivery cannot mutate its
+replacement. This is transport ownership fencing only; it is not yet the
+protocol-v3 semantic start permit, heartbeat, cancellation, or completion
+authority required before enabling schedule-to-start and start-to-close.
+
 The BPMN model, named XML/DI mapping slice, durable marking, and bounded token
 kernel are likewise not a BPMN conformance claim. Mapping outside
 `bpmn-2.0.2-core-process-di-v2`, normative XSD validation, complete Common
