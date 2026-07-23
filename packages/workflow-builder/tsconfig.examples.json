@@ -1,0 +1,13 @@
+{
+  "$schema": "http://json.schemastore.org/tsconfig",
+  "extends": "../../tsconfig.base.json",
+  "include": ["examples"],
+  "references": [
+    { "path": "../effect" },
+    { "path": "." }
+  ],
+  "compilerOptions": {
+    "rootDir": ".",
+    "noEmit": true
+  }
+}

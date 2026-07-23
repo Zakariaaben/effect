@@ -98,6 +98,8 @@
       "@effect/tools-utils/*": ["./packages/tools/utils/src/*.ts"],
       "@effect/vitest": ["./packages/vitest/src/index.ts"],
       "@effect/vitest/*": ["./packages/vitest/src/*.ts"],
+      "@effect/workflow-builder": ["./packages/workflow-builder/src/index.ts"],
+      "@effect/workflow-builder/*": ["./packages/workflow-builder/src/*.ts"],
       // TODO: This is a special alias used by some tests. We should try to get rid of it.
       "effect-test/*": ["./packages/effect/test/*.ts"]
     },

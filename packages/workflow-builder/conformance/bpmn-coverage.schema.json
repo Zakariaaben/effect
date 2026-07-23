@@ -1,0 +1,184 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://effect.website/schemas/workflow-builder/bpmn-coverage-v1.json",
+  "title": "Effect Workflow Builder BPMN Coverage Manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "formatVersion",
+    "catalogId",
+    "catalogRevision",
+    "implementation",
+    "implementationVersion",
+    "reviewedAt",
+    "entries",
+    "claims"
+  ],
+  "properties": {
+    "formatVersion": {
+      "const": 1
+    },
+    "catalogId": {
+      "$ref": "#/$defs/nonEmptyString"
+    },
+    "catalogRevision": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "implementation": {
+      "$ref": "#/$defs/nonEmptyString"
+    },
+    "implementationVersion": {
+      "$ref": "#/$defs/nonEmptyString"
+    },
+    "reviewedAt": {
+      "$ref": "#/$defs/nonEmptyString"
+    },
+    "entries": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/coverageEntry"
+      }
+    },
+    "claims": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/profileClaim"
+      }
+    }
+  },
+  "$defs": {
+    "nonEmptyString": {
+      "type": "string",
+      "minLength": 1
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "path"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "source",
+            "schema-test",
+            "state-test",
+            "transition-test",
+            "replay-test",
+            "import-test",
+            "export-test",
+            "roundtrip-test",
+            "xsd-validation-test",
+            "normative-fixture",
+            "profile-test",
+            "specification"
+          ]
+        },
+        "path": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "symbol": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "testName": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "locator": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      }
+    },
+    "extensionSupport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "profileId",
+        "profileVersion",
+        "supportLevel",
+        "portabilityWarning"
+      ],
+      "properties": {
+        "profileId": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "profileVersion": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "supportLevel": {
+          "enum": [
+            "modeled",
+            "state-modeled",
+            "executable",
+            "interchange"
+          ]
+        },
+        "portabilityWarning": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      }
+    },
+    "coverageEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requirementId",
+        "supportLevel",
+        "summary",
+        "evidence"
+      ],
+      "properties": {
+        "requirementId": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "supportLevel": {
+          "enum": [
+            "unsupported",
+            "modeled",
+            "state-modeled",
+            "executable",
+            "interchange",
+            "extension"
+          ]
+        },
+        "summary": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/evidence"
+          }
+        },
+        "extension": {
+          "$ref": "#/$defs/extensionSupport"
+        }
+      }
+    },
+    "profileClaim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "profileId",
+        "declaredAt",
+        "evidence"
+      ],
+      "properties": {
+        "profileId": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "declaredAt": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/evidence"
+          }
+        }
+      }
+    }
+  }
+}

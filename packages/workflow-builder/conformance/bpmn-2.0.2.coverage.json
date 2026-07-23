@@ -1,0 +1,515 @@
+{
+  "formatVersion": 1,
+  "catalogId": "effect-workflow-builder-bpmn-2.0.2",
+  "catalogRevision": 5,
+  "implementation": "@effect/workflow-builder",
+  "implementationVersion": "4.0.0-beta.100",
+  "reviewedAt": "2026-07-23",
+  "entries": [
+    {
+      "requirementId": "BPMN-FOUNDATION-SEMANTIC-MODEL",
+      "supportLevel": "modeled",
+      "summary": "Strict versioned semantic IR for core processes, collaborations, activities, gateways, sequence flows, and events; this is not a modeling-profile claim.",
+      "evidence": [
+        {
+          "kind": "source",
+          "path": "src/BpmnModel.ts",
+          "symbol": "BpmnModel"
+        },
+        {
+          "kind": "schema-test",
+          "path": "test/BpmnModel.test.ts",
+          "testName": "admits a strict BPMN semantic document with collaborations, reusable event definitions, boundary events, and event subprocesses"
+        }
+      ]
+    },
+    {
+      "requirementId": "BPMN-FOUNDATION-SEMANTIC-VALIDATION",
+      "supportLevel": "modeled",
+      "summary": "Hostile-input-safe aggregate validation covers identifiers, containment, references, flow scope, event contexts, and collaboration ownership.",
+      "evidence": [
+        {
+          "kind": "source",
+          "path": "src/BpmnModel.ts",
+          "symbol": "validate"
+        },
+        {
+          "kind": "schema-test",
+          "path": "test/BpmnModel.test.ts",
+          "testName": "aggregates participant, collaboration, boundary-event, event-subprocess, event-gateway, and sequence-scope diagnostics"
+        }
+      ]
+    },
+    {
+      "requirementId": "BPMN-FOUNDATION-DURABLE-MARKING",
+      "supportLevel": "state-modeled",
+      "summary": "Durable scope, token, gateway, loop, call, wait, work-item, compensation, and cancellation state is represented and cross-validated.",
+      "evidence": [
+        {
+          "kind": "source",
+          "path": "src/BpmnExecutionState.ts",
+          "symbol": "BpmnExecutionState"
+        },
+        {
+          "kind": "state-test",
+          "path": "test/BpmnExecutionState.test.ts",
+          "testName": "admits a durable BPMN execution-state snapshot against a validated model"
+        }
+      ]
+    },
+    {
+      "requirementId": "BPMN-FOUNDATION-EVIDENCE-GATES",
+      "supportLevel": "modeled",
+      "summary": "Coverage categories and formal-claim admission are strict, versioned, hostile-input safe, and machine checked.",
+      "evidence": [
+        {
+          "kind": "source",
+          "path": "src/BpmnConformance.ts",
+          "symbol": "validate"
+        },
+        {
+          "kind": "schema-test",
+          "path": "test/BpmnConformance.test.ts",
+          "testName": "rejects formal claims while the normative catalogue is incomplete"
+        }
+      ]
+    },
+    {
+      "requirementId": "BPMN-EXECUTION-BASIC-TOKEN-KERNEL",
+      "supportLevel": "executable",
+      "summary": "A deliberately bounded executable subset covers root and embedded subprocess scopes, none start/end events, generic tasks, normal/conditional/default sequence flows, exclusive routing, parallel split/join epochs, deterministic journals, and causal replay; all unsupported execution-affecting constructs are rejected at compile time.",
+      "evidence": [
+        {
+          "kind": "source",
+          "path": "src/BpmnKernel.ts",
+          "symbol": "TransitionJournal"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/BpmnKernel.test.ts",
+          "testName": "splits and joins parallel branches with exact join epochs"
+        },
+        {
+          "kind": "replay-test",
+          "path": "test/BpmnKernel.test.ts",
+          "testName": "replays an ordered transition journal into the exact durable marking"
+        }
+      ]
+    },
+    {
+      "requirementId": "BPMN-EXECUTION-CORE-PROCESS-XML-SLICE",
+      "supportLevel": "executable",
+      "summary": "A strict facade composes the named XML profile with the bounded token kernel without projection or inference, and proves conditional/default routing, parallel split/join, ordinary subprocess execution, exact journal replay, canonical export, re-import, recompilation, and replay equivalence.",
+      "evidence": [
+        {
+          "kind": "source",
+          "path": "src/BpmnExecutable.ts",
+          "symbol": "compileXml"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/BpmnExecutable.test.ts",
+          "testName": "round-trips and replays the executable XML subset through its conditional branch"
+        },
+        {
+          "kind": "replay-test",
+          "path": "test/BpmnExecutable.test.ts",
+          "testName": "round-trips and replays the executable XML subset through its conditional branch"
+        },
+        {
+          "kind": "roundtrip-test",
+          "path": "test/BpmnExecutable.test.ts",
+          "testName": "round-trips and replays the executable XML subset through its conditional branch"
+        }
+      ]
+    },
+    {
+      "requirementId": "BPMN-INTERCHANGE-BOUNDED-XML-INFOSET",
+      "supportLevel": "modeled",
+      "summary": "A strict, resource-bounded, namespace-aware XML 1.0 infoset model parses, validates, and serializes ordered XML content with lexical source spans. This modeled foundation is not BPMN semantic mapping, normative XSD validation, DI interchange, or a BPMN interchange/conformance claim.",
+      "evidence": [
+        {
+          "kind": "source",
+          "path": "src/BpmnXmlAst.ts",
+          "symbol": "validate"
+        },
+        {
+          "kind": "schema-test",
+          "path": "test/BpmnXmlAst.test.ts",
+          "testName": "validates semantic document and span invariants without serializing"
+        },
+        {
+          "kind": "roundtrip-test",
+          "path": "test/BpmnXmlAst.test.ts",
+          "testName": "round-trips the namespace-aware ordered infoset modulo source spans"
+        }
+      ]
+    },
+    {
+      "requirementId": "BPMN-INTERCHANGE-CORE-PROCESS-XML-SLICE",
+      "supportLevel": "modeled",
+      "summary": "Named profile bpmn-2.0.2-core-process-di-v2 performs fail-closed namespace-expanded import, validation, canonical-prefix export, and normalized round-trip for its explicitly bounded process/control-flow slice. Modeled records implementation maturity here because normative XSD validation and an OMG conformance subclass are not claimed.",
+      "evidence": [
+        {
+          "kind": "source",
+          "path": "src/BpmnXml.ts",
+          "symbol": "CoreProcessDiProfileId"
+        },
+        {
+          "kind": "schema-test",
+          "path": "test/BpmnXml.test.ts",
+          "testName": "uses expanded names and rejects prefix spoofing, unsafe xsi:type, and foreign content"
+        },
+        {
+          "kind": "import-test",
+          "path": "test/BpmnXml.test.ts",
+          "testName": "imports the complete named semantic and DI slice independent of prefix spelling"
+        },
+        {
+          "kind": "export-test",
+          "path": "test/BpmnXml.test.ts",
+          "testName": "exports deterministically and round-trips normalized semantic and visual data"
+        },
+        {
+          "kind": "roundtrip-test",
+          "path": "test/BpmnXml.test.ts",
+          "testName": "round-trips recursive ordinary subprocess containment without flattening scope"
+        },
+        {
+          "kind": "roundtrip-test",
+          "path": "test/BpmnXml.test.ts",
+          "testName": "round-trips callActivity calledElement as an expanded QName"
+        }
+      ]
+    },
+    {
+      "requirementId": "BPMN-INTERCHANGE-SEMANTIC-MAPPING",
+      "supportLevel": "unsupported",
+      "summary": "A strict named core-process slice exists, but the broad BPMN semantic XML mapping requirement remains unsupported outside that explicit profile.",
+      "evidence": []
+    },
+    {
+      "requirementId": "BPMN-INTERCHANGE-NORMATIVE-XSD",
+      "supportLevel": "unsupported",
+      "summary": "The in-process XML parser is intentionally non-validating; a normative XSD validation lane is still required.",
+      "evidence": []
+    },
+    {
+      "requirementId": "BPMN-DI-SEMANTIC-MODEL",
+      "supportLevel": "modeled",
+      "summary": "A strict normalized BPMNDI, DI, and DC semantic representation covers diagrams, planes, shapes, edges, labels, styles, geometry, normative enums, optional DI identities, and reference validation; XML interchange is separate.",
+      "evidence": [
+        {
+          "kind": "source",
+          "path": "src/BpmnDi.ts",
+          "symbol": "BpmnDiDocument"
+        },
+        {
+          "kind": "schema-test",
+          "path": "test/BpmnDi.test.ts",
+          "testName": "admits and freezes a strict BPMN Diagram Interchange document"
+        }
+      ]
+    },
+    {
+      "requirementId": "BPMN-DI-CORE-XML-SLICE",
+      "supportLevel": "modeled",
+      "summary": "The named core-process/DI profile imports, validates, exports, and round-trips the package's complete current normalized diagram slice with geometry and semantic reference-kind checks. Full BPMN DI coverage and normative XSD evidence remain outside this slice.",
+      "evidence": [
+        {
+          "kind": "source",
+          "path": "src/BpmnXml.ts",
+          "symbol": "CoreProcessDiProfileId"
+        },
+        {
+          "kind": "schema-test",
+          "path": "test/BpmnXml.test.ts",
+          "testName": "validates DI geometry, semantic reference kinds, and global XML ids"
+        },
+        {
+          "kind": "import-test",
+          "path": "test/BpmnXml.test.ts",
+          "testName": "imports the complete named semantic and DI slice independent of prefix spelling"
+        },
+        {
+          "kind": "export-test",
+          "path": "test/BpmnXml.test.ts",
+          "testName": "exports deterministically and round-trips normalized semantic and visual data"
+        },
+        {
+          "kind": "roundtrip-test",
+          "path": "test/BpmnXml.test.ts",
+          "testName": "exports deterministically and round-trips normalized semantic and visual data"
+        }
+      ]
+    },
+    {
+      "requirementId": "BPMN-DI-XML-ROUNDTRIP",
+      "supportLevel": "unsupported",
+      "summary": "The strict named DI slice is implemented, but the complete BPMN Diagram Interchange XML surface and normative XSD-backed round-trip requirement remain unsupported.",
+      "evidence": []
+    },
+    {
+      "requirementId": "BPMN-DATA-IO-INTERFACE-SLICE",
+      "supportLevel": "modeled",
+      "summary": "A strict normalized semantic slice covers item definitions, scoped data objects and references, data stores, typed IO owners, input/output specifications and sets, concrete data associations, interfaces, operations, messages, errors, and local callable bindings. Event payload IO, imported or external operation binding, task-kind mappings, complete CallActivity IO equality, expression-language typing, XML interchange, and the full Common Executable metamodel remain outside this requirement.",
+      "evidence": [
+        {
+          "kind": "source",
+          "path": "src/BpmnData.ts",
+          "symbol": "BpmnDataDocument"
+        },
+        {
+          "kind": "schema-test",
+          "path": "test/BpmnData.test.ts",
+          "testName": "accepts the bounded rich graph with ancestor accessibility and callable binding"
+        }
+      ]
+    },
+    {
+      "requirementId": "BPMN-COMMON-EXECUTABLE-METAMODEL",
+      "supportLevel": "unsupported",
+      "summary": "Core control-flow foundations exist, but the complete Common Executable data, resources, correlation, interfaces, lanes, artifacts, and root elements are not yet represented.",
+      "evidence": []
+    },
+    {
+      "requirementId": "BPMN-EXECUTION-ACTIVITY-LIFECYCLE",
+      "supportLevel": "unsupported",
+      "summary": "The complete normative Activity lifecycle and operational semantics are not implemented.",
+      "evidence": []
+    },
+    {
+      "requirementId": "WFP-CONTROL-FLOW-CATALOG",
+      "supportLevel": "unsupported",
+      "summary": "The control-flow family is analyzed in prose, while only separately listed atomic patterns have executable evidence.",
+      "evidence": [
+        {
+          "kind": "specification",
+          "path": "STANDARDS.md",
+          "locator": "Control-flow traceability"
+        }
+      ]
+    },
+    {
+      "requirementId": "WFP-WCP01-SEQUENCE",
+      "supportLevel": "executable",
+      "summary": "The bounded token kernel transfers task completion along admitted sequence flows without coalescing invocation identity.",
+      "evidence": [
+        {
+          "kind": "source",
+          "path": "src/BpmnKernel.ts",
+          "symbol": "completeTask"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/BpmnKernel.test.ts",
+          "testName": "routes completed task outputs through conditional selection, default fallback, and idempotent replay"
+        },
+        {
+          "kind": "replay-test",
+          "path": "test/BpmnKernel.test.ts",
+          "testName": "replays an ordered transition journal into the exact durable marking"
+        }
+      ]
+    },
+    {
+      "requirementId": "WFP-WCP02-PARALLEL-SPLIT",
+      "supportLevel": "executable",
+      "summary": "A diverging parallel gateway atomically emits one causally identified token per outgoing flow.",
+      "evidence": [
+        {
+          "kind": "source",
+          "path": "src/BpmnKernel.ts",
+          "symbol": "advance"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/BpmnKernel.test.ts",
+          "testName": "splits and joins parallel branches with exact join epochs"
+        },
+        {
+          "kind": "replay-test",
+          "path": "test/BpmnKernel.test.ts",
+          "testName": "replays an ordered transition journal into the exact durable marking"
+        }
+      ]
+    },
+    {
+      "requirementId": "WFP-WCP03-SYNCHRONIZATION",
+      "supportLevel": "executable",
+      "summary": "A converging parallel gateway consumes one arrival from every incoming branch within the same recorded join epoch.",
+      "evidence": [
+        {
+          "kind": "source",
+          "path": "src/BpmnKernel.ts",
+          "symbol": "advance"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/BpmnKernel.test.ts",
+          "testName": "splits and joins parallel branches with exact join epochs"
+        },
+        {
+          "kind": "replay-test",
+          "path": "test/BpmnKernel.test.ts",
+          "testName": "replays an ordered transition journal into the exact durable marking"
+        }
+      ]
+    },
+    {
+      "requirementId": "WFP-WCP04-EXCLUSIVE-CHOICE",
+      "supportLevel": "executable",
+      "summary": "A diverging exclusive gateway evaluates ordered conditions from one supplied semantic context and records exactly one selected/default path.",
+      "evidence": [
+        {
+          "kind": "source",
+          "path": "src/BpmnKernel.ts",
+          "symbol": "advance"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/BpmnKernel.test.ts",
+          "testName": "uses deterministic exclusive-gateway ordering before default fallback"
+        },
+        {
+          "kind": "replay-test",
+          "path": "test/BpmnKernel.test.ts",
+          "testName": "replays an ordered transition journal into the exact durable marking"
+        }
+      ]
+    },
+    {
+      "requirementId": "WFP-DATA-CATALOG",
+      "supportLevel": "unsupported",
+      "summary": "The data family is requirements-analyzed, but complete atomic requirements and executable evidence remain pending.",
+      "evidence": [
+        {
+          "kind": "specification",
+          "path": "STANDARDS.md",
+          "locator": "Data-pattern traceability"
+        }
+      ]
+    },
+    {
+      "requirementId": "WFP-RESOURCE-CATALOG",
+      "supportLevel": "unsupported",
+      "summary": "The resource and human-work family is requirements-analyzed, but complete atomic requirements and executable evidence remain pending.",
+      "evidence": [
+        {
+          "kind": "specification",
+          "path": "STANDARDS.md",
+          "locator": "Resource and human-work traceability"
+        }
+      ]
+    },
+    {
+      "requirementId": "WFP-EXCEPTION-HANDLING-CATALOG",
+      "supportLevel": "unsupported",
+      "summary": "Exception dimensions are recorded as requirements, but no complete atomic catalogue or execution profile is claimed.",
+      "evidence": [
+        {
+          "kind": "specification",
+          "path": "STANDARDS.md",
+          "locator": "Exceptions, conversations, flexibility, change, scientific workflows, time, and activities"
+        }
+      ]
+    },
+    {
+      "requirementId": "WFP-SERVICE-CORRELATION-CATALOG",
+      "supportLevel": "unsupported",
+      "summary": "Service-interaction and correlation obligations are recorded, but their atomic pattern catalogue and evidence remain pending.",
+      "evidence": [
+        {
+          "kind": "specification",
+          "path": "STANDARDS.md",
+          "locator": "Exceptions, conversations, flexibility, change, scientific workflows, time, and activities"
+        }
+      ]
+    },
+    {
+      "requirementId": "WFP-FLEXIBILITY-CATALOG",
+      "supportLevel": "unsupported",
+      "summary": "The 34-pattern flexibility taxonomy is an explicit backlog family; migration alone is not treated as coverage.",
+      "evidence": [
+        {
+          "kind": "specification",
+          "path": "STANDARDS.md",
+          "locator": "Exceptions, conversations, flexibility, change, scientific workflows, time, and activities"
+        }
+      ]
+    },
+    {
+      "requirementId": "WFP-CHANGE-CATALOG",
+      "supportLevel": "unsupported",
+      "summary": "Typed live-run migration obligations are designed, but the change-pattern catalogue and runtime mappings remain unsupported.",
+      "evidence": [
+        {
+          "kind": "specification",
+          "path": "STANDARDS.md",
+          "locator": "Exceptions, conversations, flexibility, change, scientific workflows, time, and activities"
+        }
+      ]
+    },
+    {
+      "requirementId": "WFP-SCIENTIFIC-CATALOG",
+      "supportLevel": "unsupported",
+      "summary": "Scientific workflow activation and provenance obligations are documented but not implemented as a complete pattern family.",
+      "evidence": [
+        {
+          "kind": "specification",
+          "path": "STANDARDS.md",
+          "locator": "Exceptions, conversations, flexibility, change, scientific workflows, time, and activities"
+        }
+      ]
+    },
+    {
+      "requirementId": "WFP-TIME-CATALOG",
+      "supportLevel": "unsupported",
+      "summary": "Time-pattern requirements are documented; protocol-v2 timers do not constitute complete TP1-TP10 coverage.",
+      "evidence": [
+        {
+          "kind": "specification",
+          "path": "STANDARDS.md",
+          "locator": "Exceptions, conversations, flexibility, change, scientific workflows, time, and activities"
+        }
+      ]
+    },
+    {
+      "requirementId": "WFP-ACTIVITY-CATALOG",
+      "supportLevel": "unsupported",
+      "summary": "WAP1-WAP7 are explicit requirements, but no complete activity-pattern execution evidence exists.",
+      "evidence": [
+        {
+          "kind": "specification",
+          "path": "STANDARDS.md",
+          "locator": "Exceptions, conversations, flexibility, change, scientific workflows, time, and activities"
+        }
+      ]
+    },
+    {
+      "requirementId": "WFP-ATOMIC-CATALOG-COMPLETE",
+      "supportLevel": "unsupported",
+      "summary": "Family-level traceability and four executable atomic control patterns exist; the complete per-pattern requirement catalogue remains intentionally incomplete.",
+      "evidence": [
+        {
+          "kind": "specification",
+          "path": "STANDARDS.md",
+          "locator": "Machine-readable Workflow Patterns status"
+        }
+      ]
+    },
+    {
+      "requirementId": "BPMN-PROFILE-PROCESS-MODELING-DESCRIPTIVE-COMPLETE",
+      "supportLevel": "unsupported",
+      "summary": "The normative atomic requirement catalogue is incomplete and no Process Modeling conformance subclass is claimed.",
+      "evidence": []
+    },
+    {
+      "requirementId": "BPMN-PROFILE-PROCESS-EXECUTION-COMPLETE",
+      "supportLevel": "unsupported",
+      "summary": "The normative atomic requirement catalogue and execution semantics are incomplete; Process Execution Conformance is not claimed.",
+      "evidence": []
+    }
+  ],
+  "claims": []
+}

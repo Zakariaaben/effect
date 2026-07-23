@@ -1,0 +1,506 @@
+{
+  "formatVersion": 1,
+  "catalogId": "effect-workflow-builder-bpmn-2.0.2",
+  "catalogRevision": 5,
+  "standard": {
+    "name": "Business Process Model and Notation",
+    "version": "2.0.2",
+    "authority": "Object Management Group",
+    "specificationUrl": "https://www.omg.org/spec/BPMN/2.0.2"
+  },
+  "normativeCoverageComplete": false,
+  "requirements": [
+    {
+      "id": "BPMN-FOUNDATION-SEMANTIC-MODEL",
+      "title": "Versioned BPMN semantic model foundation",
+      "facet": "semantic-model",
+      "source": {
+        "authority": "OMG",
+        "document": "Business Process Model and Notation 2.0.2",
+        "section": "8-13",
+        "url": "https://www.omg.org/spec/BPMN/2.0.2"
+      },
+      "dependsOn": [],
+      "notes": "A semantic IR is necessary but does not by itself satisfy a modeling conformance subclass."
+    },
+    {
+      "id": "BPMN-FOUNDATION-SEMANTIC-VALIDATION",
+      "title": "BPMN semantic reference and context validation foundation",
+      "facet": "validation",
+      "source": {
+        "authority": "OMG",
+        "document": "Business Process Model and Notation 2.0.2",
+        "section": "8-13",
+        "url": "https://www.omg.org/spec/BPMN/2.0.2"
+      },
+      "dependsOn": [
+        "BPMN-FOUNDATION-SEMANTIC-MODEL"
+      ]
+    },
+    {
+      "id": "BPMN-FOUNDATION-DURABLE-MARKING",
+      "title": "Durable token and scope state foundation",
+      "facet": "execution-state",
+      "source": {
+        "authority": "OMG",
+        "document": "Business Process Model and Notation 2.0.2",
+        "section": "13",
+        "url": "https://www.omg.org/spec/BPMN/2.0.2"
+      },
+      "dependsOn": [
+        "BPMN-FOUNDATION-SEMANTIC-MODEL",
+        "BPMN-FOUNDATION-SEMANTIC-VALIDATION"
+      ],
+      "notes": "A state schema is not evidence that normative transitions are implemented."
+    },
+    {
+      "id": "BPMN-FOUNDATION-EVIDENCE-GATES",
+      "title": "Machine-readable conformance evidence gates",
+      "facet": "validation",
+      "source": {
+        "authority": "OMG",
+        "document": "Business Process Model and Notation 2.0.2",
+        "section": "2.1",
+        "url": "https://www.omg.org/spec/BPMN/2.0.2"
+      },
+      "dependsOn": []
+    },
+    {
+      "id": "BPMN-EXECUTION-BASIC-TOKEN-KERNEL",
+      "title": "Executable token transitions for an explicitly admitted BPMN subset",
+      "facet": "execution",
+      "source": {
+        "authority": "OMG",
+        "document": "Business Process Model and Notation 2.0.2",
+        "section": "13",
+        "url": "https://www.omg.org/spec/BPMN/2.0.2"
+      },
+      "dependsOn": [
+        "BPMN-FOUNDATION-DURABLE-MARKING"
+      ]
+    },
+    {
+      "id": "BPMN-EXECUTION-CORE-PROCESS-XML-SLICE",
+      "title": "Executable intersection of the named core-process XML profile and token kernel",
+      "facet": "execution",
+      "source": {
+        "authority": "OMG",
+        "document": "Business Process Model and Notation 2.0.2",
+        "section": "10 and 13",
+        "url": "https://www.omg.org/spec/BPMN/2.0.2"
+      },
+      "dependsOn": [
+        "BPMN-EXECUTION-BASIC-TOKEN-KERNEL",
+        "BPMN-INTERCHANGE-CORE-PROCESS-XML-SLICE"
+      ],
+      "notes": "This is a deliberately narrower executable admission profile, not Process Execution Conformance. It rejects rather than infers unsupported process, gateway, event, activity, and implicit-activation semantics."
+    },
+    {
+      "id": "BPMN-INTERCHANGE-BOUNDED-XML-INFOSET",
+      "title": "Bounded namespace-aware XML infoset parsing and serialization",
+      "facet": "xml-interchange",
+      "source": {
+        "authority": "OMG",
+        "document": "BPMN20.xsd and Semantic.xsd",
+        "url": "https://www.omg.org/spec/BPMN/2.0.2"
+      },
+      "dependsOn": []
+    },
+    {
+      "id": "BPMN-INTERCHANGE-CORE-PROCESS-XML-SLICE",
+      "title": "Strict named BPMN core-process XML mapping slice",
+      "facet": "xml-interchange",
+      "source": {
+        "authority": "OMG",
+        "document": "BPMN20.xsd and Semantic.xsd",
+        "section": "tDefinitions, tProcess, flow nodes, and tSequenceFlow",
+        "url": "https://www.omg.org/spec/BPMN/2.0.2"
+      },
+      "dependsOn": [
+        "BPMN-FOUNDATION-SEMANTIC-MODEL",
+        "BPMN-FOUNDATION-SEMANTIC-VALIDATION",
+        "BPMN-INTERCHANGE-BOUNDED-XML-INFOSET"
+      ],
+      "notes": "Profile bpmn-2.0.2-core-process-di-v2 covers ordinary processes and recursive subprocesses, generic tasks, source-level callActivity callable-element QNames, none start/end events, exclusive/parallel gateways, sequence flows, conditions, defaults, definitions metadata, and explicit expression-version bindings. Call activities are interchange-only until immutable child-target resolution and durable parent/child execution exist. This is a fail-closed implementation slice, not an OMG conformance subclass or complete semantic mapping."
+    },
+    {
+      "id": "BPMN-INTERCHANGE-SEMANTIC-MAPPING",
+      "title": "Loss-aware mapping between BPMN XML and the semantic model",
+      "facet": "xml-interchange",
+      "source": {
+        "authority": "OMG",
+        "document": "BPMN20.xsd and Semantic.xsd",
+        "url": "https://www.omg.org/spec/BPMN/2.0.2"
+      },
+      "dependsOn": [
+        "BPMN-FOUNDATION-SEMANTIC-MODEL",
+        "BPMN-INTERCHANGE-BOUNDED-XML-INFOSET"
+      ]
+    },
+    {
+      "id": "BPMN-INTERCHANGE-NORMATIVE-XSD",
+      "title": "Validation against the normative BPMN 2.0.2 XSD set",
+      "facet": "xml-interchange",
+      "source": {
+        "authority": "OMG",
+        "document": "BPMN20.xsd, Semantic.xsd, BPMNDI.xsd, DI.xsd, and DC.xsd",
+        "url": "https://www.omg.org/spec/BPMN/2.0.2"
+      },
+      "dependsOn": [
+        "BPMN-INTERCHANGE-SEMANTIC-MAPPING"
+      ]
+    },
+    {
+      "id": "BPMN-DI-SEMANTIC-MODEL",
+      "title": "BPMN Diagram Interchange semantic model",
+      "facet": "diagram-interchange",
+      "source": {
+        "authority": "OMG",
+        "document": "BPMNDI.xsd, DI.xsd, and DC.xsd",
+        "url": "https://www.omg.org/spec/BPMN/2.0.2"
+      },
+      "dependsOn": [
+        "BPMN-FOUNDATION-SEMANTIC-MODEL"
+      ]
+    },
+    {
+      "id": "BPMN-DI-CORE-XML-SLICE",
+      "title": "Strict named BPMN Diagram Interchange XML mapping slice",
+      "facet": "diagram-interchange",
+      "source": {
+        "authority": "OMG",
+        "document": "BPMNDI.xsd, DI.xsd, and DC.xsd",
+        "url": "https://www.omg.org/spec/BPMN/2.0.2"
+      },
+      "dependsOn": [
+        "BPMN-DI-SEMANTIC-MODEL",
+        "BPMN-INTERCHANGE-CORE-PROCESS-XML-SLICE"
+      ],
+      "notes": "Profile bpmn-2.0.2-core-process-di-v2 maps the package's complete current normalized DI slice with global XML-ID and semantic reference-kind checks. It is not the complete BPMN DI interchange surface and has no normative XSD evidence yet."
+    },
+    {
+      "id": "BPMN-DI-XML-ROUNDTRIP",
+      "title": "BPMN Diagram Interchange XML import and export",
+      "facet": "diagram-interchange",
+      "source": {
+        "authority": "OMG",
+        "document": "BPMNDI.xsd, DI.xsd, and DC.xsd",
+        "url": "https://www.omg.org/spec/BPMN/2.0.2"
+      },
+      "dependsOn": [
+        "BPMN-DI-SEMANTIC-MODEL",
+        "BPMN-INTERCHANGE-SEMANTIC-MAPPING",
+        "BPMN-INTERCHANGE-NORMATIVE-XSD"
+      ]
+    },
+    {
+      "id": "BPMN-DATA-IO-INTERFACE-SLICE",
+      "title": "Normalized BPMN data, IO specification, and callable interface slice",
+      "facet": "semantic-model",
+      "source": {
+        "authority": "OMG",
+        "document": "Business Process Model and Notation 2.0.2",
+        "section": "10.3.6-10.4",
+        "url": "https://www.omg.org/spec/BPMN/2.0.2"
+      },
+      "dependsOn": [
+        "BPMN-FOUNDATION-SEMANTIC-MODEL"
+      ],
+      "notes": "This bounded normalized slice does not cover Event payload IO, imported CallableElements or external Operation bindings, task-kind-specific mappings, complete CallActivity IO equality, or expression-language typing."
+    },
+    {
+      "id": "BPMN-COMMON-EXECUTABLE-METAMODEL",
+      "title": "Complete Common Executable process metamodel surface",
+      "facet": "semantic-model",
+      "source": {
+        "authority": "OMG",
+        "document": "Business Process Model and Notation 2.0.2",
+        "section": "2.2.1",
+        "url": "https://www.omg.org/spec/BPMN/2.0.2"
+      },
+      "dependsOn": [
+        "BPMN-FOUNDATION-SEMANTIC-MODEL"
+      ],
+      "notes": "Includes the applicable data, resource, correlation, interface, lane, artifact, and root-element surfaces."
+    },
+    {
+      "id": "BPMN-EXECUTION-ACTIVITY-LIFECYCLE",
+      "title": "Normative Activity lifecycle and operational semantics",
+      "facet": "execution",
+      "source": {
+        "authority": "OMG",
+        "document": "Business Process Model and Notation 2.0.2",
+        "section": "13",
+        "url": "https://www.omg.org/spec/BPMN/2.0.2"
+      },
+      "dependsOn": [
+        "BPMN-COMMON-EXECUTABLE-METAMODEL",
+        "BPMN-EXECUTION-BASIC-TOKEN-KERNEL"
+      ]
+    },
+    {
+      "id": "WFP-CONTROL-FLOW-CATALOG",
+      "title": "Control-flow pattern catalogue",
+      "facet": "validation",
+      "source": {
+        "authority": "WorkflowPatterns",
+        "document": "Workflow Patterns: The Definitive Guide",
+        "section": "Chapter 4",
+        "pages": "105-188"
+      },
+      "dependsOn": [],
+      "notes": "Family requirement only. Atomic control-flow requirements are being admitted separately; prose coverage is not implementation evidence."
+    },
+    {
+      "id": "WFP-WCP01-SEQUENCE",
+      "title": "WCP1 Sequence",
+      "facet": "execution",
+      "source": {
+        "authority": "WorkflowPatterns",
+        "document": "Workflow Patterns: The Definitive Guide",
+        "section": "4.6",
+        "pages": "167-168"
+      },
+      "dependsOn": [
+        "WFP-CONTROL-FLOW-CATALOG",
+        "BPMN-EXECUTION-BASIC-TOKEN-KERNEL"
+      ]
+    },
+    {
+      "id": "WFP-WCP02-PARALLEL-SPLIT",
+      "title": "WCP2 Parallel Split",
+      "facet": "execution",
+      "source": {
+        "authority": "WorkflowPatterns",
+        "document": "Workflow Patterns: The Definitive Guide",
+        "section": "4.2.1",
+        "pages": "110-111"
+      },
+      "dependsOn": [
+        "WFP-CONTROL-FLOW-CATALOG",
+        "BPMN-EXECUTION-BASIC-TOKEN-KERNEL"
+      ]
+    },
+    {
+      "id": "WFP-WCP03-SYNCHRONIZATION",
+      "title": "WCP3 Synchronization",
+      "facet": "execution",
+      "source": {
+        "authority": "WorkflowPatterns",
+        "document": "Workflow Patterns: The Definitive Guide",
+        "section": "4.3.1",
+        "pages": "125-127"
+      },
+      "dependsOn": [
+        "WFP-CONTROL-FLOW-CATALOG",
+        "BPMN-EXECUTION-BASIC-TOKEN-KERNEL"
+      ]
+    },
+    {
+      "id": "WFP-WCP04-EXCLUSIVE-CHOICE",
+      "title": "WCP4 Exclusive Choice",
+      "facet": "execution",
+      "source": {
+        "authority": "WorkflowPatterns",
+        "document": "Workflow Patterns: The Definitive Guide",
+        "section": "4.2.2",
+        "pages": "111-115"
+      },
+      "dependsOn": [
+        "WFP-CONTROL-FLOW-CATALOG",
+        "BPMN-EXECUTION-BASIC-TOKEN-KERNEL"
+      ]
+    },
+    {
+      "id": "WFP-DATA-CATALOG",
+      "title": "Data pattern catalogue",
+      "facet": "validation",
+      "source": {
+        "authority": "WorkflowPatterns",
+        "document": "Workflow Patterns: The Definitive Guide",
+        "section": "Chapter 5",
+        "pages": "189-237"
+      },
+      "dependsOn": []
+    },
+    {
+      "id": "WFP-RESOURCE-CATALOG",
+      "title": "Resource pattern catalogue",
+      "facet": "validation",
+      "source": {
+        "authority": "WorkflowPatterns",
+        "document": "Workflow Patterns: The Definitive Guide",
+        "section": "Chapter 6",
+        "pages": "239-287"
+      },
+      "dependsOn": []
+    },
+    {
+      "id": "WFP-EXCEPTION-HANDLING-CATALOG",
+      "title": "Exception handling pattern dimensions",
+      "facet": "validation",
+      "source": {
+        "authority": "WorkflowPatterns",
+        "document": "Workflow Patterns: The Definitive Guide",
+        "section": "7.1",
+        "pages": "291-297"
+      },
+      "dependsOn": []
+    },
+    {
+      "id": "WFP-SERVICE-CORRELATION-CATALOG",
+      "title": "Service interaction and correlation pattern catalogues",
+      "facet": "validation",
+      "source": {
+        "authority": "WorkflowPatterns",
+        "document": "Workflow Patterns: The Definitive Guide",
+        "section": "7.2",
+        "pages": "298-313"
+      },
+      "dependsOn": []
+    },
+    {
+      "id": "WFP-FLEXIBILITY-CATALOG",
+      "title": "Flexibility pattern catalogue",
+      "facet": "validation",
+      "source": {
+        "authority": "WorkflowPatterns",
+        "document": "Workflow Patterns: The Definitive Guide",
+        "section": "7.3",
+        "pages": "314-315"
+      },
+      "dependsOn": [],
+      "notes": "Covers the 34 FP patterns across design, deviation, underspecification, and momentary or permanent change; it is broader than active-instance migration."
+    },
+    {
+      "id": "WFP-CHANGE-CATALOG",
+      "title": "Process change patterns and support features",
+      "facet": "validation",
+      "source": {
+        "authority": "WorkflowPatterns",
+        "document": "Workflow Patterns: The Definitive Guide",
+        "section": "7.4",
+        "pages": "315-321"
+      },
+      "dependsOn": []
+    },
+    {
+      "id": "WFP-SCIENTIFIC-CATALOG",
+      "title": "Scientific workflow pattern catalogue",
+      "facet": "validation",
+      "source": {
+        "authority": "WorkflowPatterns",
+        "document": "Workflow Patterns: The Definitive Guide",
+        "section": "7.5",
+        "pages": "321-325"
+      },
+      "dependsOn": []
+    },
+    {
+      "id": "WFP-TIME-CATALOG",
+      "title": "Workflow time pattern catalogue",
+      "facet": "validation",
+      "source": {
+        "authority": "WorkflowPatterns",
+        "document": "Workflow Patterns: The Definitive Guide",
+        "section": "7.6",
+        "pages": "325-328"
+      },
+      "dependsOn": []
+    },
+    {
+      "id": "WFP-ACTIVITY-CATALOG",
+      "title": "Workflow activity patterns WAP1-WAP7",
+      "facet": "validation",
+      "source": {
+        "authority": "WorkflowPatterns",
+        "document": "Workflow Patterns: The Definitive Guide",
+        "section": "7.7",
+        "pages": "329"
+      },
+      "dependsOn": []
+    },
+    {
+      "id": "WFP-ATOMIC-CATALOG-COMPLETE",
+      "title": "Complete atomic Workflow Patterns traceability catalogue",
+      "facet": "validation",
+      "source": {
+        "authority": "WorkflowPatterns",
+        "document": "Workflow Patterns: The Definitive Guide",
+        "pages": "105-329"
+      },
+      "dependsOn": [
+        "WFP-CONTROL-FLOW-CATALOG",
+        "WFP-DATA-CATALOG",
+        "WFP-RESOURCE-CATALOG",
+        "WFP-EXCEPTION-HANDLING-CATALOG",
+        "WFP-SERVICE-CORRELATION-CATALOG",
+        "WFP-FLEXIBILITY-CATALOG",
+        "WFP-CHANGE-CATALOG",
+        "WFP-SCIENTIFIC-CATALOG",
+        "WFP-TIME-CATALOG",
+        "WFP-ACTIVITY-CATALOG"
+      ],
+      "notes": "Remains unsupported until every named pattern or dimension has its own stable requirement, design target, support status, and implementation or test evidence."
+    },
+    {
+      "id": "BPMN-PROFILE-PROCESS-MODELING-DESCRIPTIVE-COMPLETE",
+      "title": "Complete Descriptive Process Modeling conformance requirement set",
+      "facet": "validation",
+      "source": {
+        "authority": "OMG",
+        "document": "Business Process Model and Notation 2.0.2",
+        "section": "2.1 and Table 2.1",
+        "url": "https://www.omg.org/spec/BPMN/2.0.2"
+      },
+      "dependsOn": [
+        "BPMN-COMMON-EXECUTABLE-METAMODEL",
+        "BPMN-DI-XML-ROUNDTRIP",
+        "BPMN-INTERCHANGE-NORMATIVE-XSD"
+      ],
+      "notes": "This aggregate remains unsupported until replaced by a complete atomic normative requirement catalogue."
+    },
+    {
+      "id": "BPMN-PROFILE-PROCESS-EXECUTION-COMPLETE",
+      "title": "Complete Process Execution conformance requirement set",
+      "facet": "validation",
+      "source": {
+        "authority": "OMG",
+        "document": "Business Process Model and Notation 2.0.2",
+        "section": "2.1",
+        "url": "https://www.omg.org/spec/BPMN/2.0.2"
+      },
+      "dependsOn": [
+        "BPMN-PROFILE-PROCESS-MODELING-DESCRIPTIVE-COMPLETE",
+        "BPMN-EXECUTION-ACTIVITY-LIFECYCLE"
+      ],
+      "notes": "This aggregate remains unsupported until replaced by a complete atomic normative requirement catalogue."
+    }
+  ],
+  "profiles": [
+    {
+      "id": "BPMN-PROCESS-MODELING-DESCRIPTIVE",
+      "name": "Process Modeling Conformance - Descriptive",
+      "requirements": [
+        {
+          "requirementId": "BPMN-PROFILE-PROCESS-MODELING-DESCRIPTIVE-COMPLETE",
+          "acceptedSupportLevels": [
+            "modeled"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "BPMN-PROCESS-EXECUTION",
+      "name": "Process Execution Conformance",
+      "requirements": [
+        {
+          "requirementId": "BPMN-PROFILE-PROCESS-EXECUTION-COMPLETE",
+          "acceptedSupportLevels": [
+            "executable"
+          ]
+        }
+      ]
+    }
+  ]
+}

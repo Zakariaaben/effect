@@ -35,6 +35,7 @@
     { "path": "packages/tools/jsdocs" },
     { "path": "packages/tools/oxc" },
     { "path": "packages/tools/utils" },
-    { "path": "packages/vitest" }
+    { "path": "packages/vitest" },
+    { "path": "packages/workflow-builder" }
   ]
 }

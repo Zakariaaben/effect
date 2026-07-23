@@ -1,0 +1,134 @@
+{
+  "fixtureVersion": 1,
+  "failureHistory": [
+    {
+      "eventVersion": 1,
+      "eventId": "[\"@effect/workflow-builder\",1,\"RunStarted\",\"run-golden-failure\"]",
+      "runId": "run-golden-failure",
+      "sequence": 0,
+      "recordedAt": "2026-01-02T03:04:05.000Z",
+      "payload": {
+        "_tag": "RunStarted",
+        "planId": "golden-plan",
+        "planRevision": 7,
+        "definitionId": "golden-workflow",
+        "definitionVersion": "1.0.0",
+        "compilerVersion": "1",
+        "compiledFingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "backend": "durable",
+        "input": { "source": "fixture" }
+      }
+    },
+    {
+      "eventVersion": 1,
+      "eventId": "[\"@effect/workflow-builder\",1,\"ScheduleActivity\",\"run-golden-failure\",\"task\",1]",
+      "runId": "run-golden-failure",
+      "sequence": 1,
+      "recordedAt": "2026-01-02T03:04:06.000Z",
+      "payload": {
+        "_tag": "ActivityScheduled",
+        "activityId": "[\"@effect/workflow-builder\",1,\"Activity\",\"run-golden-failure\",\"task\",1]",
+        "nodeId": "task",
+        "nodeInstanceId": "task",
+        "attempt": 1,
+        "idempotencyKey": "[\"@effect/workflow-builder\",1,\"ActivityIdempotencyKey\",\"run-golden-failure\",\"task\"]",
+        "input": { "source": "fixture" }
+      }
+    },
+    {
+      "eventVersion": 1,
+      "eventId": "[\"@effect/workflow-builder\",1,\"ActivityFailed\",\"[\\\"@effect/workflow-builder\\\",1,\\\"Activity\\\",\\\"run-golden-failure\\\",\\\"task\\\",1]\"]",
+      "runId": "run-golden-failure",
+      "sequence": 2,
+      "recordedAt": "2026-01-02T03:04:07.000Z",
+      "payload": {
+        "_tag": "ActivityFailed",
+        "activityId": "[\"@effect/workflow-builder\",1,\"Activity\",\"run-golden-failure\",\"task\",1]",
+        "failure": { "_tag": "GoldenFailure", "message": "boom" }
+      }
+    },
+    {
+      "eventVersion": 1,
+      "eventId": "[\"@effect/workflow-builder\",1,\"FailRun\",\"run-golden-failure\"]",
+      "runId": "run-golden-failure",
+      "sequence": 3,
+      "recordedAt": "2026-01-02T03:04:08.000Z",
+      "payload": {
+        "_tag": "RunFailed",
+        "failure": {
+          "_tag": "ActivityFailure",
+          "activityId": "[\"@effect/workflow-builder\",1,\"Activity\",\"run-golden-failure\",\"task\",1]",
+          "nodeId": "task",
+          "nodeInstanceId": "task",
+          "attempt": 1,
+          "failure": { "_tag": "GoldenFailure", "message": "boom" }
+        }
+      }
+    }
+  ],
+  "cancellationHistory": [
+    {
+      "eventVersion": 1,
+      "eventId": "[\"@effect/workflow-builder\",1,\"RunStarted\",\"run-golden-cancel\"]",
+      "runId": "run-golden-cancel",
+      "sequence": 0,
+      "recordedAt": "2026-01-02T03:04:05.000Z",
+      "payload": {
+        "_tag": "RunStarted",
+        "planId": "golden-plan",
+        "planRevision": 7,
+        "definitionId": "golden-workflow",
+        "definitionVersion": "1.0.0",
+        "compilerVersion": "1",
+        "compiledFingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "backend": "durable",
+        "input": { "source": "fixture" }
+      }
+    },
+    {
+      "eventVersion": 1,
+      "eventId": "[\"@effect/workflow-builder\",1,\"ScheduleActivity\",\"run-golden-cancel\",\"task\",1]",
+      "runId": "run-golden-cancel",
+      "sequence": 1,
+      "recordedAt": "2026-01-02T03:04:06.000Z",
+      "payload": {
+        "_tag": "ActivityScheduled",
+        "activityId": "[\"@effect/workflow-builder\",1,\"Activity\",\"run-golden-cancel\",\"task\",1]",
+        "nodeId": "task",
+        "nodeInstanceId": "task",
+        "attempt": 1,
+        "idempotencyKey": "[\"@effect/workflow-builder\",1,\"ActivityIdempotencyKey\",\"run-golden-cancel\",\"task\"]",
+        "input": { "source": "fixture" }
+      }
+    },
+    {
+      "eventVersion": 1,
+      "eventId": "[\"@effect/workflow-builder\",1,\"ActivitySucceeded\",\"[\\\"@effect/workflow-builder\\\",1,\\\"Activity\\\",\\\"run-golden-cancel\\\",\\\"task\\\",1]\"]",
+      "runId": "run-golden-cancel",
+      "sequence": 2,
+      "recordedAt": "2026-01-02T03:04:07.000Z",
+      "payload": {
+        "_tag": "ActivitySucceeded",
+        "activityId": "[\"@effect/workflow-builder\",1,\"Activity\",\"run-golden-cancel\",\"task\",1]",
+        "output": { "result": "done" }
+      }
+    },
+    {
+      "eventVersion": 1,
+      "eventId": "[\"@effect/workflow-builder\",1,\"RunCancellationRequested\",\"run-golden-cancel\",\"cancel-request-1\"]",
+      "runId": "run-golden-cancel",
+      "sequence": 3,
+      "recordedAt": "2026-01-02T03:04:08.000Z",
+      "correlationId": "cancel-request-1",
+      "payload": { "_tag": "RunCancellationRequested" }
+    },
+    {
+      "eventVersion": 1,
+      "eventId": "[\"@effect/workflow-builder\",1,\"CancelRun\",\"run-golden-cancel\"]",
+      "runId": "run-golden-cancel",
+      "sequence": 4,
+      "recordedAt": "2026-01-02T03:04:09.000Z",
+      "payload": { "_tag": "RunCancelled" }
+    }
+  ]
+}

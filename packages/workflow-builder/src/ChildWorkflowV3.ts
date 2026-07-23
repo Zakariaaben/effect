@@ -1,0 +1,1294 @@
+/**
+ * Strict, immutable parent-child workflow protocol foundations for execution
+ * protocol version `3`.
+ *
+ * **Details**
+ *
+ * This module is deliberately independent from protocol version `2`. It
+ * defines only portable pins, lineage, relation state, and collision-free
+ * identities. Starting, deciding, projecting, and cancelling child runs remain
+ * authority concerns for a later integration layer.
+ *
+ * @since 4.0.0
+ */
+import * as Result from "effect/Result"
+import * as Schema from "effect/Schema"
+import * as Json from "./internal/json.ts"
+import * as Wire from "./ProtocolV2Wire.ts"
+
+const strictParseOptions = {
+  errors: "all",
+  onExcessProperty: "error"
+} as const
+
+const namespace = "@effect/workflow-builder" as const
+
+/**
+ * Execution protocol selected by child workflow foundations in this module.
+ *
+ * @category constants
+ * @since 4.0.0
+ */
+export const ExecutionProtocolVersion = 3 as const
+
+/**
+ * Canonical identity tuple version used by child workflow foundations.
+ *
+ * @category constants
+ * @since 4.0.0
+ */
+export const IdentityVersion = 3 as const
+
+/**
+ * Maximum child depth, and therefore maximum retained ancestry length.
+ *
+ * **Details**
+ *
+ * Roots have depth `0`. A parent link for a child at depth `n` contains
+ * exactly `n` root-through-parent entries. The fixed protocol ceiling bounds
+ * persisted state and cannot change underneath replay.
+ *
+ * @category constants
+ * @since 4.0.0
+ */
+export const MaximumLineageDepth = 64 as const
+
+const identity = (
+  kind: string,
+  ...parts: ReadonlyArray<string | number>
+): string => JSON.stringify([namespace, IdentityVersion, kind, ...parts])
+
+/**
+ * Returns the stable identity of one child call site in a parent run.
+ *
+ * @category constructors
+ * @since 4.0.0
+ */
+export const childCallId = (
+  tenantId: string,
+  parentRunId: string,
+  nodeInstanceId: string
+): string => identity("ChildCall", tenantId, parentRunId, nodeInstanceId)
+
+/**
+ * Returns the deterministic run identifier reserved for one child relation.
+ *
+ * @category constructors
+ * @since 4.0.0
+ */
+export const childRunId = (
+  tenantId: string,
+  parentRunId: string,
+  callId: string
+): string => identity("ChildRun", tenantId, parentRunId, callId)
+
+/**
+ * Returns the deterministic durable-start request identifier for one child.
+ *
+ * @category constructors
+ * @since 4.0.0
+ */
+export const childStartRequestId = (
+  tenantId: string,
+  parentRunId: string,
+  callId: string
+): string => identity("ChildStartRequest", tenantId, parentRunId, callId)
+
+/**
+ * Returns the shared schedule command and event identity for one child call.
+ *
+ * @category constructors
+ * @since 4.0.0
+ */
+export const scheduleChildCommandId = (
+  tenantId: string,
+  parentRunId: string,
+  callId: string
+): string => identity("ScheduleChild", tenantId, parentRunId, callId)
+
+/**
+ * Returns the parent projection identity for a canonical child start event.
+ *
+ * @category constructors
+ * @since 4.0.0
+ */
+export const childStartProjectionEventId = (
+  tenantId: string,
+  parentRunId: string,
+  callId: string,
+  childRunStartedEventId: string
+): string =>
+  identity(
+    "ChildStartProjection",
+    tenantId,
+    parentRunId,
+    callId,
+    childRunStartedEventId
+  )
+
+/**
+ * Returns the parent projection identity for a canonical child terminal event.
+ *
+ * @category constructors
+ * @since 4.0.0
+ */
+export const childTerminalProjectionEventId = (
+  tenantId: string,
+  parentRunId: string,
+  callId: string,
+  childTerminalEventId: string
+): string =>
+  identity(
+    "ChildTerminalProjection",
+    tenantId,
+    parentRunId,
+    callId,
+    childTerminalEventId
+  )
+
+/**
+ * Returns the cancellation command identity for one parent close cause.
+ *
+ * @category constructors
+ * @since 4.0.0
+ */
+export const requestChildCancellationCommandId = (
+  tenantId: string,
+  parentRunId: string,
+  callId: string,
+  parentCauseEventId: string
+): string =>
+  identity(
+    "RequestChildCancellation",
+    tenantId,
+    parentRunId,
+    callId,
+    parentCauseEventId
+  )
+
+/**
+ * Returns the parent acknowledgement identity for a child cancellation fact.
+ *
+ * @category constructors
+ * @since 4.0.0
+ */
+export const childCancellationAcceptedEventId = (
+  tenantId: string,
+  parentRunId: string,
+  callId: string,
+  childCancellationEventId: string
+): string =>
+  identity(
+    "ChildCancellationAccepted",
+    tenantId,
+    parentRunId,
+    callId,
+    childCancellationEventId
+  )
+
+/**
+ * Returns the terminal relation identity when close wins before child start.
+ *
+ * @category constructors
+ * @since 4.0.0
+ */
+export const childCancelledBeforeStartEventId = (
+  tenantId: string,
+  parentRunId: string,
+  callId: string,
+  parentCauseEventId: string
+): string =>
+  identity(
+    "ChildCancelledBeforeStart",
+    tenantId,
+    parentRunId,
+    callId,
+    parentCauseEventId
+  )
+
+/**
+ * Returns the durable abandon identity for one parent close cause.
+ *
+ * @category constructors
+ * @since 4.0.0
+ */
+export const abandonChildEventId = (
+  tenantId: string,
+  parentRunId: string,
+  callId: string,
+  parentCauseEventId: string
+): string =>
+  identity(
+    "AbandonChild",
+    tenantId,
+    parentRunId,
+    callId,
+    parentCauseEventId
+  )
+
+/**
+ * Returns the durable identity of a permanent child-start failure.
+ *
+ * @category constructors
+ * @since 4.0.0
+ */
+export const childStartFailedEventId = (
+  tenantId: string,
+  parentRunId: string,
+  callId: string,
+  startRequestId: string
+): string =>
+  identity(
+    "ChildStartFailed",
+    tenantId,
+    parentRunId,
+    callId,
+    startRequestId
+  )
+
+const ChildDepth = Schema.Int.check(
+  Schema.isGreaterThanOrEqualTo(1),
+  Schema.isLessThanOrEqualTo(MaximumLineageDepth)
+).annotate({ identifier: "WorkflowChildV3Depth" })
+
+const AncestorDepth = Schema.Int.check(
+  Schema.isGreaterThanOrEqualTo(0),
+  Schema.isLessThanOrEqualTo(MaximumLineageDepth - 1)
+).annotate({ identifier: "WorkflowChildV3AncestorDepth" })
+
+/**
+ * A digest pin for an encoded child input or output contract.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const ContractDigest = Wire.Sha256Digest.pipe(
+  Schema.brand("@effect/workflow-builder/ChildWorkflowV3/ContractDigest")
+).annotate({ identifier: "WorkflowChildV3ContractDigest" })
+
+/**
+ * The decoded type of {@link ContractDigest}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type ContractDigest = Schema.Schema.Type<typeof ContractDigest>
+
+/**
+ * A parent-close action whose exact meaning is pinned into a child target.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const ChildCloseAction = Schema.Literals([
+  "CancelAndWait",
+  "RequestCancel",
+  "Abandon"
+]).annotate({ identifier: "WorkflowChildV3CloseAction" })
+
+/**
+ * The decoded type of {@link ChildCloseAction}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type ChildCloseAction = Schema.Schema.Type<typeof ChildCloseAction>
+
+/**
+ * Immutable close behavior selected independently for failure and cancellation.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const ChildClosePolicy = Schema.Struct({
+  closePolicyVersion: Schema.Literal(3),
+  onParentFailure: ChildCloseAction,
+  onParentCancellation: ChildCloseAction
+}).annotate({
+  identifier: "WorkflowChildV3ClosePolicy",
+  parseOptions: strictParseOptions
+})
+
+/**
+ * The decoded type of {@link ChildClosePolicy}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type ChildClosePolicy = Schema.Schema.Type<typeof ChildClosePolicy>
+
+const PlanPin = Schema.Struct({
+  id: Schema.NonEmptyString,
+  revision: Wire.NonNegativeSafeInt
+}).annotate({
+  identifier: "WorkflowChildV3PlanPin",
+  parseOptions: strictParseOptions
+})
+
+const DefinitionPin = Schema.Struct({
+  id: Schema.NonEmptyString,
+  version: Schema.NonEmptyString,
+  deploymentId: Schema.NonEmptyString
+}).annotate({
+  identifier: "WorkflowChildV3DefinitionPin",
+  parseOptions: strictParseOptions
+})
+
+const ChildTargetPinStruct = Schema.Struct({
+  targetVersion: Schema.Literal(3),
+  artifactVersion: Schema.Literal(3),
+  executionProtocolVersion: Schema.Literal(ExecutionProtocolVersion),
+  artifactDigest: Wire.ArtifactDigest,
+  plan: PlanPin,
+  compilerSemanticVersion: Schema.Literal("2"),
+  compiledFingerprint: Wire.CompiledFingerprint,
+  definition: DefinitionPin,
+  workflowIdentity: Schema.NonEmptyString,
+  inputContractDigest: ContractDigest,
+  outputContractDigest: ContractDigest,
+  closePolicy: ChildClosePolicy,
+  recursionPolicy: Schema.Literal("Forbid"),
+  maxLineageDepth: ChildDepth
+}).annotate({
+  identifier: "WorkflowChildV3TargetPinStruct",
+  parseOptions: strictParseOptions
+})
+
+/**
+ * Exact content, compiler, deployment, contract, and close-policy pins for one
+ * protocol version `3` child workflow target.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const ChildTargetPin = ChildTargetPinStruct.annotate({
+  identifier: "WorkflowChildV3TargetPin",
+  parseOptions: strictParseOptions
+})
+
+/**
+ * The decoded type of {@link ChildTargetPin}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type ChildTargetPin = Schema.Schema.Type<typeof ChildTargetPin>
+
+/**
+ * One immutable root-through-parent entry carried into a child start.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const LineageEntry = Schema.Struct({
+  lineageEntryVersion: Schema.Literal(3),
+  depth: AncestorDepth,
+  tenantId: Schema.NonEmptyString,
+  runId: Schema.NonEmptyString,
+  artifactDigest: Wire.ArtifactDigest,
+  workflowIdentity: Schema.NonEmptyString
+}).annotate({
+  identifier: "WorkflowChildV3LineageEntry",
+  parseOptions: strictParseOptions
+})
+
+/**
+ * The decoded type of {@link LineageEntry}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type LineageEntry = Schema.Schema.Type<typeof LineageEntry>
+
+/**
+ * A bounded root-through-parent ancestry snapshot.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const Ancestry = Schema.Array(LineageEntry).check(
+  Schema.isMinLength(1),
+  Schema.isMaxLength(MaximumLineageDepth)
+).annotate({
+  identifier: "WorkflowChildV3Ancestry",
+  parseOptions: strictParseOptions
+})
+
+/**
+ * The decoded type of {@link Ancestry}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type Ancestry = Schema.Schema.Type<typeof Ancestry>
+
+const ParentRunLinkStruct = Schema.Struct({
+  parentLinkVersion: Schema.Literal(3),
+  tenantId: Schema.NonEmptyString,
+  parentRunId: Schema.NonEmptyString,
+  parentArtifactDigest: Wire.ArtifactDigest,
+  parentWorkflowIdentity: Schema.NonEmptyString,
+  callId: Schema.NonEmptyString,
+  nodeId: Schema.NonEmptyString,
+  nodeInstanceId: Schema.NonEmptyString,
+  scheduleEventId: Schema.NonEmptyString,
+  rootRunId: Schema.NonEmptyString,
+  lineageDepth: ChildDepth,
+  ancestry: Ancestry
+}).annotate({
+  identifier: "WorkflowChildV3ParentRunLinkStruct",
+  parseOptions: strictParseOptions
+})
+
+type ParentRunLinkStruct = Schema.Schema.Type<typeof ParentRunLinkStruct>
+
+/**
+ * Stable pure-validation failure codes for child workflow foundations.
+ *
+ * @category constants
+ * @since 4.0.0
+ */
+export const ValidationCodes = {
+  InvalidSchema: "InvalidSchema",
+  NonV3ChildTarget: "NonV3ChildTarget",
+  LineageDepthMismatch: "LineageDepthMismatch",
+  LineageEntryDepthMismatch: "LineageEntryDepthMismatch",
+  LineageTenantMismatch: "LineageTenantMismatch",
+  RootRunMismatch: "RootRunMismatch",
+  ParentRunMismatch: "ParentRunMismatch",
+  RepeatedRun: "RepeatedRun",
+  RepeatedArtifact: "RepeatedArtifact",
+  RepeatedWorkflowIdentity: "RepeatedWorkflowIdentity",
+  TargetDepthLimitExceeded: "TargetDepthLimitExceeded",
+  IdentityMismatch: "IdentityMismatch"
+} as const
+
+/**
+ * A stable child workflow validation failure code.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type ValidationCode = typeof ValidationCodes[keyof typeof ValidationCodes]
+
+const ValidationCode = Schema.Literals([
+  ValidationCodes.InvalidSchema,
+  ValidationCodes.NonV3ChildTarget,
+  ValidationCodes.LineageDepthMismatch,
+  ValidationCodes.LineageEntryDepthMismatch,
+  ValidationCodes.LineageTenantMismatch,
+  ValidationCodes.RootRunMismatch,
+  ValidationCodes.ParentRunMismatch,
+  ValidationCodes.RepeatedRun,
+  ValidationCodes.RepeatedArtifact,
+  ValidationCodes.RepeatedWorkflowIdentity,
+  ValidationCodes.TargetDepthLimitExceeded,
+  ValidationCodes.IdentityMismatch
+])
+
+const ValidationPath = Schema.Array(Schema.Union([
+  Schema.String,
+  Wire.NonNegativeSafeInt
+]))
+
+/**
+ * Raised when detached child workflow protocol data is structurally or
+ * relationally invalid.
+ *
+ * @category errors
+ * @since 4.0.0
+ */
+export class ChildWorkflowValidationError extends Schema.TaggedErrorClass<
+  ChildWorkflowValidationError
+>("@effect/workflow-builder/ChildWorkflowV3/ValidationError")(
+  "ChildWorkflowValidationError",
+  {
+    code: ValidationCode,
+    message: Schema.NonEmptyString,
+    path: ValidationPath
+  },
+  { parseOptions: strictParseOptions }
+) {}
+
+interface RelationalIssue {
+  readonly code: ValidationCode
+  readonly message: string
+  readonly path: ReadonlyArray<string | number>
+}
+
+const issue = (
+  code: ValidationCode,
+  message: string,
+  path: ReadonlyArray<string | number>
+): RelationalIssue => ({ code, message, path })
+
+const toFilterIssue = (
+  relationalIssue: RelationalIssue
+): Schema.FilterIssue => ({
+  path: [...relationalIssue.path],
+  issue: relationalIssue.message
+})
+
+const parentLinkIssues = (
+  link: ParentRunLinkStruct
+): ReadonlyArray<RelationalIssue> => {
+  const issues: Array<RelationalIssue> = []
+  if (link.lineageDepth !== link.ancestry.length) {
+    issues.push(issue(
+      ValidationCodes.LineageDepthMismatch,
+      "lineageDepth must equal the root-through-parent ancestry length",
+      ["lineageDepth"]
+    ))
+  }
+
+  for (let index = 0; index < link.ancestry.length; index++) {
+    const entry = link.ancestry[index]!
+    if (entry.depth !== index) {
+      issues.push(issue(
+        ValidationCodes.LineageEntryDepthMismatch,
+        "each ancestry entry depth must equal its zero-based position",
+        ["ancestry", index, "depth"]
+      ))
+    }
+    if (entry.tenantId !== link.tenantId) {
+      issues.push(issue(
+        ValidationCodes.LineageTenantMismatch,
+        "every ancestry entry must belong to the parent-link tenant",
+        ["ancestry", index, "tenantId"]
+      ))
+    }
+  }
+
+  const root = link.ancestry[0]
+  if (root !== undefined && root.runId !== link.rootRunId) {
+    issues.push(issue(
+      ValidationCodes.RootRunMismatch,
+      "rootRunId must equal the first ancestry run identifier",
+      ["rootRunId"]
+    ))
+  }
+
+  const parent = link.ancestry[link.ancestry.length - 1]
+  if (
+    parent !== undefined &&
+    (
+      parent.runId !== link.parentRunId ||
+      parent.artifactDigest !== link.parentArtifactDigest ||
+      parent.workflowIdentity !== link.parentWorkflowIdentity
+    )
+  ) {
+    issues.push(issue(
+      ValidationCodes.ParentRunMismatch,
+      "the last ancestry entry must exactly identify the parent run",
+      ["ancestry", link.ancestry.length - 1]
+    ))
+  }
+
+  const seenRuns = new Set<string>()
+  const seenArtifacts = new Set<string>()
+  const seenWorkflowIdentities = new Set<string>()
+  for (let index = 0; index < link.ancestry.length; index++) {
+    const entry = link.ancestry[index]!
+    if (seenRuns.has(entry.runId)) {
+      issues.push(issue(
+        ValidationCodes.RepeatedRun,
+        "ancestry must not repeat a run identifier",
+        ["ancestry", index, "runId"]
+      ))
+    }
+    if (seenArtifacts.has(entry.artifactDigest)) {
+      issues.push(issue(
+        ValidationCodes.RepeatedArtifact,
+        "recursion-forbidden ancestry must not repeat an artifact digest",
+        ["ancestry", index, "artifactDigest"]
+      ))
+    }
+    if (seenWorkflowIdentities.has(entry.workflowIdentity)) {
+      issues.push(issue(
+        ValidationCodes.RepeatedWorkflowIdentity,
+        "recursion-forbidden ancestry must not repeat a workflow identity",
+        ["ancestry", index, "workflowIdentity"]
+      ))
+    }
+    seenRuns.add(entry.runId)
+    seenArtifacts.add(entry.artifactDigest)
+    seenWorkflowIdentities.add(entry.workflowIdentity)
+  }
+
+  const expectedCallId = childCallId(
+    link.tenantId,
+    link.parentRunId,
+    link.nodeInstanceId
+  )
+  if (link.callId !== expectedCallId) {
+    issues.push(issue(
+      ValidationCodes.IdentityMismatch,
+      "callId must equal the canonical child-call identity",
+      ["callId"]
+    ))
+  }
+  const expectedScheduleEventId = scheduleChildCommandId(
+    link.tenantId,
+    link.parentRunId,
+    link.callId
+  )
+  if (link.scheduleEventId !== expectedScheduleEventId) {
+    issues.push(issue(
+      ValidationCodes.IdentityMismatch,
+      "scheduleEventId must equal the canonical schedule identity",
+      ["scheduleEventId"]
+    ))
+  }
+  return issues
+}
+
+/**
+ * Immutable, same-tenant, root-through-parent relation carried by a child run.
+ *
+ * **Details**
+ *
+ * The ancestry includes the parent as its final entry. Its length must equal
+ * the prospective child's depth. Direct schema decoding and pure validation
+ * both enforce canonical call and schedule identities.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const ParentRunLink = ParentRunLinkStruct.check(
+  Schema.makeFilter((link) => parentLinkIssues(link).map(toFilterIssue))
+).annotate({
+  identifier: "WorkflowChildV3ParentRunLink",
+  parseOptions: strictParseOptions
+})
+
+/**
+ * The decoded type of {@link ParentRunLink}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type ParentRunLink = Schema.Schema.Type<typeof ParentRunLink>
+
+const ChildRelationStruct = Schema.Struct({
+  relationVersion: Schema.Literal(3),
+  parent: ParentRunLinkStruct,
+  target: ChildTargetPinStruct,
+  childRunId: Schema.NonEmptyString,
+  startRequestId: Schema.NonEmptyString,
+  scheduleCommandId: Schema.NonEmptyString
+}).annotate({
+  identifier: "WorkflowChildV3RelationStruct",
+  parseOptions: strictParseOptions
+})
+
+type ChildRelationStruct = Schema.Schema.Type<typeof ChildRelationStruct>
+
+const relationIssues = (
+  relation: ChildRelationStruct
+): ReadonlyArray<RelationalIssue> => {
+  const issues = [...parentLinkIssues(relation.parent)]
+  const parent = relation.parent
+  const target = relation.target
+
+  if (parent.lineageDepth > target.maxLineageDepth) {
+    issues.push(issue(
+      ValidationCodes.TargetDepthLimitExceeded,
+      "child lineage depth must not exceed the target's pinned limit",
+      ["target", "maxLineageDepth"]
+    ))
+  }
+  if (
+    parent.ancestry.some((entry) => entry.artifactDigest === target.artifactDigest)
+  ) {
+    issues.push(issue(
+      ValidationCodes.RepeatedArtifact,
+      "a recursion-forbidden child target must not repeat an ancestor artifact",
+      ["target", "artifactDigest"]
+    ))
+  }
+  if (
+    parent.ancestry.some((entry) => entry.workflowIdentity === target.workflowIdentity)
+  ) {
+    issues.push(issue(
+      ValidationCodes.RepeatedWorkflowIdentity,
+      "a recursion-forbidden child target must not repeat an ancestor workflow identity",
+      ["target", "workflowIdentity"]
+    ))
+  }
+
+  const expectedChildRunId = childRunId(
+    parent.tenantId,
+    parent.parentRunId,
+    parent.callId
+  )
+  if (relation.childRunId !== expectedChildRunId) {
+    issues.push(issue(
+      ValidationCodes.IdentityMismatch,
+      "childRunId must equal the canonical child-run identity",
+      ["childRunId"]
+    ))
+  }
+  const expectedStartRequestId = childStartRequestId(
+    parent.tenantId,
+    parent.parentRunId,
+    parent.callId
+  )
+  if (relation.startRequestId !== expectedStartRequestId) {
+    issues.push(issue(
+      ValidationCodes.IdentityMismatch,
+      "startRequestId must equal the canonical child-start request identity",
+      ["startRequestId"]
+    ))
+  }
+  const expectedScheduleCommandId = scheduleChildCommandId(
+    parent.tenantId,
+    parent.parentRunId,
+    parent.callId
+  )
+  if (
+    relation.scheduleCommandId !== expectedScheduleCommandId ||
+    relation.scheduleCommandId !== parent.scheduleEventId
+  ) {
+    issues.push(issue(
+      ValidationCodes.IdentityMismatch,
+      "scheduleCommandId must equal the canonical shared schedule identity",
+      ["scheduleCommandId"]
+    ))
+  }
+  return issues
+}
+
+/**
+ * Deterministic immutable coordinates and exact target pins for one child call.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const ChildRelation = ChildRelationStruct.check(
+  Schema.makeFilter((relation) => relationIssues(relation).map(toFilterIssue))
+).annotate({
+  identifier: "WorkflowChildV3Relation",
+  parseOptions: strictParseOptions
+})
+
+/**
+ * The decoded type of {@link ChildRelation}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type ChildRelation = Schema.Schema.Type<typeof ChildRelation>
+
+const ScheduledPhase = Schema.TaggedStruct("Scheduled", {}).annotate({
+  identifier: "WorkflowChildV3ScheduledPhase",
+  parseOptions: strictParseOptions
+})
+
+const RunningPhase = Schema.TaggedStruct("Running", {
+  childRunStartedEventId: Schema.NonEmptyString,
+  startProjectionEventId: Schema.NonEmptyString
+}).annotate({
+  identifier: "WorkflowChildV3RunningPhase",
+  parseOptions: strictParseOptions
+})
+
+const StartFailedPhase = Schema.TaggedStruct("StartFailed", {
+  startFailedEventId: Schema.NonEmptyString
+}).annotate({
+  identifier: "WorkflowChildV3StartFailedPhase",
+  parseOptions: strictParseOptions
+})
+
+const CancellationRequestedPhase = Schema.TaggedStruct("CancellationRequested", {
+  parentCauseEventId: Schema.NonEmptyString,
+  cancellationCommandId: Schema.NonEmptyString
+}).annotate({
+  identifier: "WorkflowChildV3CancellationRequestedPhase",
+  parseOptions: strictParseOptions
+})
+
+const CancellationAcceptedPhase = Schema.TaggedStruct("CancellationAccepted", {
+  parentCauseEventId: Schema.NonEmptyString,
+  cancellationCommandId: Schema.NonEmptyString,
+  childCancellationEventId: Schema.NonEmptyString,
+  acceptedEventId: Schema.NonEmptyString
+}).annotate({
+  identifier: "WorkflowChildV3CancellationAcceptedPhase",
+  parseOptions: strictParseOptions
+})
+
+const SucceededPhase = Schema.TaggedStruct("Succeeded", {
+  childTerminalEventId: Schema.NonEmptyString,
+  terminalProjectionEventId: Schema.NonEmptyString
+}).annotate({
+  identifier: "WorkflowChildV3SucceededPhase",
+  parseOptions: strictParseOptions
+})
+
+const FailedPhase = Schema.TaggedStruct("Failed", {
+  childTerminalEventId: Schema.NonEmptyString,
+  terminalProjectionEventId: Schema.NonEmptyString
+}).annotate({
+  identifier: "WorkflowChildV3FailedPhase",
+  parseOptions: strictParseOptions
+})
+
+const CancelledPhase = Schema.TaggedStruct("Cancelled", {
+  childTerminalEventId: Schema.NonEmptyString,
+  terminalProjectionEventId: Schema.NonEmptyString
+}).annotate({
+  identifier: "WorkflowChildV3CancelledPhase",
+  parseOptions: strictParseOptions
+})
+
+const CancelledBeforeStartPhase = Schema.TaggedStruct("CancelledBeforeStart", {
+  parentCauseEventId: Schema.NonEmptyString,
+  cancelledBeforeStartEventId: Schema.NonEmptyString
+}).annotate({
+  identifier: "WorkflowChildV3CancelledBeforeStartPhase",
+  parseOptions: strictParseOptions
+})
+
+const AbandonedPhase = Schema.TaggedStruct("Abandoned", {
+  parentCauseEventId: Schema.NonEmptyString,
+  abandonEventId: Schema.NonEmptyString
+}).annotate({
+  identifier: "WorkflowChildV3AbandonedPhase",
+  parseOptions: strictParseOptions
+})
+
+/**
+ * Closed protocol version `3` child-call lifecycle phases.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const ChildCallPhase = Schema.Union([
+  ScheduledPhase,
+  RunningPhase,
+  StartFailedPhase,
+  CancellationRequestedPhase,
+  CancellationAcceptedPhase,
+  SucceededPhase,
+  FailedPhase,
+  CancelledPhase,
+  CancelledBeforeStartPhase,
+  AbandonedPhase
+]).annotate({
+  identifier: "WorkflowChildV3CallPhase",
+  parseOptions: strictParseOptions
+})
+
+/**
+ * The decoded type of {@link ChildCallPhase}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type ChildCallPhase = Schema.Schema.Type<typeof ChildCallPhase>
+
+const ChildCallStateStruct = Schema.Struct({
+  callStateVersion: Schema.Literal(3),
+  relation: ChildRelationStruct,
+  phase: ChildCallPhase
+}).annotate({
+  identifier: "WorkflowChildV3CallStateStruct",
+  parseOptions: strictParseOptions
+})
+
+type ChildCallStateStruct = Schema.Schema.Type<typeof ChildCallStateStruct>
+
+const stateIssues = (
+  state: ChildCallStateStruct
+): ReadonlyArray<RelationalIssue> => {
+  const issues = [...relationIssues(state.relation)]
+  const parent = state.relation.parent
+  const phase = state.phase
+  const coordinates = [
+    parent.tenantId,
+    parent.parentRunId,
+    parent.callId
+  ] as const
+
+  switch (phase._tag) {
+    case "Scheduled": {
+      break
+    }
+    case "Running": {
+      const expected = childStartProjectionEventId(
+        ...coordinates,
+        phase.childRunStartedEventId
+      )
+      if (phase.startProjectionEventId !== expected) {
+        issues.push(issue(
+          ValidationCodes.IdentityMismatch,
+          "startProjectionEventId must name the canonical child-start projection",
+          ["phase", "startProjectionEventId"]
+        ))
+      }
+      break
+    }
+    case "StartFailed": {
+      const expected = childStartFailedEventId(
+        ...coordinates,
+        state.relation.startRequestId
+      )
+      if (phase.startFailedEventId !== expected) {
+        issues.push(issue(
+          ValidationCodes.IdentityMismatch,
+          "startFailedEventId must name the canonical child-start failure",
+          ["phase", "startFailedEventId"]
+        ))
+      }
+      break
+    }
+    case "CancellationRequested": {
+      const expected = requestChildCancellationCommandId(
+        ...coordinates,
+        phase.parentCauseEventId
+      )
+      if (phase.cancellationCommandId !== expected) {
+        issues.push(issue(
+          ValidationCodes.IdentityMismatch,
+          "cancellationCommandId must name the canonical cancellation request",
+          ["phase", "cancellationCommandId"]
+        ))
+      }
+      break
+    }
+    case "CancellationAccepted": {
+      const expectedCommand = requestChildCancellationCommandId(
+        ...coordinates,
+        phase.parentCauseEventId
+      )
+      if (phase.cancellationCommandId !== expectedCommand) {
+        issues.push(issue(
+          ValidationCodes.IdentityMismatch,
+          "cancellationCommandId must name the canonical cancellation request",
+          ["phase", "cancellationCommandId"]
+        ))
+      }
+      const expectedAccepted = childCancellationAcceptedEventId(
+        ...coordinates,
+        phase.childCancellationEventId
+      )
+      if (phase.acceptedEventId !== expectedAccepted) {
+        issues.push(issue(
+          ValidationCodes.IdentityMismatch,
+          "acceptedEventId must name the canonical cancellation acknowledgement",
+          ["phase", "acceptedEventId"]
+        ))
+      }
+      break
+    }
+    case "Succeeded":
+    case "Failed":
+    case "Cancelled": {
+      const expected = childTerminalProjectionEventId(
+        ...coordinates,
+        phase.childTerminalEventId
+      )
+      if (phase.terminalProjectionEventId !== expected) {
+        issues.push(issue(
+          ValidationCodes.IdentityMismatch,
+          "terminalProjectionEventId must name the canonical terminal projection",
+          ["phase", "terminalProjectionEventId"]
+        ))
+      }
+      break
+    }
+    case "CancelledBeforeStart": {
+      const expected = childCancelledBeforeStartEventId(
+        ...coordinates,
+        phase.parentCauseEventId
+      )
+      if (phase.cancelledBeforeStartEventId !== expected) {
+        issues.push(issue(
+          ValidationCodes.IdentityMismatch,
+          "cancelledBeforeStartEventId must name the canonical pre-start close",
+          ["phase", "cancelledBeforeStartEventId"]
+        ))
+      }
+      break
+    }
+    case "Abandoned": {
+      const expected = abandonChildEventId(
+        ...coordinates,
+        phase.parentCauseEventId
+      )
+      if (phase.abandonEventId !== expected) {
+        issues.push(issue(
+          ValidationCodes.IdentityMismatch,
+          "abandonEventId must name the canonical abandon fact",
+          ["phase", "abandonEventId"]
+        ))
+      }
+      break
+    }
+  }
+  return issues
+}
+
+/**
+ * One immutable deterministic child relation and its closed lifecycle phase.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const ChildCallState = ChildCallStateStruct.check(
+  Schema.makeFilter((state) => stateIssues(state).map(toFilterIssue))
+).annotate({
+  identifier: "WorkflowChildV3CallState",
+  parseOptions: strictParseOptions
+})
+
+/**
+ * The decoded type of {@link ChildCallState}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type ChildCallState = Schema.Schema.Type<typeof ChildCallState>
+
+const validationError = (
+  relationalIssue: RelationalIssue
+): ChildWorkflowValidationError =>
+  new ChildWorkflowValidationError({
+    code: relationalIssue.code,
+    message: relationalIssue.message,
+    path: [...relationalIssue.path]
+  })
+
+const snapshotInput = (
+  input: unknown,
+  label: string
+): Result.Result<Schema.Json, ChildWorkflowValidationError> => {
+  const snapshot = Json.snapshot(input)
+  if (Result.isFailure(snapshot)) {
+    return Result.fail(
+      new ChildWorkflowValidationError({
+        code: ValidationCodes.InvalidSchema,
+        message: `${label} must be strict JSON: ${snapshot.failure.message}`,
+        path: [...snapshot.failure.path]
+      })
+    )
+  }
+  return Result.succeed(snapshot.success)
+}
+
+const decodeSnapshot = <A>(
+  snapshot: Schema.Json,
+  decode: (input: unknown) => Result.Result<A, unknown>,
+  label: string
+): Result.Result<A, ChildWorkflowValidationError> => {
+  let decoded: Result.Result<A, unknown>
+  try {
+    decoded = decode(snapshot)
+  } catch {
+    return Result.fail(
+      new ChildWorkflowValidationError({
+        code: ValidationCodes.InvalidSchema,
+        message: `${label} schema validation threw unexpectedly`,
+        path: []
+      })
+    )
+  }
+  if (Result.isFailure(decoded)) {
+    const parseError = decoded.failure
+    const message = typeof parseError === "object" &&
+        parseError !== null &&
+        "message" in parseError &&
+        typeof parseError.message === "string"
+      ? parseError.message
+      : String(parseError)
+    return Result.fail(
+      new ChildWorkflowValidationError({
+        code: ValidationCodes.InvalidSchema,
+        message: `Invalid ${label}: ${message}`,
+        path: []
+      })
+    )
+  }
+  return Result.succeed(snapshot as unknown as A)
+}
+
+const jsonObject = (
+  value: Schema.Json
+): Schema.JsonObject | undefined =>
+  typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Schema.JsonObject
+    : undefined
+
+const nonV3TargetIssue = (
+  value: Schema.Json,
+  prefix: ReadonlyArray<string | number> = []
+): RelationalIssue | undefined => {
+  const target = jsonObject(value)
+  if (target === undefined) {
+    return undefined
+  }
+  const selectors: ReadonlyArray<readonly [string, Schema.Json]> = [
+    ["targetVersion", 3],
+    ["artifactVersion", 3],
+    ["executionProtocolVersion", ExecutionProtocolVersion],
+    ["compilerSemanticVersion", "2"]
+  ]
+  for (const [key, expected] of selectors) {
+    if (key in target && target[key] !== expected) {
+      return issue(
+        ValidationCodes.NonV3ChildTarget,
+        `${key} must select the protocol version 3 child target contract`,
+        [...prefix, key]
+      )
+    }
+  }
+  return undefined
+}
+
+const decodeChildTargetPin = Schema.decodeUnknownResult(
+  ChildTargetPinStruct,
+  strictParseOptions
+)
+const decodeParentRunLink = Schema.decodeUnknownResult(
+  ParentRunLinkStruct,
+  strictParseOptions
+)
+const decodeChildRelation = Schema.decodeUnknownResult(
+  ChildRelationStruct,
+  strictParseOptions
+)
+const decodeChildCallState = Schema.decodeUnknownResult(
+  ChildCallStateStruct,
+  strictParseOptions
+)
+
+/**
+ * Detaches, recursively freezes, and validates one exact V3 child target pin.
+ *
+ * @category validation
+ * @since 4.0.0
+ */
+export const validateChildTargetPin = (
+  input: unknown
+): Result.Result<ChildTargetPin, ChildWorkflowValidationError> => {
+  const snapshot = snapshotInput(input, "child target pin")
+  if (Result.isFailure(snapshot)) {
+    return Result.fail(snapshot.failure)
+  }
+  const versionIssue = nonV3TargetIssue(snapshot.success)
+  if (versionIssue !== undefined) {
+    return Result.fail(validationError(versionIssue))
+  }
+  return decodeSnapshot(
+    snapshot.success,
+    decodeChildTargetPin,
+    "child target pin"
+  )
+}
+
+/**
+ * Detaches, recursively freezes, and validates one parent lineage link.
+ *
+ * @category validation
+ * @since 4.0.0
+ */
+export const validateParentRunLink = (
+  input: unknown
+): Result.Result<ParentRunLink, ChildWorkflowValidationError> => {
+  const snapshot = snapshotInput(input, "parent run link")
+  if (Result.isFailure(snapshot)) {
+    return Result.fail(snapshot.failure)
+  }
+  const decoded = decodeSnapshot(
+    snapshot.success,
+    decodeParentRunLink,
+    "parent run link"
+  )
+  if (Result.isFailure(decoded)) {
+    return decoded
+  }
+  const relationalIssue = parentLinkIssues(decoded.success)[0]
+  return relationalIssue === undefined
+    ? Result.succeed(decoded.success as ParentRunLink)
+    : Result.fail(validationError(relationalIssue))
+}
+
+/**
+ * Detaches, recursively freezes, and validates one deterministic child
+ * relation, including ancestry recursion and target-depth checks.
+ *
+ * @category validation
+ * @since 4.0.0
+ */
+export const validateChildRelation = (
+  input: unknown
+): Result.Result<ChildRelation, ChildWorkflowValidationError> => {
+  const snapshot = snapshotInput(input, "child relation")
+  if (Result.isFailure(snapshot)) {
+    return Result.fail(snapshot.failure)
+  }
+  const relationObject = jsonObject(snapshot.success)
+  const target = relationObject === undefined
+    ? undefined
+    : relationObject.target
+  if (target !== undefined) {
+    const versionIssue = nonV3TargetIssue(target, ["target"])
+    if (versionIssue !== undefined) {
+      return Result.fail(validationError(versionIssue))
+    }
+  }
+  const decoded = decodeSnapshot(
+    snapshot.success,
+    decodeChildRelation,
+    "child relation"
+  )
+  if (Result.isFailure(decoded)) {
+    return decoded
+  }
+  const relationalIssue = relationIssues(decoded.success)[0]
+  return relationalIssue === undefined
+    ? Result.succeed(decoded.success as ChildRelation)
+    : Result.fail(validationError(relationalIssue))
+}
+
+/**
+ * Detaches, recursively freezes, and validates one deterministic child-call
+ * state, including all phase-specific canonical identities.
+ *
+ * @category validation
+ * @since 4.0.0
+ */
+export const validateChildCallState = (
+  input: unknown
+): Result.Result<ChildCallState, ChildWorkflowValidationError> => {
+  const snapshot = snapshotInput(input, "child call state")
+  if (Result.isFailure(snapshot)) {
+    return Result.fail(snapshot.failure)
+  }
+  const stateObject = jsonObject(snapshot.success)
+  const relation = stateObject === undefined
+    ? undefined
+    : jsonObject(stateObject.relation)
+  const target = relation === undefined ? undefined : relation.target
+  if (target !== undefined) {
+    const versionIssue = nonV3TargetIssue(
+      target,
+      ["relation", "target"]
+    )
+    if (versionIssue !== undefined) {
+      return Result.fail(validationError(versionIssue))
+    }
+  }
+  const decoded = decodeSnapshot(
+    snapshot.success,
+    decodeChildCallState,
+    "child call state"
+  )
+  if (Result.isFailure(decoded)) {
+    return decoded
+  }
+  const relationalIssue = stateIssues(decoded.success)[0]
+  return relationalIssue === undefined
+    ? Result.succeed(decoded.success as ChildCallState)
+    : Result.fail(validationError(relationalIssue))
+}

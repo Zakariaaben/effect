@@ -1,0 +1,77 @@
+{
+  "name": "@effect/workflow-builder",
+  "type": "module",
+  "version": "4.0.0-beta.100",
+  "license": "MIT",
+  "description": "A typed, UI-agnostic workflow plan compiler and execution engine for Effect",
+  "homepage": "https://effect.website",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Effect-TS/effect.git",
+    "directory": "packages/workflow-builder"
+  },
+  "bugs": {
+    "url": "https://github.com/Effect-TS/effect/issues"
+  },
+  "keywords": [
+    "effect",
+    "workflow",
+    "orchestration",
+    "bpmn",
+    "business-process-management",
+    "dag",
+    "typescript",
+    "durable-execution"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "sideEffects": [],
+  "exports": {
+    "./package.json": "./package.json",
+    ".": "./src/index.ts",
+    "./*": "./src/*.ts",
+    "./internal/*": null,
+    "./*/index": null
+  },
+  "files": [
+    "conformance/**/*.json",
+    "DESIGN.md",
+    "STANDARDS.md",
+    "src/**/*.ts",
+    "examples/**/*.ts",
+    "dist/**/*.js",
+    "dist/**/*.js.map",
+    "dist/**/*.d.ts",
+    "dist/**/*.d.ts.map"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true,
+    "exports": {
+      "./package.json": "./package.json",
+      ".": "./dist/index.js",
+      "./*": "./dist/*.js",
+      "./internal/*": null,
+      "./*/index": null
+    }
+  },
+  "scripts": {
+    "codegen": "effect-utils codegen",
+    "build": "tsc -b tsconfig.json && pnpm babel",
+    "babel": "babel dist --plugins annotate-pure-calls --out-dir dist --source-maps",
+    "check": "tsc -b tsconfig.json",
+    "check-examples": "tsc -p tsconfig.examples.json",
+    "test": "vitest",
+    "coverage": "vitest --coverage"
+  },
+  "peerDependencies": {
+    "effect": "workspace:^"
+  },
+  "dependencies": {
+    "saxes": "^6.0.0"
+  },
+  "devDependencies": {
+    "effect": "workspace:^"
+  }
+}
