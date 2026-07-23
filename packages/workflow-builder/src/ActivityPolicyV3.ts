@@ -299,11 +299,76 @@ export const Jitter = Schema.Union([
  */
 export type Jitter = Schema.Schema.Type<typeof Jitter>
 
+/**
+ * Extracts retry identity from the encoded JSON representation of an Effect
+ * tagged error.
+ *
+ * **Details**
+ *
+ * `_tag` is mandatory. `OptionalString` additionally admits a missing string
+ * `code`; a present non-string or oversized code fails closed. `NoCode`
+ * deliberately ignores any encoded `code` field.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const EffectTaggedFailureIdentity = Schema.TaggedStruct(
+  "EffectTagged",
+  {
+    identityContractVersion: Schema.Literal(1),
+    code: Schema.Literals(["OptionalString", "NoCode"])
+  }
+).annotate({
+  identifier: "WorkflowActivityPolicyV3EffectTaggedFailureIdentity",
+  parseOptions: strictParseOptions
+})
+
+/**
+ * Uses one policy-pinned retry identity for every value of a failure codec.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const ConstantFailureIdentity = Schema.TaggedStruct("Constant", {
+  identityContractVersion: Schema.Literal(1),
+  errorTag: BoundedIdentity,
+  errorCode: Schema.NullOr(BoundedIdentity)
+}).annotate({
+  identifier: "WorkflowActivityPolicyV3ConstantFailureIdentity",
+  parseOptions: strictParseOptions
+})
+
+/**
+ * Closed, declarative strategy for deriving retry identity after the exact
+ * failure codec has encoded a business error.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const FailureIdentityContract = Schema.Union([
+  EffectTaggedFailureIdentity,
+  ConstantFailureIdentity
+]).annotate({
+  identifier: "WorkflowActivityPolicyV3FailureIdentityContract",
+  parseOptions: strictParseOptions
+})
+
+/**
+ * The decoded type of {@link FailureIdentityContract}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type FailureIdentityContract = Schema.Schema.Type<
+  typeof FailureIdentityContract
+>
+
 const RetryPolicyStruct = Schema.Struct({
   retryPolicyVersion: Schema.Literal(3),
   maximumAttempts: Wire.PositiveSafeInt,
   maximumElapsed: ElapsedBudget,
   classifier: RetryClassifierPin,
+  failureIdentity: FailureIdentityContract,
   nonRetryableErrorTags: NonRetryableIdentities,
   nonRetryableErrorCodes: NonRetryableIdentities,
   backoff: Backoff,
@@ -1178,6 +1243,281 @@ export const FailureIdentity = Schema.Struct({
  * @since 4.0.0
  */
 export type FailureIdentity = Schema.Schema.Type<typeof FailureIdentity>
+
+const decodeFailureIdentityValue = Schema.decodeUnknownResult(
+  FailureIdentity,
+  strictParseOptions
+)
+
+const decodeFailureIdentityContract = Schema.decodeUnknownResult(
+  FailureIdentityContract,
+  strictParseOptions
+)
+
+/**
+ * Derives one portable retry identity from an exact policy contract and the
+ * JSON value produced by the node's pinned failure codec.
+ *
+ * **Details**
+ *
+ * The encoded value is detached through the strict JSON boundary before any
+ * field is inspected, so accessors, proxies, symbols, exotic prototypes, and
+ * unbounded values cannot participate in identity extraction.
+ *
+ * @category evaluation
+ * @since 4.0.0
+ */
+export const extractFailureIdentity = (
+  contractInput: unknown,
+  encodedFailureInput: unknown
+): Result.Result<FailureIdentity, PolicyEvaluationError> => {
+  const contractSnapshot = Json.snapshot(contractInput)
+  if (Result.isFailure(contractSnapshot)) {
+    return Result.fail(evaluationError(
+      EvaluationCodes.InvalidFailureIdentity,
+      `Failure identity contract must be bounded strict JSON: ${contractSnapshot.failure.message}`,
+      contractSnapshot.failure.path
+    ))
+  }
+  let contract: ReturnType<typeof decodeFailureIdentityContract>
+  try {
+    contract = decodeFailureIdentityContract(contractSnapshot.success)
+  } catch {
+    return Result.fail(evaluationError(
+      EvaluationCodes.InvalidFailureIdentity,
+      "Failure identity contract validation threw unexpectedly",
+      []
+    ))
+  }
+  if (Result.isFailure(contract)) {
+    return Result.fail(evaluationError(
+      EvaluationCodes.InvalidFailureIdentity,
+      `Invalid failure identity contract: ${contract.failure.message}`,
+      []
+    ))
+  }
+
+  const encoded = Json.snapshot(encodedFailureInput)
+  if (Result.isFailure(encoded)) {
+    return Result.fail(evaluationError(
+      EvaluationCodes.InvalidFailureIdentity,
+      `Encoded failure must be bounded strict JSON: ${encoded.failure.message}`,
+      encoded.failure.path
+    ))
+  }
+  let candidate: unknown
+  if (contract.success._tag === "Constant") {
+    candidate = {
+      failureIdentityVersion: 1,
+      errorTag: contract.success.errorTag,
+      errorCode: contract.success.errorCode
+    }
+  } else {
+    const value = encoded.success
+    if (
+      typeof value !== "object" ||
+      value === null ||
+      Array.isArray(value) ||
+      !Object.prototype.hasOwnProperty.call(value, "_tag")
+    ) {
+      return Result.fail(evaluationError(
+        EvaluationCodes.InvalidFailureIdentity,
+        "EffectTagged failure identity requires an encoded JSON object with an own '_tag' field",
+        ["_tag"]
+      ))
+    }
+    const record = value as Record<string, Schema.Json>
+    if (typeof record._tag !== "string") {
+      return Result.fail(evaluationError(
+        EvaluationCodes.InvalidFailureIdentity,
+        "EffectTagged failure '_tag' must be a bounded string",
+        ["_tag"]
+      ))
+    }
+    let errorCode: string | null = null
+    if (
+      contract.success.code === "OptionalString" &&
+      Object.prototype.hasOwnProperty.call(record, "code")
+    ) {
+      if (typeof record.code !== "string") {
+        return Result.fail(evaluationError(
+          EvaluationCodes.InvalidFailureIdentity,
+          "EffectTagged failure 'code' must be a bounded string when present",
+          ["code"]
+        ))
+      }
+      errorCode = record.code
+    }
+    candidate = {
+      failureIdentityVersion: 1,
+      errorTag: record._tag,
+      errorCode
+    }
+  }
+  let identity: ReturnType<typeof decodeFailureIdentityValue>
+  try {
+    identity = decodeFailureIdentityValue(candidate)
+  } catch {
+    return Result.fail(evaluationError(
+      EvaluationCodes.InvalidFailureIdentity,
+      "Derived failure identity validation threw unexpectedly",
+      []
+    ))
+  }
+  return Result.isFailure(identity)
+    ? Result.fail(evaluationError(
+      EvaluationCodes.InvalidFailureIdentity,
+      `Derived failure identity is invalid: ${identity.failure.message}`,
+      []
+    ))
+    : Result.succeed(Object.freeze(identity.success))
+}
+
+/**
+ * One encoded application failure produced by a semantic activity attempt.
+ *
+ * **Details**
+ *
+ * The failure retains the exact failed operation, semantic attempt, portable
+ * identity used by explicit policy overrides, and encoded payload supplied to
+ * the exact artifact-pinned classifier.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const ApplicationFailure = Schema.TaggedStruct(
+  "ApplicationFailure",
+  {
+    failureCauseVersion: Schema.Literal(1),
+    activityDigest: Wire.OperationDigest,
+    attempt: Wire.PositiveSafeInt,
+    identity: FailureIdentity,
+    failure: Wire.EncodedPayload
+  }
+).annotate({
+  identifier: "WorkflowActivityPolicyV3ApplicationFailure",
+  parseOptions: strictParseOptions
+})
+
+/**
+ * The decoded type of {@link ApplicationFailure}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type ApplicationFailure = Schema.Schema.Type<
+  typeof ApplicationFailure
+>
+
+/**
+ * A retry-classifiable timeout of one semantic activity attempt.
+ *
+ * **Details**
+ *
+ * Schedule-to-close and maximum-elapsed deadlines govern the whole logical
+ * activity and are terminal budget outcomes rather than per-attempt
+ * classifier inputs.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const AttemptTimeout = Schema.TaggedStruct("AttemptTimeout", {
+  failureCauseVersion: Schema.Literal(1),
+  activityDigest: Wire.OperationDigest,
+  attempt: Wire.PositiveSafeInt,
+  timeoutKind: Schema.Literals(["ScheduleToStart", "StartToClose"])
+}).annotate({
+  identifier: "WorkflowActivityPolicyV3AttemptTimeout",
+  parseOptions: strictParseOptions
+})
+
+/**
+ * The decoded type of {@link AttemptTimeout}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type AttemptTimeout = Schema.Schema.Type<typeof AttemptTimeout>
+
+/**
+ * Closed failure vocabulary accepted by a retry classifier.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const RetryFailureCause = Schema.Union([
+  ApplicationFailure,
+  AttemptTimeout
+]).annotate({
+  identifier: "WorkflowActivityPolicyV3RetryFailureCause",
+  parseOptions: strictParseOptions
+})
+
+/**
+ * The decoded type of {@link RetryFailureCause}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type RetryFailureCause = Schema.Schema.Type<
+  typeof RetryFailureCause
+>
+
+/**
+ * A classifier decision permitting another semantic attempt.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const Retryable = Schema.TaggedStruct("Retryable", {
+  classificationVersion: Schema.Literal(1)
+}).annotate({
+  identifier: "WorkflowActivityPolicyV3Retryable",
+  parseOptions: strictParseOptions
+})
+
+/**
+ * A classifier decision preventing another semantic attempt.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const NonRetryable = Schema.TaggedStruct("NonRetryable", {
+  classificationVersion: Schema.Literal(1)
+}).annotate({
+  identifier: "WorkflowActivityPolicyV3NonRetryable",
+  parseOptions: strictParseOptions
+})
+
+/**
+ * Closed, infallible result contract for an exact retry classifier.
+ *
+ * **Details**
+ *
+ * Classifier defects and exhausted infrastructure interruption retries remain
+ * policy/runtime failures. They must not be reclassified as application
+ * failures.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const RetryClassification = Schema.Union([
+  Retryable,
+  NonRetryable
+]).annotate({
+  identifier: "WorkflowActivityPolicyV3RetryClassification",
+  parseOptions: strictParseOptions
+})
+
+/**
+ * The decoded type of {@link RetryClassification}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type RetryClassification = Schema.Schema.Type<
+  typeof RetryClassification
+>
 
 /**
  * A policy override that makes a failure non-retryable without executing the

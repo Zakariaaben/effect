@@ -20,6 +20,11 @@ const policy = (): ActivityPolicy.Policy => ({
       classifierVersion: "1.0.0",
       buildDigest: classifierBuildDigest()
     },
+    failureIdentity: {
+      _tag: "EffectTagged",
+      identityContractVersion: 1,
+      code: "OptionalString"
+    },
     nonRetryableErrorTags: [
       "FatalError",
       "ValidationError"
@@ -115,6 +120,14 @@ describe("ActivityPolicyV3", () => {
           ...policy().retry,
           jitter: undefined
         }
+      })
+    )
+    const retryWithoutFailureIdentity = { ...policy().retry }
+    Reflect.deleteProperty(retryWithoutFailureIdentity, "failureIdentity")
+    assert.throws(() =>
+      Schema.decodeUnknownSync(ActivityPolicy.Policy)({
+        ...policy(),
+        retry: retryWithoutFailureIdentity
       })
     )
   })
@@ -617,6 +630,182 @@ describe("ActivityPolicyV3", () => {
     }
   })
 
+  it("derives bounded failure identities only through the policy-pinned contract", () => {
+    const effectTagged = success(ActivityPolicy.extractFailureIdentity(
+      {
+        _tag: "EffectTagged",
+        identityContractVersion: 1,
+        code: "OptionalString"
+      },
+      {
+        _tag: "RemoteError",
+        code: "E_REMOTE",
+        details: { retryAfter: 10 }
+      }
+    ))
+    assert.deepStrictEqual(effectTagged, {
+      failureIdentityVersion: 1,
+      errorTag: "RemoteError",
+      errorCode: "E_REMOTE"
+    })
+    assert.isTrue(Object.isFrozen(effectTagged))
+
+    assert.deepStrictEqual(
+      success(ActivityPolicy.extractFailureIdentity(
+        {
+          _tag: "EffectTagged",
+          identityContractVersion: 1,
+          code: "OptionalString"
+        },
+        { _tag: "WithoutCode" }
+      )),
+      {
+        failureIdentityVersion: 1,
+        errorTag: "WithoutCode",
+        errorCode: null
+      }
+    )
+    assert.deepStrictEqual(
+      success(ActivityPolicy.extractFailureIdentity(
+        {
+          _tag: "EffectTagged",
+          identityContractVersion: 1,
+          code: "NoCode"
+        },
+        {
+          _tag: "IgnoredCode",
+          code: { deliberately: "not-an-identity" }
+        }
+      )),
+      {
+        failureIdentityVersion: 1,
+        errorTag: "IgnoredCode",
+        errorCode: null
+      }
+    )
+    assert.deepStrictEqual(
+      success(ActivityPolicy.extractFailureIdentity(
+        {
+          _tag: "Constant",
+          identityContractVersion: 1,
+          errorTag: "OpaqueFailure",
+          errorCode: "E_OPAQUE"
+        },
+        "the failure codec may encode a scalar"
+      )),
+      {
+        failureIdentityVersion: 1,
+        errorTag: "OpaqueFailure",
+        errorCode: "E_OPAQUE"
+      }
+    )
+
+    const invalidInputs: ReadonlyArray<readonly [unknown, unknown]> = [
+      [
+        {
+          _tag: "EffectTagged",
+          identityContractVersion: 1,
+          code: "OptionalString"
+        },
+        {}
+      ],
+      [
+        {
+          _tag: "EffectTagged",
+          identityContractVersion: 1,
+          code: "OptionalString"
+        },
+        { _tag: 1 }
+      ],
+      [
+        {
+          _tag: "EffectTagged",
+          identityContractVersion: 1,
+          code: "OptionalString"
+        },
+        { _tag: "x".repeat(ActivityPolicy.MaximumIdentityLength + 1) }
+      ],
+      [
+        {
+          _tag: "EffectTagged",
+          identityContractVersion: 1,
+          code: "OptionalString"
+        },
+        { _tag: "RemoteError", code: 500 }
+      ],
+      [
+        {
+          _tag: "EffectTagged",
+          identityContractVersion: 1,
+          code: "OptionalString"
+        },
+        {
+          _tag: "RemoteError",
+          code: "x".repeat(ActivityPolicy.MaximumIdentityLength + 1)
+        }
+      ],
+      [
+        {
+          _tag: "EffectTagged",
+          identityContractVersion: 2,
+          code: "OptionalString"
+        },
+        { _tag: "RemoteError" }
+      ],
+      [
+        {
+          _tag: "Constant",
+          identityContractVersion: 1,
+          errorTag: "OpaqueFailure",
+          errorCode: null,
+          extra: true
+        },
+        null
+      ]
+    ]
+    for (const [contract, encodedFailure] of invalidInputs) {
+      assert.strictEqual(
+        failure(
+          ActivityPolicy.extractFailureIdentity(contract, encodedFailure)
+        ).code,
+        ActivityPolicy.EvaluationCodes.InvalidFailureIdentity
+      )
+    }
+
+    let getterCalls = 0
+    const accessorFailure = Object.defineProperty({}, "_tag", {
+      enumerable: true,
+      get: () => {
+        getterCalls++
+        return "RemoteError"
+      }
+    })
+    assert.strictEqual(
+      failure(ActivityPolicy.extractFailureIdentity(
+        {
+          _tag: "EffectTagged",
+          identityContractVersion: 1,
+          code: "OptionalString"
+        },
+        accessorFailure
+      )).code,
+      ActivityPolicy.EvaluationCodes.InvalidFailureIdentity
+    )
+    const throwingProxy = new Proxy({}, {
+      getPrototypeOf: () => {
+        throw new Error("hostile proxy")
+      }
+    })
+    assert.strictEqual(
+      failure(ActivityPolicy.extractFailureIdentity(
+        throwingProxy,
+        { _tag: "RemoteError" }
+      )).code,
+      ActivityPolicy.EvaluationCodes.InvalidFailureIdentity
+    )
+    assert.strictEqual(getterCalls, 0)
+  })
+
   it("applies explicit non-retryable identities before requiring the pinned classifier", () => {
     const byTag = success(ActivityPolicy.failureDisposition(policy(), {
       failureIdentityVersion: 1,
@@ -650,6 +839,85 @@ describe("ActivityPolicyV3", () => {
       buildDigest: classifierBuildDigest()
     })
     assert.isTrue(Object.isFrozen(classifier))
+  })
+
+  it("defines closed persistable classifier causes and infallible decisions", () => {
+    const applicationFailure = {
+      _tag: "ApplicationFailure" as const,
+      failureCauseVersion: 1 as const,
+      activityDigest: digest("b"),
+      attempt: 2,
+      identity: {
+        failureIdentityVersion: 1 as const,
+        errorTag: "RemoteError",
+        errorCode: "E_REMOTE"
+      },
+      failure: {
+        _tag: "Inline" as const,
+        value: {
+          _tag: "RemoteError",
+          code: "E_REMOTE"
+        }
+      }
+    }
+    assert.deepStrictEqual(
+      Schema.decodeUnknownSync(ActivityPolicy.RetryFailureCause)(
+        applicationFailure
+      ),
+      applicationFailure
+    )
+
+    const timeout = {
+      _tag: "AttemptTimeout" as const,
+      failureCauseVersion: 1 as const,
+      activityDigest: digest("c"),
+      attempt: 2,
+      timeoutKind: "StartToClose" as const
+    }
+    assert.deepStrictEqual(
+      Schema.decodeUnknownSync(ActivityPolicy.RetryFailureCause)(timeout),
+      timeout
+    )
+
+    for (
+      const decision of [
+        {
+          _tag: "Retryable",
+          classificationVersion: 1
+        },
+        {
+          _tag: "NonRetryable",
+          classificationVersion: 1
+        }
+      ]
+    ) {
+      assert.deepStrictEqual(
+        Schema.decodeUnknownSync(ActivityPolicy.RetryClassification)(
+          decision
+        ),
+        decision
+      )
+    }
+
+    assert.throws(() =>
+      Schema.decodeUnknownSync(ActivityPolicy.RetryFailureCause)({
+        ...applicationFailure,
+        uncommitted: true
+      })
+    )
+    assert.throws(() =>
+      Schema.decodeUnknownSync(ActivityPolicy.RetryFailureCause)({
+        ...timeout,
+        timeoutKind: "ScheduleToClose"
+      })
+    )
+    assert.throws(() =>
+      Schema.decodeUnknownSync(ActivityPolicy.RetryClassification)({
+        _tag: "Retryable",
+        classificationVersion: 1,
+        reason: "caller-selected"
+      })
+    )
   })
 
   it("rejects accessors and hostile proxies without invoking property getters", () => {

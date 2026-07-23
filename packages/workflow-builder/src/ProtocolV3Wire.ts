@@ -479,6 +479,42 @@ export const SchemaDigest = Sha256Digest.pipe(
 export type SchemaDigest = Schema.Schema.Type<typeof SchemaDigest>
 
 /**
+ * Content identity of one protocol version `3` dynamic node occurrence.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const OccurrenceDigest = Sha256Digest.pipe(
+  Schema.brand("@effect/workflow-builder/ProtocolV3Wire/OccurrenceDigest")
+).annotate({ identifier: "WorkflowProtocolV3OccurrenceDigest" })
+
+/**
+ * The decoded type of {@link OccurrenceDigest}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type OccurrenceDigest = Schema.Schema.Type<typeof OccurrenceDigest>
+
+/**
+ * Content identity of one protocol version `3` semantic operation descriptor.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const OperationDigest = Sha256Digest.pipe(
+  Schema.brand("@effect/workflow-builder/ProtocolV3Wire/OperationDigest")
+).annotate({ identifier: "WorkflowProtocolV3OperationDigest" })
+
+/**
+ * The decoded type of {@link OperationDigest}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type OperationDigest = Schema.Schema.Type<typeof OperationDigest>
+
+/**
  * Content identity of one protocol version `3` codec-encoded payload.
  *
  * @category schemas

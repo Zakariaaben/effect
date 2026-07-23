@@ -237,6 +237,26 @@ export * as DurableStartV2 from "./DurableStartV2.ts"
 /**
  * @since 4.0.0
  */
+export * as EffectWorkflowBackendV3 from "./EffectWorkflowBackendV3.ts"
+
+/**
+ * @since 4.0.0
+ */
+export * as EffectWorkflowOperationV3 from "./EffectWorkflowOperationV3.ts"
+
+/**
+ * @since 4.0.0
+ */
+export * as EffectWorkflowRetryV3 from "./EffectWorkflowRetryV3.ts"
+
+/**
+ * @since 4.0.0
+ */
+export * as EffectWorkflowSemanticV3 from "./EffectWorkflowSemanticV3.ts"
+
+/**
+ * @since 4.0.0
+ */
 export * as Event from "./Event.ts"
 
 /**
@@ -372,6 +392,9 @@ export * as RunStateV2 from "./RunStateV2.ts"
 /**
  * @since 4.0.0
  */
+export * as SemanticExecutableRegistryV3 from "./SemanticExecutableRegistryV3.ts"
+export * as SemanticOccurrenceV3 from "./SemanticOccurrenceV3.ts"
+export * as SemanticOperationV3 from "./SemanticOperationV3.ts"
 export * as SemanticTime from "./SemanticTime.ts"
 
 /**

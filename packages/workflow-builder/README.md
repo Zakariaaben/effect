@@ -12,6 +12,15 @@ The package separates four concerns deliberately:
 - applications choose an explicit execution backend, including whether durable
   Effect Workflow integration is enabled.
 
+Protocol version `3` is being shaped around a thin native Effect Workflow
+adapter. Workflow Builder owns the portable DAG/BPMN meaning, deterministic
+decisions, exact artifact pins, and business/audit semantics. The injected
+`WorkflowEngine` owns replay, persistence, activities, deferred waits, clocks,
+operational child propagation, interruption, queues, sharding, and failover.
+This package will not implement `WorkflowEngine.Encoded` or clone
+`ClusterWorkflowEngine`; applications select the memory layer for tests or a
+durable engine layer for deployment.
+
 Today the package provides:
 
 - strict Effect Schema wire models for plans and semantic history;
@@ -86,10 +95,68 @@ Today the package provides:
   manifests; canonical relationship validation; fixed-order digest
   verification; process-local verification provenance; read-only store
   contracts; and artifact-derived child targets;
+- a first thin native Effect Workflow host for already-admitted protocol-v3
+  runs, with artifact-versioned native tags, strict detached
+  request/success/failure envelopes, process-local prepared-binding provenance,
+  exact verified-artifact provenance retained inside each semantic execution,
+  collision-free tenant/run idempotency, handler registration, and lifecycle
+  delegation to an injected `WorkflowEngine` without implementing its backend
+  SPI;
+- a bounded protocol-v3 native-operation naming profile that maps exact dynamic
+  occurrence, operation, and timer/deferred generation coordinates to
+  replay-stable names, while semantic activity attempts use Effect's native
+  `Activity.CurrentAttempt`; activity persistence, deferred completion, durable
+  clocks, and nested execution remain Effect Workflow responsibilities.
+  Memory-backed integration tests prove native activity replay, deferred
+  suspension/resume, forced-durable business timers, and parent-child
+  suspension;
+- content-addressed protocol-v3 dynamic occurrences and activity/timer/deferred
+  operation descriptors that commit tenant, run, artifact, node, nested scope
+  activations, attempt/generation, encoded input, duration, owner, and
+  result-schema meaning; activities additionally commit a closed
+  node-handler/classifier/jitter/time-observation purpose and coherent exact
+  artifact-codec, node-output-aggregate, or versioned built-in success/error
+  contracts, while deferred waits pin distinct success/error codecs;
+  process-local provenance and digest re-verification reject structural copies
+  and persisted substitution;
+- an exact process-local protocol-v3 executable registry that resolves an
+  entire verified artifact atomically against build-attested node handlers,
+  codecs, schemas, and retry classifiers, retains each executable's captured
+  Effect context, and admits neither `latest` lookup nor version/build
+  fallback;
+- an initial semantic-to-native mapper that admits one-shot static-DAG
+  occurrences only from an exact semantic execution, records each operation
+  digest through a disjoint native guard activity before execution, rejects
+  same-coordinate descriptor drift during replay, maps semantic attempts to
+  native `Activity.CurrentAttempt`, requires an explicit infrastructure
+  interruption policy, and forces every positive business timer through
+  `DurableClock` with a zero in-memory threshold;
+- authenticated ordered `FirstSettled` and `FirstSuccess` semantic races over
+  exact node activities, durable timers, and pinned deferred generations.
+  Race membership and result contracts are derived rather than caller-supplied;
+  native replay preserves the identified winner, typed failures, and defects.
+  `InterruptWaiters` cancels only the waiting fibers and is not a promise to
+  roll back an external side effect already started by a losing activity;
 - a protocol-v3 activity policy with exact classifier build pins, explicit
-  non-retryable identities, bounded fixed/exponential backoff, deterministic
-  no-jitter or externally recorded jitter ranges, attempt/elapsed budgets, and
-  independent schedule-to-start/start-to-close/schedule-to-close timeouts;
+  non-retryable identities, an explicit policy-pinned mapping from encoded
+  business failures to tag/code identity, bounded fixed/exponential backoff,
+  deterministic no-jitter or replay-recorded jitter ranges, attempt/elapsed
+  budgets, and a closed persistable application-failure/attempt-timeout
+  classifier input plus an infallible retryable/non-retryable result contract,
+  and independent schedule-to-start/start-to-close/schedule-to-close timeout
+  dimensions;
+- a managed protocol-v3 retry facade over native Effect Workflow primitives.
+  Each semantic attempt is one exact build-pinned native activity whose success
+  channel persists a closed success-or-application-failure outcome; only the
+  user handler's typed failure is classified. The facade applies explicit
+  non-retryable identities, the exact classifier, attempt and elapsed admission
+  budgets, replay-recorded internal jitter, and native durable-clock backoff,
+  and returns closed `NonRetryable` or `Exhausted` terminal explanations.
+  Enabled hard activity timeouts are currently rejected rather than emulated:
+  schedule-to-start/start-to-close/schedule-to-close enforcement and
+  cancellation propagation require a later lifecycle milestone, while
+  `maximumElapsed` currently prevents admission of another attempt and does not
+  interrupt one already running;
 - protocol-v3 child-workflow collision-free identities, exact
   artifact/contract/deployment/build and bounded lineage pins,
   inline-or-blob inputs/results, a closed command/event vocabulary, and a pure
@@ -139,16 +206,14 @@ memory execution authorities are intentionally **not a persistent backend**.
 The local runner's dispatch is process-local and non-transactional, while the
 reference authorities lose all history, artifacts, leases, receipts, timers,
 and outbox state on process exit. They specify atomic and race semantics but
-are not a database or broker. Protocol-v2 static-DAG execution is now runnable
-through its process-local authority, but signal admission is still a separate
-process-local transaction. The version `1` reference authority now specifies
-activity cancellation delivery and worker interruption in memory, but it is not
-a persistent cancellation broker and is not integrated into the protocol-v2
-authority. A production adapter still needs persistent transactional storage,
-bounded receipt retention, low-latency durable wakes, integrated
-inbox/timer/outbox commits, cross-process worker and child cancellation
-propagation, checkpoints or streaming replay, and cross-process conformance
-tests.
+are not a database or broker, and they are not a design request to reimplement
+native Effect Workflow against a database. Protocol-v2 static-DAG execution is
+runnable through its process-local authority only as the current reference
+path. Protocol-v3 production durability will instead require the thin native
+adapter, an application-provided durable `WorkflowEngine` layer, exact
+artifact-versioned native handlers, authorized deferred completion, stable
+dynamic activity/child identities, forced-durable business timers, and
+cross-process semantic conformance tests.
 
 The BPMN model, named XML/DI mapping slice, durable marking, and bounded token
 kernel are likewise not a BPMN conformance claim. Mapping outside

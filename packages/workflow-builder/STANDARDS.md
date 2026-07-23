@@ -103,6 +103,30 @@ Implemented foundations:
   close-policy, definition-build, command/event, relation-identity, and pure
   replay contracts. They deliberately model durable parent/child facts without
   yet claiming transactional child execution; and
+- a thin protocol-v3 host over an injected native Effect `WorkflowEngine`, plus
+  bounded replay-stable operation names and memory-backed contract tests for
+  native activity replay, deferred suspension/resume, forced-durable clocks,
+  and nested parent-child suspension. This is backend evidence, not a BPMN
+  conformance claim; and
+- content-addressed dynamic occurrence and semantic-operation descriptors, plus
+  separately pinned deferred success/error codecs, authenticated current
+  static-DAG occurrence admission, closed activity purposes and exact result
+  contract references, an atomic exact-build executable registry, and a native
+  guard-activity mapping that rejects same-coordinate descriptor drift and
+  forces positive semantic timers through durable clocks; and
+- authenticated ordered `FirstSettled` and `FirstSuccess` races over exact
+  node-activity, timer, and deferred operations. Participant kind, digest,
+  contracts, order, result identity, generation, and waiter-interruption policy
+  are committed before execution; replay, typed failures, and native defects
+  are covered. This establishes a generic race primitive, not yet the complete
+  BPMN Activity lifecycle, Event-Based Gateway, event-subscription, or
+  human-work semantics; and
+- managed native retry for exact node attempts, including policy-pinned failure
+  identity, classifier resolution, attempt and elapsed admission budgets,
+  replay-recorded jitter, and durable-clock backoff. Hard activity timeouts and
+  cancellation propagation are rejected until the required lifecycle
+  semantics exist, so this is backend evidence rather than a complete BPMN
+  Activity or boundary-event implementation; and
 - machine-readable requirement/coverage schemas that record the named mapping
   slice separately while declaring no BPMN conformance claim.
 
@@ -120,9 +144,10 @@ Not yet implemented and therefore not claimed:
   transactional parent/child execution authority, and integration of the
   implemented protocol-v3 linkage, cancellation, lineage, and replay semantics
   into BPMN token execution;
-- a persistent BPMN execution store, externally authenticated history anchors,
-  migration tooling for pre-fingerprint states/journals, and isolated evaluator
-  adapters or any bundled FEEL/XPath implementation;
+- a production native Effect Workflow adapter, rebuildable BPMN semantic
+  timeline/export, externally authenticated history anchors, migration tooling
+  for pre-fingerprint states/journals, and isolated evaluator adapters or any
+  bundled FEEL/XPath implementation;
 - a complete normative requirement catalogue, official fixture round-trips,
   marking equivalence, soundness analysis, and scheduler-permutation evidence;
   and

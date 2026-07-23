@@ -175,6 +175,11 @@ const policy = (
       classifierVersion: "1.0.0",
       buildDigest: classifierBuildDigest
     },
+    failureIdentity: {
+      _tag: "EffectTagged",
+      identityContractVersion: 1,
+      code: "OptionalString"
+    },
     nonRetryableErrorTags: ["FatalError"],
     nonRetryableErrorCodes: ["E_FATAL"],
     backoff: {

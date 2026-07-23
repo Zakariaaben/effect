@@ -50,7 +50,9 @@ export const Domains = {
   CompiledPlan: "workflow.compiled-plan.compiler-v2",
   BoundaryContract: "workflow.boundary-contract.v3",
   ExecutableBuild: "workflow.executable-build.v3",
-  EncodedSchema: "workflow.encoded-schema.v3"
+  EncodedSchema: "workflow.encoded-schema.v3",
+  Occurrence: "workflow.occurrence.v3",
+  Operation: "workflow.operation.v3"
 } as const
 
 const DomainSchema = Schema.Literals([
@@ -58,7 +60,9 @@ const DomainSchema = Schema.Literals([
   Domains.CompiledPlan,
   Domains.BoundaryContract,
   Domains.ExecutableBuild,
-  Domains.EncodedSchema
+  Domains.EncodedSchema,
+  Domains.Occurrence,
+  Domains.Operation
 ]).annotate({ identifier: "WorkflowDigestV3Domain" })
 
 /**
@@ -323,6 +327,45 @@ export const encodedSchema = (
 > =>
   digest(Domains.EncodedSchema, value) as Effect.Effect<
     Wire.SchemaDigest,
+    DigestInputError | DigestCryptoError,
+    Crypto.Crypto
+  >
+
+/**
+ * Computes the content identity of one protocol-v3 dynamic node occurrence.
+ *
+ * @category encoding
+ * @since 4.0.0
+ */
+export const occurrence = (
+  value: unknown
+): Effect.Effect<
+  Wire.OccurrenceDigest,
+  DigestInputError | DigestCryptoError,
+  Crypto.Crypto
+> =>
+  digest(Domains.Occurrence, value) as Effect.Effect<
+    Wire.OccurrenceDigest,
+    DigestInputError | DigestCryptoError,
+    Crypto.Crypto
+  >
+
+/**
+ * Computes the content identity of one protocol-v3 semantic operation
+ * descriptor.
+ *
+ * @category encoding
+ * @since 4.0.0
+ */
+export const operation = (
+  value: unknown
+): Effect.Effect<
+  Wire.OperationDigest,
+  DigestInputError | DigestCryptoError,
+  Crypto.Crypto
+> =>
+  digest(Domains.Operation, value) as Effect.Effect<
+    Wire.OperationDigest,
     DigestInputError | DigestCryptoError,
     Crypto.Crypto
   >
