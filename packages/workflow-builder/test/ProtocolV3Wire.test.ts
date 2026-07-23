@@ -89,6 +89,60 @@ describe("ProtocolV3Wire", () => {
     assert.throws(() => decodePositiveDelay(0))
   })
 
+  it("admits only bounded Unicode-scalar identifiers", () => {
+    const decode = Schema.decodeUnknownSync(ProtocolV3Wire.Identifier)
+    const exactAscii = "a".repeat(ProtocolV3Wire.MaximumIdentifierBytes)
+    const exactAstral = "😀".repeat(
+      ProtocolV3Wire.MaximumIdentifierBytes / 4
+    )
+
+    assert.strictEqual(decode("identifier"), "identifier")
+    assert.strictEqual(decode("é😀"), "é😀")
+    assert.strictEqual(decode(exactAscii), exactAscii)
+    assert.strictEqual(decode(exactAstral), exactAstral)
+
+    for (
+      const invalid of [
+        "",
+        "\ud800",
+        "\udc00",
+        `prefix\ud800suffix`,
+        "a".repeat(ProtocolV3Wire.MaximumIdentifierBytes + 1),
+        `${exactAstral}a`
+      ]
+    ) {
+      assert.throws(() => decode(invalid))
+    }
+  })
+
+  it("bounds composable identity coordinates by their protocol role", () => {
+    const cases = [
+      [
+        ProtocolV3Wire.AtomicIdentifier,
+        ProtocolV3Wire.MaximumAtomicIdentifierBytes
+      ],
+      [
+        ProtocolV3Wire.LineageIdentifier,
+        ProtocolV3Wire.MaximumLineageIdentifierBytes
+      ],
+      [
+        ProtocolV3Wire.SourceEventIdentifier,
+        ProtocolV3Wire.MaximumSourceEventIdentifierBytes
+      ]
+    ] as const
+
+    for (const [schema, maximumBytes] of cases) {
+      const decode = Schema.decodeUnknownSync(schema)
+      const exactAscii = "a".repeat(maximumBytes)
+      const exactAstral = "😀".repeat(maximumBytes / 4)
+
+      assert.strictEqual(decode(exactAscii), exactAscii)
+      assert.strictEqual(decode(exactAstral), exactAstral)
+      assert.throws(() => decode(`${exactAscii}a`))
+      assert.throws(() => decode(`${exactAstral}a`))
+    }
+  })
+
   it("requires canonical UTC millisecond timestamps with valid calendar dates", () => {
     const decode = Schema.decodeUnknownSync(ProtocolV3Wire.Timestamp)
     for (

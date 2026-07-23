@@ -55,7 +55,7 @@ export const JitterPermilleDenominator = 1_000 as const
  */
 export const MaximumJitterPermille = 2_000 as const
 
-const BoundedIdentity = Schema.NonEmptyString.check(
+const BoundedIdentity = Wire.AtomicIdentifier.check(
   Schema.isMaxLength(MaximumIdentityLength)
 ).annotate({ identifier: "WorkflowActivityPolicyV3BoundedIdentity" })
 
@@ -652,7 +652,7 @@ export type RetryDeniedReason = Schema.Schema.Type<typeof RetryDeniedReason>
  * @category schemas
  * @since 4.0.0
  */
-export const RetryDelayRange = Schema.TaggedStruct("Retry", {
+const RetryDelayRangeStruct = Schema.TaggedStruct("Retry", {
   evaluationVersion: Schema.Literal(1),
   failedAttempt: Wire.PositiveSafeInt,
   nextAttempt: Wire.PositiveSafeInt,
@@ -660,7 +660,61 @@ export const RetryDelayRange = Schema.TaggedStruct("Retry", {
   baseDelayMillis: Wire.SemanticDelayMillis,
   minimumDelayMillis: Wire.SemanticDelayMillis,
   maximumDelayMillis: Wire.SemanticDelayMillis
-}).annotate({
+})
+
+interface RetryDelayBounds {
+  readonly failedAttempt: number
+  readonly nextAttempt: number
+  readonly retryOrdinal: number
+  readonly baseDelayMillis: number
+  readonly minimumDelayMillis: number
+  readonly maximumDelayMillis: number
+}
+
+const retryDelayBoundsIssues = (
+  value: RetryDelayBounds
+): ReadonlyArray<Schema.FilterIssue> => {
+  const issues: Array<Schema.FilterIssue> = []
+  if (
+    value.failedAttempt === Number.MAX_SAFE_INTEGER ||
+    value.nextAttempt !== value.failedAttempt + 1
+  ) {
+    issues.push({
+      path: ["nextAttempt"],
+      issue: "nextAttempt must be the safe integer immediately after failedAttempt"
+    })
+  }
+  if (value.retryOrdinal !== value.failedAttempt) {
+    issues.push({
+      path: ["retryOrdinal"],
+      issue: "retryOrdinal must equal failedAttempt"
+    })
+  }
+  if (value.minimumDelayMillis > value.maximumDelayMillis) {
+    issues.push({
+      path: ["minimumDelayMillis"],
+      issue: "minimumDelayMillis must not exceed maximumDelayMillis"
+    })
+  }
+  if (value.minimumDelayMillis > value.baseDelayMillis) {
+    issues.push({
+      path: ["minimumDelayMillis"],
+      issue: "minimumDelayMillis must not exceed baseDelayMillis"
+    })
+  }
+  return issues
+}
+
+/**
+ * A deterministic inclusive interval from which execution may record a retry
+ * delay, with attempt and range invariants checked at decode time.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const RetryDelayRange = RetryDelayRangeStruct.check(
+  Schema.makeFilter(retryDelayBoundsIssues)
+).annotate({
   identifier: "WorkflowActivityPolicyV3RetryDelayRange",
   parseOptions: strictParseOptions
 })
@@ -974,13 +1028,7 @@ export const retryDelayRange = (
   }) as RetryDelayRange)
 }
 
-/**
- * One externally selected retry delay admitted for durable recording.
- *
- * @category schemas
- * @since 4.0.0
- */
-export const RecordedRetryDelay = Schema.Struct({
+const RecordedRetryDelayStruct = Schema.Struct({
   recordingVersion: Schema.Literal(1),
   failedAttempt: Wire.PositiveSafeInt,
   nextAttempt: Wire.PositiveSafeInt,
@@ -989,7 +1037,29 @@ export const RecordedRetryDelay = Schema.Struct({
   minimumDelayMillis: Wire.SemanticDelayMillis,
   maximumDelayMillis: Wire.SemanticDelayMillis,
   selectedDelayMillis: Wire.SemanticDelayMillis
-}).annotate({
+})
+
+/**
+ * One externally selected retry delay admitted for durable recording.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const RecordedRetryDelay = RecordedRetryDelayStruct.check(
+  Schema.makeFilter((value) => {
+    const issues = [...retryDelayBoundsIssues(value)]
+    if (
+      value.selectedDelayMillis < value.minimumDelayMillis ||
+      value.selectedDelayMillis > value.maximumDelayMillis
+    ) {
+      issues.push({
+        path: ["selectedDelayMillis"],
+        issue: "selectedDelayMillis must be within the inclusive delay range"
+      })
+    }
+    return issues
+  })
+).annotate({
   identifier: "WorkflowActivityPolicyV3RecordedRetryDelay",
   parseOptions: strictParseOptions
 })

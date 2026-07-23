@@ -3,6 +3,34 @@ import * as Result from "effect/Result"
 import * as Json from "../src/internal/json.ts"
 
 describe("internal/json", () => {
+  it("normalizes negative zero before values can be hashed or executed", () => {
+    const result = Json.snapshot({
+      positive: 0,
+      negative: -0,
+      nested: [-0]
+    })
+    assert.isTrue(Result.isSuccess(result))
+    if (Result.isFailure(result)) {
+      throw result.failure
+    }
+    const value = result.success as {
+      readonly positive: number
+      readonly negative: number
+      readonly nested: ReadonlyArray<number>
+    }
+    assert.isFalse(Object.is(value.negative, -0))
+    assert.isFalse(Object.is(value.nested[0], -0))
+    assert.deepStrictEqual(value, {
+      positive: 0,
+      negative: 0,
+      nested: [0]
+    })
+    assert.strictEqual(
+      Json.canonicalizeSnapshot(result.success),
+      "{\"negative\":0,\"nested\":[0],\"positive\":0}"
+    )
+  })
+
   it("bounds expanded shared-object graphs instead of amplifying them without limit", () => {
     let value: unknown = { leaf: true }
     for (let index = 0; index < 15; index++) {

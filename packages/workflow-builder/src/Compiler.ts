@@ -5,7 +5,6 @@
  * @since 4.0.0
  */
 import * as Effect from "effect/Effect"
-import * as Graph from "effect/Graph"
 import * as Result from "effect/Result"
 import * as Schema from "effect/Schema"
 import * as Diagnostic from "./Diagnostic.ts"
@@ -201,6 +200,8 @@ const getOwn = <A>(record: Readonly<Record<string, A>>, key: string): A | undefi
 
 const storageKey = (...segments: ReadonlyArray<string>): string => JSON.stringify(segments)
 
+const compareCodeUnits = (left: string, right: string): number => left < right ? -1 : left > right ? 1 : 0
+
 const fail = (diagnostics: Array<Diagnostic.Diagnostic>): Effect.Effect<never, Diagnostic.CompilationError> =>
   Effect.fail(
     new Diagnostic.CompilationError({
@@ -266,22 +267,36 @@ const compileTopology = (
   readonly topologicalOrder: ReadonlyArray<string>
   readonly stages: ReadonlyArray<ReadonlyArray<string>>
 } => {
-  const indices = new Map<string, Graph.NodeIndex>()
-  const dependencyEdges: Array<readonly [string, string]> = []
-  for (const node of mutableNodes.values()) {
-    for (const dependent of node.dependents) {
-      dependencyEdges.push([node.node.id, dependent])
+  const nodeIds = Array.from(mutableNodes.keys()).sort(compareCodeUnits)
+  const remainingDependencies = new Map<string, number>()
+  for (const nodeId of nodeIds) {
+    remainingDependencies.set(
+      nodeId,
+      mutableNodes.get(nodeId)!.dependencies.size
+    )
+  }
+  const ready = nodeIds.filter((nodeId) => remainingDependencies.get(nodeId) === 0)
+  const topologicalOrder: Array<string> = []
+  while (ready.length > 0) {
+    const nodeId = ready.shift()!
+    topologicalOrder.push(nodeId)
+    const dependents = Array.from(
+      mutableNodes.get(nodeId)!.dependents
+    ).sort(compareCodeUnits)
+    for (const dependent of dependents) {
+      const remaining = remainingDependencies.get(dependent)
+      if (remaining === undefined || remaining <= 0) {
+        continue
+      }
+      const next = remaining - 1
+      remainingDependencies.set(dependent, next)
+      if (next === 0) {
+        ready.push(dependent)
+        ready.sort(compareCodeUnits)
+      }
     }
   }
-  const graph = Graph.directed<string, string>((mutable) => {
-    for (const node of mutableNodes.values()) {
-      indices.set(node.node.id, Graph.addNode(mutable, node.node.id))
-    }
-    for (const [source, target] of dependencyEdges) {
-      Graph.addEdge(mutable, indices.get(source)!, indices.get(target)!, `${source}->${target}`)
-    }
-  })
-  if (!Graph.isAcyclic(graph)) {
+  if (topologicalOrder.length !== nodeIds.length) {
     add(
       diagnostics,
       Codes.CycleDetected,
@@ -291,7 +306,6 @@ const compileTopology = (
     return { topologicalOrder: [], stages: [] }
   }
 
-  const topologicalOrder = Array.from(Graph.values(Graph.topo(graph)))
   const depths = new Map<string, number>()
   let maximumDepth = 0
   for (const nodeId of topologicalOrder) {
@@ -315,6 +329,9 @@ const compileTopology = (
   const stages: Array<Array<string>> = Array.from({ length: maximumDepth }, () => [])
   for (const nodeId of topologicalOrder) {
     stages[depths.get(nodeId)! - 1]!.push(nodeId)
+  }
+  for (const stage of stages) {
+    stage.sort(compareCodeUnits)
   }
   return {
     topologicalOrder: Object.freeze(topologicalOrder),
@@ -788,12 +805,17 @@ export const compile = Effect.fnUntraced(function*<W extends Workflow.Any>(
   }
 
   const nodes = new Map<string, CompiledNode>()
-  for (const [nodeId, node] of mutableNodes) {
+  const canonicalNodeIds = Array.from(mutableNodes.keys()).sort(compareCodeUnits)
+  for (const nodeId of canonicalNodeIds) {
+    const node = mutableNodes.get(nodeId)!
     node.incoming.sort((left, right) => {
       const leftPort = left.target.kind === "NodeInput" ? left.target.port : ""
       const rightPort = right.target.kind === "NodeInput" ? right.target.port : ""
-      return leftPort.localeCompare(rightPort) || (left.edge.order ?? 0) - (right.edge.order ?? 0)
+      return compareCodeUnits(leftPort, rightPort) ||
+        (left.edge.order ?? 0) - (right.edge.order ?? 0) ||
+        compareCodeUnits(left.edge.id, right.edge.id)
     })
+    node.outgoing.sort((left, right) => compareCodeUnits(left.edge.id, right.edge.id))
     nodes.set(
       nodeId,
       Object.freeze({
@@ -801,11 +823,17 @@ export const compile = Effect.fnUntraced(function*<W extends Workflow.Any>(
         definition: node.definition,
         incoming: Object.freeze(node.incoming),
         outgoing: Object.freeze(node.outgoing),
-        dependencies: Object.freeze(Array.from(node.dependencies)),
-        dependents: Object.freeze(Array.from(node.dependents))
+        dependencies: Object.freeze(
+          Array.from(node.dependencies).sort(compareCodeUnits)
+        ),
+        dependents: Object.freeze(
+          Array.from(node.dependents).sort(compareCodeUnits)
+        )
       })
     )
   }
+  compiledDataEdges.sort((left, right) => compareCodeUnits(left.edge.id, right.edge.id))
+  compiledControlEdges.sort((left, right) => compareCodeUnits(left.edge.id, right.edge.id))
   const compiled = Object.freeze({
     definition,
     plan,

@@ -565,6 +565,161 @@ describe("ChildWorkflowStateV3", () => {
     )
   })
 
+  it("derives canonical identities for every closed child-call phase", () => {
+    const at = coordinates()
+    const identityCoordinates = [
+      at.tenantId,
+      at.parentRunId,
+      at.callId
+    ] as const
+
+    assert.deepStrictEqual(
+      folded([scheduled()]).phase,
+      { _tag: "Scheduled" }
+    )
+
+    const childRunStartedEventId = "phase-child-started"
+    assert.deepStrictEqual(
+      folded([
+        scheduled(),
+        startAccepted(
+          at,
+          1,
+          timestamp(1),
+          childRunStartedEventId
+        )
+      ]).phase,
+      {
+        _tag: "Running",
+        childRunStartedEventId,
+        startProjectionEventId: Protocol.childStartProjectionEventId(
+          ...identityCoordinates,
+          childRunStartedEventId
+        )
+      }
+    )
+
+    const startRequestId = Protocol.childStartRequestId(
+      ...identityCoordinates
+    )
+    assert.deepStrictEqual(
+      folded([scheduled(), startFailed()]).phase,
+      {
+        _tag: "StartFailed",
+        startFailedEventId: Protocol.childStartFailedEventId(
+          ...identityCoordinates,
+          startRequestId
+        )
+      }
+    )
+
+    const cause = parentFailure("phase-parent-cause")
+    const cancellationCommandId = Protocol.requestChildCancellationCommandId(
+      ...identityCoordinates,
+      cause.parentCauseEventId
+    )
+    const requestedHistory = [
+      scheduled(),
+      startAccepted(),
+      cancellationRequested(cause)
+    ]
+    assert.deepStrictEqual(
+      folded(requestedHistory).phase,
+      {
+        _tag: "CancellationRequested",
+        parentCauseEventId: cause.parentCauseEventId,
+        cancellationCommandId
+      }
+    )
+
+    const childCancellationEventId = "phase-child-cancellation"
+    assert.deepStrictEqual(
+      folded([
+        ...requestedHistory,
+        cancellationAccepted(
+          cause.parentCauseEventId,
+          at,
+          3,
+          timestamp(3),
+          childCancellationEventId
+        )
+      ]).phase,
+      {
+        _tag: "CancellationAccepted",
+        parentCauseEventId: cause.parentCauseEventId,
+        cancellationCommandId,
+        childCancellationEventId,
+        acceptedEventId: Protocol.childCancellationAcceptedEventId(
+          ...identityCoordinates,
+          childCancellationEventId
+        )
+      }
+    )
+
+    for (
+      const [eventTag, phaseTag] of [
+        ["ChildSucceeded", "Succeeded"],
+        ["ChildFailed", "Failed"],
+        ["ChildCancelled", "Cancelled"]
+      ] as const
+    ) {
+      const childTerminalEventId = `phase-terminal-${eventTag}`
+      assert.deepStrictEqual(
+        folded([
+          scheduled(),
+          startAccepted(),
+          terminal(
+            eventTag,
+            at,
+            2,
+            timestamp(2),
+            childTerminalEventId
+          )
+        ]).phase,
+        {
+          _tag: phaseTag,
+          childTerminalEventId,
+          terminalProjectionEventId: Protocol.childTerminalProjectionEventId(
+            ...identityCoordinates,
+            childTerminalEventId
+          )
+        }
+      )
+    }
+
+    const preStartCause = parentFailure("phase-before-start")
+    assert.deepStrictEqual(
+      folded([
+        scheduled(),
+        cancelledBeforeStart(preStartCause)
+      ]).phase,
+      {
+        _tag: "CancelledBeforeStart",
+        parentCauseEventId: preStartCause.parentCauseEventId,
+        cancelledBeforeStartEventId: Protocol.childCancelledBeforeStartEventId(
+          ...identityCoordinates,
+          preStartCause.parentCauseEventId
+        )
+      }
+    )
+
+    const abandonCause = parentCancellation("phase-abandon")
+    assert.deepStrictEqual(
+      folded([
+        scheduled(relation(policy("CancelAndWait", "Abandon"))),
+        abandoned(abandonCause)
+      ]).phase,
+      {
+        _tag: "Abandoned",
+        parentCauseEventId: abandonCause.parentCauseEventId,
+        abandonEventId: Protocol.abandonChildEventId(
+          ...identityCoordinates,
+          abandonCause.parentCauseEventId
+        )
+      }
+    )
+  })
+
   it("retains a permanent start failure and its blob-backed evidence", () => {
     const state = folded([
       scheduled(),

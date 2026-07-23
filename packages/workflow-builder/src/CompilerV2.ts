@@ -17,6 +17,7 @@ import * as Compiler from "./Compiler.ts"
 import type * as Diagnostic from "./Diagnostic.ts"
 import * as Json from "./internal/json.ts"
 import * as Plan from "./Plan.ts"
+import * as Wire from "./ProtocolV3Wire.ts"
 import type * as Workflow from "./Workflow.ts"
 
 const strictParseOptions = {
@@ -24,7 +25,7 @@ const strictParseOptions = {
   onExcessProperty: "error"
 } as const
 
-const NonNegativeInt = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+const NonNegativeInt = Wire.NonNegativeSafeInt
 
 const preparedPlans = new WeakSet<object>()
 
@@ -72,9 +73,9 @@ export const StaticDagProgramVersion = 1 as const
  * @since 4.0.0
  */
 export const SemanticPlanNode = Schema.Struct({
-  id: Plan.PlanNode.fields.id,
-  type: Plan.PlanNode.fields.type,
-  version: Plan.PlanNode.fields.version,
+  id: Wire.AtomicIdentifier,
+  type: Wire.AtomicIdentifier,
+  version: Wire.AtomicIdentifier,
   config: Plan.PlanNode.fields.config
 }).annotate({
   identifier: "WorkflowCompilerV2SemanticPlanNode",
@@ -100,10 +101,37 @@ export type SemanticPlanNode = Schema.Schema.Type<typeof SemanticPlanNode>
  * @category schemas
  * @since 4.0.0
  */
+const SemanticSourceEndpoint = Schema.Union([
+  Schema.TaggedStruct("WorkflowInput", {
+    input: Wire.AtomicIdentifier
+  }),
+  Schema.TaggedStruct("NodeOutput", {
+    nodeId: Wire.AtomicIdentifier,
+    output: Wire.AtomicIdentifier
+  })
+])
+
+const SemanticTargetEndpoint = Schema.Union([
+  Schema.TaggedStruct("NodeInput", {
+    nodeId: Wire.AtomicIdentifier,
+    input: Wire.AtomicIdentifier
+  }),
+  Schema.TaggedStruct("WorkflowOutput", {
+    output: Wire.AtomicIdentifier
+  })
+])
+
+/**
+ * A metadata-free data edge retaining bounded, Unicode-scalar endpoint
+ * identifiers.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
 export const SemanticDataEdge = Schema.Struct({
-  id: Schema.NonEmptyString,
-  source: Plan.SourceEndpoint,
-  target: Plan.TargetEndpoint,
+  id: Wire.AtomicIdentifier,
+  source: SemanticSourceEndpoint,
+  target: SemanticTargetEndpoint,
   order: Schema.optionalKey(NonNegativeInt)
 }).annotate({
   identifier: "WorkflowCompilerV2SemanticDataEdge",
@@ -125,9 +153,9 @@ export type SemanticDataEdge = Schema.Schema.Type<typeof SemanticDataEdge>
  * @since 4.0.0
  */
 export const SemanticControlEdge = Schema.Struct({
-  id: Schema.NonEmptyString,
-  sourceNodeId: Schema.NonEmptyString,
-  targetNodeId: Schema.NonEmptyString
+  id: Wire.AtomicIdentifier,
+  sourceNodeId: Wire.AtomicIdentifier,
+  targetNodeId: Wire.AtomicIdentifier
 }).annotate({
   identifier: "WorkflowCompilerV2SemanticControlEdge",
   parseOptions: strictParseOptions
@@ -152,9 +180,12 @@ export type SemanticControlEdge = Schema.Schema.Type<
  */
 export const SemanticPlan = Schema.Struct({
   formatVersion: Plan.Plan.fields.formatVersion,
-  id: Plan.Plan.fields.id,
-  revision: Plan.Plan.fields.revision,
-  definition: Plan.DefinitionReference,
+  id: Wire.AtomicIdentifier,
+  revision: Wire.NonNegativeSafeInt,
+  definition: Schema.Struct({
+    id: Wire.AtomicIdentifier,
+    version: Wire.AtomicIdentifier
+  }),
   nodes: Schema.Array(SemanticPlanNode),
   dataEdges: Schema.Array(SemanticDataEdge),
   controlEdges: Schema.Array(SemanticControlEdge)
@@ -178,8 +209,8 @@ export type SemanticPlan = Schema.Schema.Type<typeof SemanticPlan>
  * @since 4.0.0
  */
 export const WorkflowInterfaceInput = Schema.Struct({
-  name: Schema.NonEmptyString,
-  contract: Schema.NonEmptyString,
+  name: Wire.AtomicIdentifier,
+  contract: Wire.AtomicIdentifier,
   fanOut: Schema.Literals(["single", "multiple"])
 }).annotate({
   identifier: "WorkflowCompilerV2InterfaceInput",
@@ -203,8 +234,8 @@ export type WorkflowInterfaceInput = Schema.Schema.Type<
  * @since 4.0.0
  */
 export const WorkflowInterfaceOutput = Schema.Struct({
-  name: Schema.NonEmptyString,
-  contract: Schema.NonEmptyString,
+  name: Wire.AtomicIdentifier,
+  contract: Wire.AtomicIdentifier,
   cardinality: Schema.Literals(["one", "many"]),
   required: Schema.Boolean
 }).annotate({
@@ -253,8 +284,8 @@ export type WorkflowInterface = Schema.Schema.Type<typeof WorkflowInterface>
  */
 export const ResolvedWorkflowInput = Schema.Struct({
   kind: Schema.Literal("WorkflowInput"),
-  port: Schema.NonEmptyString,
-  contract: Schema.NonEmptyString
+  port: Wire.AtomicIdentifier,
+  contract: Wire.AtomicIdentifier
 }).annotate({
   identifier: "WorkflowCompilerV2ResolvedWorkflowInput",
   parseOptions: strictParseOptions
@@ -278,11 +309,11 @@ export type ResolvedWorkflowInput = Schema.Schema.Type<
  */
 export const ResolvedNodeOutput = Schema.Struct({
   kind: Schema.Literal("NodeOutput"),
-  nodeId: Schema.NonEmptyString,
-  nodeType: Schema.NonEmptyString,
-  nodeVersion: Schema.NonEmptyString,
-  port: Schema.NonEmptyString,
-  contract: Schema.NonEmptyString
+  nodeId: Wire.AtomicIdentifier,
+  nodeType: Wire.AtomicIdentifier,
+  nodeVersion: Wire.AtomicIdentifier,
+  port: Wire.AtomicIdentifier,
+  contract: Wire.AtomicIdentifier
 }).annotate({
   identifier: "WorkflowCompilerV2ResolvedNodeOutput",
   parseOptions: strictParseOptions
@@ -304,11 +335,11 @@ export type ResolvedNodeOutput = Schema.Schema.Type<typeof ResolvedNodeOutput>
  */
 export const ResolvedNodeInput = Schema.Struct({
   kind: Schema.Literal("NodeInput"),
-  nodeId: Schema.NonEmptyString,
-  nodeType: Schema.NonEmptyString,
-  nodeVersion: Schema.NonEmptyString,
-  port: Schema.NonEmptyString,
-  contract: Schema.NonEmptyString
+  nodeId: Wire.AtomicIdentifier,
+  nodeType: Wire.AtomicIdentifier,
+  nodeVersion: Wire.AtomicIdentifier,
+  port: Wire.AtomicIdentifier,
+  contract: Wire.AtomicIdentifier
 }).annotate({
   identifier: "WorkflowCompilerV2ResolvedNodeInput",
   parseOptions: strictParseOptions
@@ -330,8 +361,8 @@ export type ResolvedNodeInput = Schema.Schema.Type<typeof ResolvedNodeInput>
  */
 export const ResolvedWorkflowOutput = Schema.Struct({
   kind: Schema.Literal("WorkflowOutput"),
-  port: Schema.NonEmptyString,
-  contract: Schema.NonEmptyString
+  port: Wire.AtomicIdentifier,
+  contract: Wire.AtomicIdentifier
 }).annotate({
   identifier: "WorkflowCompilerV2ResolvedWorkflowOutput",
   parseOptions: strictParseOptions
@@ -396,7 +427,7 @@ export type ResolvedTargetEndpoint = Schema.Schema.Type<
  * @since 4.0.0
  */
 export const ResolvedDataEdge = Schema.Struct({
-  id: Schema.NonEmptyString,
+  id: Wire.AtomicIdentifier,
   source: ResolvedSourceEndpoint,
   target: ResolvedTargetEndpoint,
   order: Schema.optionalKey(NonNegativeInt)
@@ -440,13 +471,13 @@ export type ResolvedControlEdge = Schema.Schema.Type<
  * @since 4.0.0
  */
 export const StaticDagNode = Schema.Struct({
-  id: Schema.NonEmptyString,
-  type: Schema.NonEmptyString,
-  version: Schema.NonEmptyString,
-  incomingEdgeIds: Schema.Array(Schema.NonEmptyString),
-  outgoingEdgeIds: Schema.Array(Schema.NonEmptyString),
-  dependencies: Schema.Array(Schema.NonEmptyString),
-  dependents: Schema.Array(Schema.NonEmptyString)
+  id: Wire.AtomicIdentifier,
+  type: Wire.AtomicIdentifier,
+  version: Wire.AtomicIdentifier,
+  incomingEdgeIds: Schema.Array(Wire.AtomicIdentifier),
+  outgoingEdgeIds: Schema.Array(Wire.AtomicIdentifier),
+  dependencies: Schema.Array(Wire.AtomicIdentifier),
+  dependents: Schema.Array(Wire.AtomicIdentifier)
 }).annotate({
   identifier: "WorkflowCompilerV2StaticDagNode",
   parseOptions: strictParseOptions
@@ -472,8 +503,8 @@ export const StaticDag = Schema.Struct({
   nodes: Schema.Array(StaticDagNode),
   dataEdges: Schema.Array(ResolvedDataEdge),
   controlEdges: Schema.Array(ResolvedControlEdge),
-  topologicalOrder: Schema.Array(Schema.NonEmptyString),
-  stages: Schema.Array(Schema.Array(Schema.NonEmptyString))
+  topologicalOrder: Schema.Array(Wire.AtomicIdentifier),
+  stages: Schema.Array(Schema.Array(Wire.AtomicIdentifier))
 }).annotate({
   identifier: "WorkflowCompilerV2StaticDag",
   parseOptions: strictParseOptions

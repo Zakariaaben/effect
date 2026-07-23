@@ -13,7 +13,7 @@ const artifact: PlanStore.PlanArtifact = {
   executionProtocolVersion: 1,
   fingerprintDocument: {
     fingerprintVersion: 1,
-    compilerSemanticVersion: "1",
+    compilerSemanticVersion: "2",
     plan: {
       formatVersion: 1,
       id: "plan-1",

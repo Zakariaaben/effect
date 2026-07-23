@@ -21,6 +21,30 @@ const strictParseOptions = {
 const sha256Pattern = /^sha256:[0-9a-f]{64}$/
 const isoTimestampPattern = /^(\d{4})-(0[1-9]|1[0-2])-(\d{2})T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d\.\d{3}Z$/
 
+const utf8Length = (value: string): number | undefined => {
+  let bytes = 0
+  for (let index = 0; index < value.length; index++) {
+    const code = value.charCodeAt(index)
+    if (code <= 0x7f) {
+      bytes++
+    } else if (code <= 0x7ff) {
+      bytes += 2
+    } else if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1)
+      if (!(next >= 0xdc00 && next <= 0xdfff)) {
+        return undefined
+      }
+      bytes += 4
+      index++
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      return undefined
+    } else {
+      bytes += 3
+    }
+  }
+  return bytes
+}
+
 const hasValidCalendarDate = (value: string): boolean => {
   const match = isoTimestampPattern.exec(value)
   if (match === null) {
@@ -87,6 +111,166 @@ export const PositiveSafeInt = Schema.Int.check(
  * @since 4.0.0
  */
 export type PositiveSafeInt = Schema.Schema.Type<typeof PositiveSafeInt>
+
+/**
+ * Largest UTF-8 representation admitted for one protocol identifier.
+ *
+ * **Details**
+ *
+ * The bound is large enough for a fully expanded child lineage at the
+ * protocol's maximum depth while preventing identifiers from becoming an
+ * unbounded allocation or persistence surface.
+ *
+ * @category constants
+ * @since 4.0.0
+ */
+export const MaximumIdentifierBytes = 65_536 as const
+
+/**
+ * Largest UTF-8 representation admitted for one author-owned identity
+ * coordinate such as a tenant, definition, node, port, contract, codec, or
+ * deployment name.
+ *
+ * **Details**
+ *
+ * Keeping atomic coordinates small makes every collision-free composite
+ * identity bounded through the protocol's maximum child-lineage depth.
+ *
+ * @category constants
+ * @since 4.0.0
+ */
+export const MaximumAtomicIdentifierBytes = 256 as const
+
+/**
+ * Largest UTF-8 representation admitted for a run, call, or start identity
+ * participating in a bounded child lineage.
+ *
+ * @category constants
+ * @since 4.0.0
+ */
+export const MaximumLineageIdentifierBytes = 50_000 as const
+
+/**
+ * Largest UTF-8 representation admitted for an authority-owned source event
+ * referenced while deriving a parent projection identity.
+ *
+ * @category constants
+ * @since 4.0.0
+ */
+export const MaximumSourceEventIdentifierBytes = 4_096 as const
+
+/**
+ * A non-empty, bounded Unicode-scalar identifier.
+ *
+ * **Details**
+ *
+ * Unpaired UTF-16 surrogates are rejected so byte-length framing and digests
+ * have the same meaning across conforming implementations in every language.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const Identifier = Schema.String.check(
+  Schema.isNonEmpty(),
+  Schema.makeFilter(
+    (value) => {
+      const bytes = utf8Length(value)
+      return bytes !== undefined && bytes <= MaximumIdentifierBytes
+    },
+    {
+      expected: `a Unicode-scalar identifier of at most ${MaximumIdentifierBytes} UTF-8 bytes`
+    }
+  )
+).annotate({ identifier: "WorkflowProtocolV3Identifier" })
+
+/**
+ * The decoded type of {@link Identifier}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type Identifier = Schema.Schema.Type<typeof Identifier>
+
+/**
+ * A bounded atomic coordinate safe to compose into protocol identifiers.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const AtomicIdentifier = Identifier.check(
+  Schema.makeFilter(
+    (value) => {
+      const bytes = utf8Length(value)
+      return bytes !== undefined && bytes <= MaximumAtomicIdentifierBytes
+    },
+    {
+      expected: `an atomic identifier of at most ${MaximumAtomicIdentifierBytes} UTF-8 bytes`
+    }
+  )
+).annotate({ identifier: "WorkflowProtocolV3AtomicIdentifier" })
+
+/**
+ * The decoded type of {@link AtomicIdentifier}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type AtomicIdentifier = Schema.Schema.Type<typeof AtomicIdentifier>
+
+/**
+ * A bounded run, call, or start identity retained through child lineage.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const LineageIdentifier = Identifier.check(
+  Schema.makeFilter(
+    (value) => {
+      const bytes = utf8Length(value)
+      return bytes !== undefined && bytes <= MaximumLineageIdentifierBytes
+    },
+    {
+      expected: `a lineage identifier of at most ${MaximumLineageIdentifierBytes} UTF-8 bytes`
+    }
+  )
+).annotate({ identifier: "WorkflowProtocolV3LineageIdentifier" })
+
+/**
+ * The decoded type of {@link LineageIdentifier}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type LineageIdentifier = Schema.Schema.Type<typeof LineageIdentifier>
+
+/**
+ * A bounded authority-owned event identity accepted as a derivation source.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const SourceEventIdentifier = Identifier.check(
+  Schema.makeFilter(
+    (value) => {
+      const bytes = utf8Length(value)
+      return bytes !== undefined &&
+        bytes <= MaximumSourceEventIdentifierBytes
+    },
+    {
+      expected: `a source event identifier of at most ${MaximumSourceEventIdentifierBytes} UTF-8 bytes`
+    }
+  )
+).annotate({ identifier: "WorkflowProtocolV3SourceEventIdentifier" })
+
+/**
+ * The decoded type of {@link SourceEventIdentifier}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type SourceEventIdentifier = Schema.Schema.Type<
+  typeof SourceEventIdentifier
+>
 
 /**
  * Largest relative semantic delay admitted by execution protocol version `3`.

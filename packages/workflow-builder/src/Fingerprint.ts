@@ -33,7 +33,7 @@ export const FingerprintVersion = 1 as const
  * @category constants
  * @since 4.0.0
  */
-export const CompilerSemanticVersion = "1" as const
+export const CompilerSemanticVersion = "2" as const
 
 /**
  * Canonical document hashed for an admitted plan.

@@ -539,6 +539,84 @@ describe("ActivityPolicyV3", () => {
     )
   })
 
+  it("rejects forged contradictory retry range and recorded-delay records", () => {
+    const truncatedRange = {
+      _tag: "Retry",
+      evaluationVersion: 1,
+      failedAttempt: 1,
+      nextAttempt: 2,
+      retryOrdinal: 1,
+      baseDelayMillis: 1_000,
+      minimumDelayMillis: 500,
+      maximumDelayMillis: 750
+    }
+    assert.deepStrictEqual(
+      Schema.decodeUnknownSync(ActivityPolicy.RetryDelayRange)(truncatedRange),
+      truncatedRange
+    )
+
+    for (
+      const forged of [
+        { ...truncatedRange, nextAttempt: 3 },
+        { ...truncatedRange, retryOrdinal: 2 },
+        {
+          ...truncatedRange,
+          minimumDelayMillis: 751,
+          maximumDelayMillis: 750
+        },
+        {
+          ...truncatedRange,
+          minimumDelayMillis: 1_001,
+          maximumDelayMillis: 1_100
+        },
+        {
+          ...truncatedRange,
+          failedAttempt: Number.MAX_SAFE_INTEGER,
+          nextAttempt: Number.MAX_SAFE_INTEGER,
+          retryOrdinal: Number.MAX_SAFE_INTEGER
+        }
+      ]
+    ) {
+      assert.throws(() => Schema.decodeUnknownSync(ActivityPolicy.RetryDelayRange)(forged))
+    }
+
+    const recorded = {
+      recordingVersion: 1,
+      failedAttempt: 1,
+      nextAttempt: 2,
+      retryOrdinal: 1,
+      baseDelayMillis: 1_000,
+      minimumDelayMillis: 500,
+      maximumDelayMillis: 750,
+      selectedDelayMillis: 625
+    }
+    assert.deepStrictEqual(
+      Schema.decodeUnknownSync(ActivityPolicy.RecordedRetryDelay)(recorded),
+      recorded
+    )
+
+    for (
+      const forged of [
+        { ...recorded, nextAttempt: 3 },
+        { ...recorded, retryOrdinal: 2 },
+        {
+          ...recorded,
+          minimumDelayMillis: 751,
+          maximumDelayMillis: 750
+        },
+        {
+          ...recorded,
+          minimumDelayMillis: 1_001,
+          maximumDelayMillis: 1_100
+        },
+        { ...recorded, selectedDelayMillis: 499 },
+        { ...recorded, selectedDelayMillis: 751 }
+      ]
+    ) {
+      assert.throws(() => Schema.decodeUnknownSync(ActivityPolicy.RecordedRetryDelay)(forged))
+    }
+  })
+
   it("applies explicit non-retryable identities before requiring the pinned classifier", () => {
     const byTag = success(ActivityPolicy.failureDisposition(policy(), {
       failureIdentityVersion: 1,

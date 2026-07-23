@@ -237,6 +237,18 @@ describe("CompilerV2", () => {
         permuted.fingerprintDocument,
         original.fingerprintDocument
       )
+      assert.deepStrictEqual(
+        permuted.compiled.topologicalOrder,
+        original.compiled.topologicalOrder
+      )
+      assert.deepStrictEqual(
+        permuted.compiled.topologicalOrder,
+        original.fingerprintDocument.program.topologicalOrder
+      )
+      assert.deepStrictEqual(
+        permuted.compiled.dataEdges.map((edge) => edge.edge.id),
+        original.compiled.dataEdges.map((edge) => edge.edge.id)
+      )
     }))
 
   it.effect("commits config, endpoints, explicit order, contracts, and topology", () =>

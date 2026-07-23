@@ -81,6 +81,11 @@ Today the package provides:
 - independent protocol-v3 wire primitives and domain-separated artifact,
   compiled-plan, boundary-contract, executable-build, and encoded-schema
   digests, together with strict inline-or-immutable-blob payload references;
+- a protocol-v3 static-DAG artifact contract with exact compiler, definition,
+  handler, codec, schema, boundary, retry-classifier, policy, and node-binding
+  manifests; canonical relationship validation; fixed-order digest
+  verification; process-local verification provenance; read-only store
+  contracts; and artifact-derived child targets;
 - a protocol-v3 activity policy with exact classifier build pins, explicit
   non-retryable identities, bounded fixed/exponential backoff, deterministic
   no-jitter or externally recorded jitter ranges, attempt/elapsed budgets, and
@@ -158,9 +163,11 @@ isolation requires a worker, process, or sandbox adapter. A BPMN
 and replay semantics are modeled, but executable admission still rejects it
 until source QNames resolve through a trusted compiler-semantic-version-2
 artifact family and a single transactional parent/child authority is installed.
-The compiler-v2 document and digest primitives do not yet constitute that
-artifact authority: exact definition, handler, codec, and schema build
-attestation plus content-addressed storage and run binding are still required.
+The compiler-v2 document, digest primitives, and static-DAG artifact verifier
+establish exact content pins but do not yet constitute that execution
+authority. Trusted executable-catalog attestation, persistent
+content-addressed storage, atomic run binding, and a transactional parent/child
+authority are still required.
 
 See the runnable [typed DAG example](./examples/basic.ts),
 [BPMN XML execution example](./examples/bpmn-executable.ts), and detailed

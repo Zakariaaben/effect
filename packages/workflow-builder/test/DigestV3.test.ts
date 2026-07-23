@@ -32,6 +32,14 @@ describe("DigestV3", () => {
       )
     }).pipe(withSha256))
 
+  it.effect("normalizes negative zero before binding runtime meaning", () =>
+    Effect.gen(function*() {
+      const positive = yield* DigestV3.artifact({ config: 0 })
+      const negative = yield* DigestV3.artifact({ config: -0 })
+
+      assert.strictEqual(negative, positive)
+    }).pipe(withSha256))
+
   it.effect("locks the exact domains and canonical envelope to SHA-256 vectors", () =>
     Effect.gen(function*() {
       const value = { b: 2, a: 1 }

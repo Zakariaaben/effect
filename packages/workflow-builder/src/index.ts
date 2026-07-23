@@ -327,6 +327,11 @@ export * as PlanStoreV2 from "./PlanStoreV2.ts"
 /**
  * @since 4.0.0
  */
+export * as PlanStoreV3 from "./PlanStoreV3.ts"
+
+/**
+ * @since 4.0.0
+ */
 export * as Port from "./Port.ts"
 
 /**

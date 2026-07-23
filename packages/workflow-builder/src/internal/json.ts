@@ -201,7 +201,7 @@ export const snapshot = (
         if (encodedBytes > maxTotalBytes) {
           return failure(`Encoded JSON size exceeds ${maxTotalBytes} bytes`, task.path)
         }
-        task.assign(value)
+        task.assign(Object.is(value, -0) ? 0 : value)
         continue
       }
       if (typeof value !== "object") {

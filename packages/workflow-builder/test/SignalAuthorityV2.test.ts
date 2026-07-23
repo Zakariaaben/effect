@@ -109,7 +109,7 @@ const makeFixture = Effect.fnUntraced(function*(
     executionProtocolVersion: 2,
     fingerprintDocument: {
       fingerprintVersion: 1,
-      compilerSemanticVersion: "1",
+      compilerSemanticVersion: "2",
       plan: {
         formatVersion: 1,
         id: "approval-plan",
@@ -182,7 +182,7 @@ const makeFixture = Effect.fnUntraced(function*(
       planRevision: 3,
       definitionId: "approval-workflow",
       definitionVersion: "2.1.0",
-      compilerVersion: "1",
+      compilerVersion: "2",
       compiledFingerprint,
       backend: "durable",
       input: { orderId: "order-1" }

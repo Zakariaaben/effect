@@ -5,10 +5,11 @@
  * **Details**
  *
  * This module is deliberately independent from protocol version `2`. It
- * defines portable pins, lineage, relation state, and collision-free
- * identities. The sibling protocol and reducer modules define exact wire facts
- * and replay legality; starting child runs and atomically coordinating parent
- * and child histories remain execution-authority concerns.
+ * defines portable pins, lineage, relation admission, reducer-owned phase
+ * types, and collision-free identities. Phases are structural projections,
+ * never independently admitted state: the sibling history reducer is their
+ * sole authority. Starting child runs and atomically coordinating parent and
+ * child histories remain execution-authority concerns.
  *
  * @since 4.0.0
  */
@@ -219,7 +220,7 @@ export const ChildClosePolicy = Schema.Struct({
 export type ChildClosePolicy = Schema.Schema.Type<typeof ChildClosePolicy>
 
 const PlanPin = Schema.Struct({
-  id: Schema.NonEmptyString,
+  id: Wire.AtomicIdentifier,
   revision: Wire.NonNegativeSafeInt
 }).annotate({
   identifier: "WorkflowChildV3PlanPin",
@@ -227,9 +228,9 @@ const PlanPin = Schema.Struct({
 })
 
 const DefinitionPin = Schema.Struct({
-  id: Schema.NonEmptyString,
-  version: Schema.NonEmptyString,
-  deploymentId: Schema.NonEmptyString,
+  id: Wire.AtomicIdentifier,
+  version: Wire.AtomicIdentifier,
+  deploymentId: Wire.AtomicIdentifier,
   buildDigest: Wire.BuildDigest
 }).annotate({
   identifier: "WorkflowChildV3DefinitionPin",
@@ -245,7 +246,7 @@ const ChildTargetPinStruct = Schema.Struct({
   compilerSemanticVersion: Schema.Literal("2"),
   compiledFingerprint: Wire.CompiledFingerprint,
   definition: DefinitionPin,
-  workflowFamilyIdentity: Schema.NonEmptyString,
+  workflowFamilyIdentity: Wire.Identifier,
   inputContractDigest: ContractDigest,
   outputContractDigest: ContractDigest,
   closePolicy: ChildClosePolicy,
@@ -281,8 +282,7 @@ export const ChildTargetPin = ChildTargetPinStruct.check(
   Schema.makeFilter(
     targetFamilyIdentityMatches,
     {
-      expected:
-        "workflowFamilyIdentity derived from the target definition identifier"
+      expected: "workflowFamilyIdentity derived from the target definition identifier"
     }
   )
 ).annotate({
@@ -307,10 +307,10 @@ export type ChildTargetPin = Schema.Schema.Type<typeof ChildTargetPin>
 export const LineageEntry = Schema.Struct({
   lineageEntryVersion: Schema.Literal(3),
   depth: AncestorDepth,
-  tenantId: Schema.NonEmptyString,
-  runId: Schema.NonEmptyString,
+  tenantId: Wire.AtomicIdentifier,
+  runId: Wire.LineageIdentifier,
   artifactDigest: Wire.ArtifactDigest,
-  workflowFamilyIdentity: Schema.NonEmptyString
+  workflowFamilyIdentity: Wire.Identifier
 }).annotate({
   identifier: "WorkflowChildV3LineageEntry",
   parseOptions: strictParseOptions
@@ -348,15 +348,15 @@ export type Ancestry = Schema.Schema.Type<typeof Ancestry>
 
 const ParentRunLinkStruct = Schema.Struct({
   parentLinkVersion: Schema.Literal(3),
-  tenantId: Schema.NonEmptyString,
-  parentRunId: Schema.NonEmptyString,
+  tenantId: Wire.AtomicIdentifier,
+  parentRunId: Wire.LineageIdentifier,
   parentArtifactDigest: Wire.ArtifactDigest,
-  parentWorkflowFamilyIdentity: Schema.NonEmptyString,
-  callId: Schema.NonEmptyString,
-  nodeId: Schema.NonEmptyString,
-  nodeInstanceId: Schema.NonEmptyString,
-  scheduleEventId: Schema.NonEmptyString,
-  rootRunId: Schema.NonEmptyString,
+  parentWorkflowFamilyIdentity: Wire.Identifier,
+  callId: Wire.LineageIdentifier,
+  nodeId: Wire.AtomicIdentifier,
+  nodeInstanceId: Wire.AtomicIdentifier,
+  scheduleEventId: Wire.LineageIdentifier,
+  rootRunId: Wire.LineageIdentifier,
   lineageDepth: ChildDepth,
   ancestry: Ancestry
 }).annotate({
@@ -597,9 +597,9 @@ const ChildRelationStruct = Schema.Struct({
   relationVersion: Schema.Literal(3),
   parent: ParentRunLinkStruct,
   target: ChildTargetPinStruct,
-  childRunId: Schema.NonEmptyString,
-  startRequestId: Schema.NonEmptyString,
-  scheduleCommandId: Schema.NonEmptyString
+  childRunId: Wire.LineageIdentifier,
+  startRequestId: Wire.LineageIdentifier,
+  scheduleCommandId: Wire.LineageIdentifier
 }).annotate({
   identifier: "WorkflowChildV3RelationStruct",
   parseOptions: strictParseOptions
@@ -638,9 +638,7 @@ const relationIssues = (
     ))
   }
   if (
-    parent.ancestry.some((entry) =>
-      entry.workflowFamilyIdentity === target.workflowFamilyIdentity
-    )
+    parent.ancestry.some((entry) => entry.workflowFamilyIdentity === target.workflowFamilyIdentity)
   ) {
     issues.push(issue(
       ValidationCodes.RepeatedWorkflowIdentity,
@@ -718,85 +716,79 @@ const ScheduledPhase = Schema.TaggedStruct("Scheduled", {}).annotate({
 })
 
 const RunningPhase = Schema.TaggedStruct("Running", {
-  childRunStartedEventId: Schema.NonEmptyString,
-  startProjectionEventId: Schema.NonEmptyString
+  childRunStartedEventId: Wire.SourceEventIdentifier,
+  startProjectionEventId: Wire.Identifier
 }).annotate({
   identifier: "WorkflowChildV3RunningPhase",
   parseOptions: strictParseOptions
 })
 
 const StartFailedPhase = Schema.TaggedStruct("StartFailed", {
-  startFailedEventId: Schema.NonEmptyString
+  startFailedEventId: Wire.Identifier
 }).annotate({
   identifier: "WorkflowChildV3StartFailedPhase",
   parseOptions: strictParseOptions
 })
 
 const CancellationRequestedPhase = Schema.TaggedStruct("CancellationRequested", {
-  parentCauseEventId: Schema.NonEmptyString,
-  cancellationCommandId: Schema.NonEmptyString
+  parentCauseEventId: Wire.SourceEventIdentifier,
+  cancellationCommandId: Wire.Identifier
 }).annotate({
   identifier: "WorkflowChildV3CancellationRequestedPhase",
   parseOptions: strictParseOptions
 })
 
 const CancellationAcceptedPhase = Schema.TaggedStruct("CancellationAccepted", {
-  parentCauseEventId: Schema.NonEmptyString,
-  cancellationCommandId: Schema.NonEmptyString,
-  childCancellationEventId: Schema.NonEmptyString,
-  acceptedEventId: Schema.NonEmptyString
+  parentCauseEventId: Wire.SourceEventIdentifier,
+  cancellationCommandId: Wire.Identifier,
+  childCancellationEventId: Wire.SourceEventIdentifier,
+  acceptedEventId: Wire.Identifier
 }).annotate({
   identifier: "WorkflowChildV3CancellationAcceptedPhase",
   parseOptions: strictParseOptions
 })
 
 const SucceededPhase = Schema.TaggedStruct("Succeeded", {
-  childTerminalEventId: Schema.NonEmptyString,
-  terminalProjectionEventId: Schema.NonEmptyString
+  childTerminalEventId: Wire.SourceEventIdentifier,
+  terminalProjectionEventId: Wire.Identifier
 }).annotate({
   identifier: "WorkflowChildV3SucceededPhase",
   parseOptions: strictParseOptions
 })
 
 const FailedPhase = Schema.TaggedStruct("Failed", {
-  childTerminalEventId: Schema.NonEmptyString,
-  terminalProjectionEventId: Schema.NonEmptyString
+  childTerminalEventId: Wire.SourceEventIdentifier,
+  terminalProjectionEventId: Wire.Identifier
 }).annotate({
   identifier: "WorkflowChildV3FailedPhase",
   parseOptions: strictParseOptions
 })
 
 const CancelledPhase = Schema.TaggedStruct("Cancelled", {
-  childTerminalEventId: Schema.NonEmptyString,
-  terminalProjectionEventId: Schema.NonEmptyString
+  childTerminalEventId: Wire.SourceEventIdentifier,
+  terminalProjectionEventId: Wire.Identifier
 }).annotate({
   identifier: "WorkflowChildV3CancelledPhase",
   parseOptions: strictParseOptions
 })
 
 const CancelledBeforeStartPhase = Schema.TaggedStruct("CancelledBeforeStart", {
-  parentCauseEventId: Schema.NonEmptyString,
-  cancelledBeforeStartEventId: Schema.NonEmptyString
+  parentCauseEventId: Wire.SourceEventIdentifier,
+  cancelledBeforeStartEventId: Wire.Identifier
 }).annotate({
   identifier: "WorkflowChildV3CancelledBeforeStartPhase",
   parseOptions: strictParseOptions
 })
 
 const AbandonedPhase = Schema.TaggedStruct("Abandoned", {
-  parentCauseEventId: Schema.NonEmptyString,
-  abandonEventId: Schema.NonEmptyString
+  parentCauseEventId: Wire.SourceEventIdentifier,
+  abandonEventId: Wire.Identifier
 }).annotate({
   identifier: "WorkflowChildV3AbandonedPhase",
   parseOptions: strictParseOptions
 })
 
-/**
- * Closed protocol version `3` child-call lifecycle phases.
- *
- * @category schemas
- * @since 4.0.0
- */
-export const ChildCallPhase = Schema.Union([
+const ChildCallPhaseSchema = Schema.Union([
   ScheduledPhase,
   RunningPhase,
   StartFailedPhase,
@@ -813,175 +805,13 @@ export const ChildCallPhase = Schema.Union([
 })
 
 /**
- * The decoded type of {@link ChildCallPhase}.
+ * Closed protocol version `3` child-call lifecycle phases derived by the
+ * authoritative history reducer.
  *
  * @category models
  * @since 4.0.0
  */
-export type ChildCallPhase = Schema.Schema.Type<typeof ChildCallPhase>
-
-const ChildCallStateStruct = Schema.Struct({
-  callStateVersion: Schema.Literal(3),
-  relation: ChildRelationStruct,
-  phase: ChildCallPhase
-}).annotate({
-  identifier: "WorkflowChildV3CallStateStruct",
-  parseOptions: strictParseOptions
-})
-
-type ChildCallStateStruct = Schema.Schema.Type<typeof ChildCallStateStruct>
-
-const stateIssues = (
-  state: ChildCallStateStruct
-): ReadonlyArray<RelationalIssue> => {
-  const issues = [...relationIssues(state.relation)]
-  const parent = state.relation.parent
-  const phase = state.phase
-  const coordinates = [
-    parent.tenantId,
-    parent.parentRunId,
-    parent.callId
-  ] as const
-
-  switch (phase._tag) {
-    case "Scheduled": {
-      break
-    }
-    case "Running": {
-      const expected = childStartProjectionEventId(
-        ...coordinates,
-        phase.childRunStartedEventId
-      )
-      if (phase.startProjectionEventId !== expected) {
-        issues.push(issue(
-          ValidationCodes.IdentityMismatch,
-          "startProjectionEventId must name the canonical child-start projection",
-          ["phase", "startProjectionEventId"]
-        ))
-      }
-      break
-    }
-    case "StartFailed": {
-      const expected = childStartFailedEventId(
-        ...coordinates,
-        state.relation.startRequestId
-      )
-      if (phase.startFailedEventId !== expected) {
-        issues.push(issue(
-          ValidationCodes.IdentityMismatch,
-          "startFailedEventId must name the canonical child-start failure",
-          ["phase", "startFailedEventId"]
-        ))
-      }
-      break
-    }
-    case "CancellationRequested": {
-      const expected = requestChildCancellationCommandId(
-        ...coordinates,
-        phase.parentCauseEventId
-      )
-      if (phase.cancellationCommandId !== expected) {
-        issues.push(issue(
-          ValidationCodes.IdentityMismatch,
-          "cancellationCommandId must name the canonical cancellation request",
-          ["phase", "cancellationCommandId"]
-        ))
-      }
-      break
-    }
-    case "CancellationAccepted": {
-      const expectedCommand = requestChildCancellationCommandId(
-        ...coordinates,
-        phase.parentCauseEventId
-      )
-      if (phase.cancellationCommandId !== expectedCommand) {
-        issues.push(issue(
-          ValidationCodes.IdentityMismatch,
-          "cancellationCommandId must name the canonical cancellation request",
-          ["phase", "cancellationCommandId"]
-        ))
-      }
-      const expectedAccepted = childCancellationAcceptedEventId(
-        ...coordinates,
-        phase.childCancellationEventId
-      )
-      if (phase.acceptedEventId !== expectedAccepted) {
-        issues.push(issue(
-          ValidationCodes.IdentityMismatch,
-          "acceptedEventId must name the canonical cancellation acknowledgement",
-          ["phase", "acceptedEventId"]
-        ))
-      }
-      break
-    }
-    case "Succeeded":
-    case "Failed":
-    case "Cancelled": {
-      const expected = childTerminalProjectionEventId(
-        ...coordinates,
-        phase.childTerminalEventId
-      )
-      if (phase.terminalProjectionEventId !== expected) {
-        issues.push(issue(
-          ValidationCodes.IdentityMismatch,
-          "terminalProjectionEventId must name the canonical terminal projection",
-          ["phase", "terminalProjectionEventId"]
-        ))
-      }
-      break
-    }
-    case "CancelledBeforeStart": {
-      const expected = childCancelledBeforeStartEventId(
-        ...coordinates,
-        phase.parentCauseEventId
-      )
-      if (phase.cancelledBeforeStartEventId !== expected) {
-        issues.push(issue(
-          ValidationCodes.IdentityMismatch,
-          "cancelledBeforeStartEventId must name the canonical pre-start close",
-          ["phase", "cancelledBeforeStartEventId"]
-        ))
-      }
-      break
-    }
-    case "Abandoned": {
-      const expected = abandonChildEventId(
-        ...coordinates,
-        phase.parentCauseEventId
-      )
-      if (phase.abandonEventId !== expected) {
-        issues.push(issue(
-          ValidationCodes.IdentityMismatch,
-          "abandonEventId must name the canonical abandon fact",
-          ["phase", "abandonEventId"]
-        ))
-      }
-      break
-    }
-  }
-  return issues
-}
-
-/**
- * One immutable deterministic child relation and its closed lifecycle phase.
- *
- * @category schemas
- * @since 4.0.0
- */
-export const ChildCallState = ChildCallStateStruct.check(
-  Schema.makeFilter((state) => stateIssues(state).map(toFilterIssue))
-).annotate({
-  identifier: "WorkflowChildV3CallState",
-  parseOptions: strictParseOptions
-})
-
-/**
- * The decoded type of {@link ChildCallState}.
- *
- * @category models
- * @since 4.0.0
- */
-export type ChildCallState = Schema.Schema.Type<typeof ChildCallState>
+export type ChildCallPhase = Schema.Schema.Type<typeof ChildCallPhaseSchema>
 
 const validationError = (
   relationalIssue: RelationalIssue
@@ -1090,10 +920,6 @@ const decodeChildRelation = Schema.decodeUnknownResult(
   ChildRelationStruct,
   strictParseOptions
 )
-const decodeChildCallState = Schema.decodeUnknownResult(
-  ChildCallStateStruct,
-  strictParseOptions
-)
 
 /**
  * Detaches, recursively freezes, and validates one exact V3 child target pin.
@@ -1192,47 +1018,5 @@ export const validateChildRelation = (
   const relationalIssue = relationIssues(decoded.success)[0]
   return relationalIssue === undefined
     ? Result.succeed(decoded.success as ChildRelation)
-    : Result.fail(validationError(relationalIssue))
-}
-
-/**
- * Detaches, recursively freezes, and validates one deterministic child-call
- * state, including all phase-specific canonical identities.
- *
- * @category validation
- * @since 4.0.0
- */
-export const validateChildCallState = (
-  input: unknown
-): Result.Result<ChildCallState, ChildWorkflowValidationError> => {
-  const snapshot = snapshotInput(input, "child call state")
-  if (Result.isFailure(snapshot)) {
-    return Result.fail(snapshot.failure)
-  }
-  const stateObject = jsonObject(snapshot.success)
-  const relation = stateObject === undefined
-    ? undefined
-    : jsonObject(stateObject.relation)
-  const target = relation === undefined ? undefined : relation.target
-  if (target !== undefined) {
-    const versionIssue = nonV3TargetIssue(
-      target,
-      ["relation", "target"]
-    )
-    if (versionIssue !== undefined) {
-      return Result.fail(validationError(versionIssue))
-    }
-  }
-  const decoded = decodeSnapshot(
-    snapshot.success,
-    decodeChildCallState,
-    "child call state"
-  )
-  if (Result.isFailure(decoded)) {
-    return decoded
-  }
-  const relationalIssue = stateIssues(decoded.success)[0]
-  return relationalIssue === undefined
-    ? Result.succeed(decoded.success as ChildCallState)
     : Result.fail(validationError(relationalIssue))
 }

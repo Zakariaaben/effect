@@ -365,26 +365,160 @@ const terminalPhase = (
   phase._tag === "CancelledBeforeStart" ||
   phase._tag === "Abandoned"
 
+const phaseIdentityMismatch = (
+  phase: Child.ChildCallPhase["_tag"],
+  field: string,
+  expected: string,
+  actual: string
+): Result.Result<never, ChildWorkflowHistoryError> =>
+  Result.fail(makeError(
+    Codes.StateInvariantViolation,
+    "Reducer produced a child-call phase with a non-canonical identity",
+    {
+      phase,
+      field,
+      expected,
+      actual
+    }
+  ))
+
 const validatePhase = (
   relation: Child.ChildRelation,
   phase: Child.ChildCallPhase
 ): Result.Result<Child.ChildCallPhase, ChildWorkflowHistoryError> => {
-  const validated = Child.validateChildCallState({
-    callStateVersion: 3,
-    relation,
-    phase
-  })
-  return Result.isFailure(validated)
-    ? Result.fail(makeError(
-      Codes.StateInvariantViolation,
-      "Reducer produced an invalid canonical child-call phase",
-      {
-        validationCode: validated.failure.code,
-        validationMessage: validated.failure.message,
-        path: [...validated.failure.path]
+  const parent = relation.parent
+  const coordinates = [
+    parent.tenantId,
+    parent.parentRunId,
+    parent.callId
+  ] as const
+
+  switch (phase._tag) {
+    case "Scheduled": {
+      break
+    }
+    case "Running": {
+      const expected = Child.childStartProjectionEventId(
+        ...coordinates,
+        phase.childRunStartedEventId
+      )
+      if (phase.startProjectionEventId !== expected) {
+        return phaseIdentityMismatch(
+          phase._tag,
+          "startProjectionEventId",
+          expected,
+          phase.startProjectionEventId
+        )
       }
-    ))
-    : Result.succeed(validated.success.phase)
+      break
+    }
+    case "StartFailed": {
+      const expected = Child.childStartFailedEventId(
+        ...coordinates,
+        relation.startRequestId
+      )
+      if (phase.startFailedEventId !== expected) {
+        return phaseIdentityMismatch(
+          phase._tag,
+          "startFailedEventId",
+          expected,
+          phase.startFailedEventId
+        )
+      }
+      break
+    }
+    case "CancellationRequested": {
+      const expected = Child.requestChildCancellationCommandId(
+        ...coordinates,
+        phase.parentCauseEventId
+      )
+      if (phase.cancellationCommandId !== expected) {
+        return phaseIdentityMismatch(
+          phase._tag,
+          "cancellationCommandId",
+          expected,
+          phase.cancellationCommandId
+        )
+      }
+      break
+    }
+    case "CancellationAccepted": {
+      const expectedCommand = Child.requestChildCancellationCommandId(
+        ...coordinates,
+        phase.parentCauseEventId
+      )
+      if (phase.cancellationCommandId !== expectedCommand) {
+        return phaseIdentityMismatch(
+          phase._tag,
+          "cancellationCommandId",
+          expectedCommand,
+          phase.cancellationCommandId
+        )
+      }
+      const expectedAccepted = Child.childCancellationAcceptedEventId(
+        ...coordinates,
+        phase.childCancellationEventId
+      )
+      if (phase.acceptedEventId !== expectedAccepted) {
+        return phaseIdentityMismatch(
+          phase._tag,
+          "acceptedEventId",
+          expectedAccepted,
+          phase.acceptedEventId
+        )
+      }
+      break
+    }
+    case "Succeeded":
+    case "Failed":
+    case "Cancelled": {
+      const expected = Child.childTerminalProjectionEventId(
+        ...coordinates,
+        phase.childTerminalEventId
+      )
+      if (phase.terminalProjectionEventId !== expected) {
+        return phaseIdentityMismatch(
+          phase._tag,
+          "terminalProjectionEventId",
+          expected,
+          phase.terminalProjectionEventId
+        )
+      }
+      break
+    }
+    case "CancelledBeforeStart": {
+      const expected = Child.childCancelledBeforeStartEventId(
+        ...coordinates,
+        phase.parentCauseEventId
+      )
+      if (phase.cancelledBeforeStartEventId !== expected) {
+        return phaseIdentityMismatch(
+          phase._tag,
+          "cancelledBeforeStartEventId",
+          expected,
+          phase.cancelledBeforeStartEventId
+        )
+      }
+      break
+    }
+    case "Abandoned": {
+      const expected = Child.abandonChildEventId(
+        ...coordinates,
+        phase.parentCauseEventId
+      )
+      if (phase.abandonEventId !== expected) {
+        return phaseIdentityMismatch(
+          phase._tag,
+          "abandonEventId",
+          expected,
+          phase.abandonEventId
+        )
+      }
+      break
+    }
+  }
+
+  return Result.succeed(phase)
 }
 
 const initial = (

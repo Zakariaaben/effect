@@ -141,7 +141,7 @@ export const childStartFailedEventId = Child.childStartFailedEventId
  * @since 4.0.0
  */
 export const ParentFailure = Schema.TaggedStruct("ParentFailure", {
-  parentCauseEventId: Schema.NonEmptyString
+  parentCauseEventId: Wire.SourceEventIdentifier
 }).annotate({
   identifier: "WorkflowChildProtocolV3ParentFailure",
   parseOptions: strictParseOptions
@@ -162,7 +162,7 @@ export type ParentFailure = Schema.Schema.Type<typeof ParentFailure>
  * @since 4.0.0
  */
 export const ParentCancellation = Schema.TaggedStruct("ParentCancellation", {
-  parentCauseEventId: Schema.NonEmptyString
+  parentCauseEventId: Wire.SourceEventIdentifier
 }).annotate({
   identifier: "WorkflowChildProtocolV3ParentCancellation",
   parseOptions: strictParseOptions
@@ -348,12 +348,12 @@ export type CommandPayload = Schema.Schema.Type<typeof CommandPayload>
 const CommandStruct = Schema.Struct({
   commandVersion: Schema.Literal(CommandVersion),
   executionProtocolVersion: Schema.Literal(ExecutionProtocolVersion),
-  tenantId: Schema.NonEmptyString,
-  parentRunId: Schema.NonEmptyString,
-  callId: Schema.NonEmptyString,
-  commandId: Schema.NonEmptyString,
-  causationId: Schema.NonEmptyString,
-  correlationId: Schema.NonEmptyString,
+  tenantId: Wire.AtomicIdentifier,
+  parentRunId: Wire.LineageIdentifier,
+  callId: Wire.LineageIdentifier,
+  commandId: Wire.Identifier,
+  causationId: Wire.Identifier,
+  correlationId: Wire.LineageIdentifier,
   relation: Child.ChildRelation,
   payload: CommandPayload
 }).annotate({
@@ -562,9 +562,9 @@ export type ChildScheduled = Schema.Schema.Type<typeof ChildScheduled>
  * @since 4.0.0
  */
 export const ChildStartAccepted = Schema.TaggedStruct("ChildStartAccepted", {
-  childRunId: Schema.NonEmptyString,
-  startRequestId: Schema.NonEmptyString,
-  childRunStartedEventId: Schema.NonEmptyString
+  childRunId: Wire.LineageIdentifier,
+  startRequestId: Wire.LineageIdentifier,
+  childRunStartedEventId: Wire.SourceEventIdentifier
 }).annotate({
   identifier: "WorkflowChildProtocolV3ChildStartAccepted",
   parseOptions: strictParseOptions
@@ -587,8 +587,8 @@ export type ChildStartAccepted = Schema.Schema.Type<
  * @since 4.0.0
  */
 export const ChildStartFailed = Schema.TaggedStruct("ChildStartFailed", {
-  childRunId: Schema.NonEmptyString,
-  startRequestId: Schema.NonEmptyString,
+  childRunId: Wire.LineageIdentifier,
+  startRequestId: Wire.LineageIdentifier,
   failureKind: ChildStartFailureKind,
   failure: Wire.EncodedPayload
 }).annotate({
@@ -613,10 +613,10 @@ export type ChildStartFailed = Schema.Schema.Type<typeof ChildStartFailed>
 export const ChildCancellationRequested = Schema.TaggedStruct(
   "ChildCancellationRequested",
   {
-    childRunId: Schema.NonEmptyString,
+    childRunId: Wire.LineageIdentifier,
     parentCause: ParentCloseCause,
     closeAction: CancellationCloseAction,
-    cancellationCommandId: Schema.NonEmptyString
+    cancellationCommandId: Wire.Identifier
   }
 ).annotate({
   identifier: "WorkflowChildProtocolV3ChildCancellationRequested",
@@ -642,10 +642,10 @@ export type ChildCancellationRequested = Schema.Schema.Type<
 export const ChildCancellationAccepted = Schema.TaggedStruct(
   "ChildCancellationAccepted",
   {
-    childRunId: Schema.NonEmptyString,
-    parentCauseEventId: Schema.NonEmptyString,
-    cancellationCommandId: Schema.NonEmptyString,
-    childCancellationEventId: Schema.NonEmptyString
+    childRunId: Wire.LineageIdentifier,
+    parentCauseEventId: Wire.SourceEventIdentifier,
+    cancellationCommandId: Wire.Identifier,
+    childCancellationEventId: Wire.SourceEventIdentifier
   }
 ).annotate({
   identifier: "WorkflowChildProtocolV3ChildCancellationAccepted",
@@ -677,12 +677,12 @@ export type ChildCancellationAccepted = Schema.Schema.Type<
 export const ChildCancelledBeforeStart = Schema.TaggedStruct(
   "ChildCancelledBeforeStart",
   {
-    childRunId: Schema.NonEmptyString,
-    startRequestId: Schema.NonEmptyString,
+    childRunId: Wire.LineageIdentifier,
+    startRequestId: Wire.LineageIdentifier,
     parentCause: ParentCloseCause,
-    parentCauseEventId: Schema.NonEmptyString,
+    parentCauseEventId: Wire.SourceEventIdentifier,
     closeAction: CancellationCloseAction,
-    cancellationCommandId: Schema.NonEmptyString
+    cancellationCommandId: Wire.Identifier
   }
 ).annotate({
   identifier: "WorkflowChildProtocolV3ChildCancelledBeforeStart",
@@ -706,8 +706,8 @@ export type ChildCancelledBeforeStart = Schema.Schema.Type<
  * @since 4.0.0
  */
 export const ChildSucceeded = Schema.TaggedStruct("ChildSucceeded", {
-  childRunId: Schema.NonEmptyString,
-  childTerminalEventId: Schema.NonEmptyString,
+  childRunId: Wire.LineageIdentifier,
+  childTerminalEventId: Wire.SourceEventIdentifier,
   outputContractDigest: Child.ContractDigest,
   encodedOutput: Wire.EncodedPayload
 }).annotate({
@@ -730,8 +730,8 @@ export type ChildSucceeded = Schema.Schema.Type<typeof ChildSucceeded>
  * @since 4.0.0
  */
 export const ChildFailed = Schema.TaggedStruct("ChildFailed", {
-  childRunId: Schema.NonEmptyString,
-  childTerminalEventId: Schema.NonEmptyString,
+  childRunId: Wire.LineageIdentifier,
+  childTerminalEventId: Wire.SourceEventIdentifier,
   failure: Wire.EncodedPayload
 }).annotate({
   identifier: "WorkflowChildProtocolV3ChildFailed",
@@ -753,8 +753,8 @@ export type ChildFailed = Schema.Schema.Type<typeof ChildFailed>
  * @since 4.0.0
  */
 export const ChildCancelled = Schema.TaggedStruct("ChildCancelled", {
-  childRunId: Schema.NonEmptyString,
-  childTerminalEventId: Schema.NonEmptyString,
+  childRunId: Wire.LineageIdentifier,
+  childTerminalEventId: Wire.SourceEventIdentifier,
   cancellation: Wire.EncodedPayload
 }).annotate({
   identifier: "WorkflowChildProtocolV3ChildCancelled",
@@ -776,7 +776,7 @@ export type ChildCancelled = Schema.Schema.Type<typeof ChildCancelled>
  * @since 4.0.0
  */
 export const ChildAbandoned = Schema.TaggedStruct("ChildAbandoned", {
-  childRunId: Schema.NonEmptyString,
+  childRunId: Wire.LineageIdentifier,
   parentCause: ParentCloseCause,
   closeAction: Schema.Literal("Abandon")
 }).annotate({
@@ -825,14 +825,14 @@ export type EventPayload = Schema.Schema.Type<typeof EventPayload>
 const EventStruct = Schema.Struct({
   eventVersion: Schema.Literal(EventVersion),
   executionProtocolVersion: Schema.Literal(ExecutionProtocolVersion),
-  eventId: Schema.NonEmptyString,
-  tenantId: Schema.NonEmptyString,
-  parentRunId: Schema.NonEmptyString,
-  callId: Schema.NonEmptyString,
+  eventId: Wire.Identifier,
+  tenantId: Wire.AtomicIdentifier,
+  parentRunId: Wire.LineageIdentifier,
+  callId: Wire.LineageIdentifier,
   sequence: Wire.NonNegativeSafeInt,
   recordedAt: Wire.Timestamp,
-  causationId: Schema.NonEmptyString,
-  correlationId: Schema.NonEmptyString,
+  causationId: Wire.Identifier,
+  correlationId: Wire.LineageIdentifier,
   payload: EventPayload
 }).annotate({
   identifier: "WorkflowChildProtocolV3EventStruct",

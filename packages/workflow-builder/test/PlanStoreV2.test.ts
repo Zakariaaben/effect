@@ -17,7 +17,7 @@ const artifact = (): PlanStoreV2.PlanArtifact => ({
   executionProtocolVersion: 2,
   fingerprintDocument: {
     fingerprintVersion: 1,
-    compilerSemanticVersion: "1",
+    compilerSemanticVersion: "2",
     plan: {
       formatVersion: 1,
       id: "plan-2",

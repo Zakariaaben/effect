@@ -713,6 +713,20 @@ describe("ChildWorkflowProtocolV3", () => {
     )
   })
 
+  it("rejects non-scalar identifiers without invoking identity constructors", () => {
+    const commandResult = Protocol.validateCommand({
+      ...scheduleCommand(),
+      tenantId: "\ud800"
+    })
+    assert.isTrue(Result.isFailure(commandResult))
+
+    const eventResult = Protocol.validateEvent({
+      ...scheduledEvent(),
+      eventId: "\udc00"
+    })
+    assert.isTrue(Result.isFailure(eventResult))
+  })
+
   it("returns detached recursively frozen snapshots", () => {
     const original = scheduleCommand()
     const validated = expectCommand(original)

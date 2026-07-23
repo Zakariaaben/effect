@@ -124,12 +124,6 @@ const relation = () => {
   }
 }
 
-const state = (phase: Record<string, unknown>) => ({
-  callStateVersion: 3 as const,
-  relation: relation(),
-  phase
-})
-
 const expectSuccess = <A>(
   result: Result.Result<A, Child.ChildWorkflowValidationError>
 ): A => {
@@ -155,13 +149,18 @@ const expectCode = <A>(
 const tuple = (
   kind: string,
   ...parts: ReadonlyArray<string | number>
-): string =>
-  JSON.stringify([
-    "@effect/workflow-builder",
-    3,
-    kind,
-    ...parts
-  ])
+): string => {
+  const field = (value: string | number): string => {
+    const text = String(value)
+    return `${typeof value === "number" ? "n" : "s"}${new TextEncoder().encode(text).length}:${text}`
+  }
+  return [
+    field("@effect/workflow-builder"),
+    field(3),
+    field(kind),
+    ...parts.map(field)
+  ].join("")
+}
 
 describe("ChildWorkflowV3", () => {
   it("uses stable collision-free canonical identities for the full relation vocabulary", () => {
@@ -179,15 +178,33 @@ describe("ChildWorkflowV3", () => {
       ],
       [
         childRunId,
-        tuple("ChildRun", tenantId, parentRunId, callId)
+        tuple(
+          "ChildRun",
+          "CanonicalCall",
+          tenantId,
+          parentRunId,
+          nodeInstanceId
+        )
       ],
       [
         startRequestId,
-        tuple("ChildStartRequest", tenantId, parentRunId, callId)
+        tuple(
+          "ChildStartRequest",
+          "CanonicalCall",
+          tenantId,
+          parentRunId,
+          nodeInstanceId
+        )
       ],
       [
         Child.scheduleChildCommandId(tenantId, parentRunId, callId),
-        tuple("ScheduleChild", tenantId, parentRunId, callId)
+        tuple(
+          "ScheduleChild",
+          "CanonicalCall",
+          tenantId,
+          parentRunId,
+          nodeInstanceId
+        )
       ],
       [
         Child.childStartProjectionEventId(
@@ -198,9 +215,10 @@ describe("ChildWorkflowV3", () => {
         ),
         tuple(
           "ChildStartProjection",
+          "CanonicalCall",
           tenantId,
           parentRunId,
-          callId,
+          nodeInstanceId,
           "child-started-1"
         )
       ],
@@ -213,9 +231,10 @@ describe("ChildWorkflowV3", () => {
         ),
         tuple(
           "ChildTerminalProjection",
+          "CanonicalCall",
           tenantId,
           parentRunId,
-          callId,
+          nodeInstanceId,
           "child-terminal-1"
         )
       ],
@@ -228,9 +247,10 @@ describe("ChildWorkflowV3", () => {
         ),
         tuple(
           "RequestChildCancellation",
+          "CanonicalCall",
           tenantId,
           parentRunId,
-          callId,
+          nodeInstanceId,
           "parent-cause-1"
         )
       ],
@@ -243,9 +263,10 @@ describe("ChildWorkflowV3", () => {
         ),
         tuple(
           "ChildCancellationAccepted",
+          "CanonicalCall",
           tenantId,
           parentRunId,
-          callId,
+          nodeInstanceId,
           "child-cancel-1"
         )
       ],
@@ -258,9 +279,10 @@ describe("ChildWorkflowV3", () => {
         ),
         tuple(
           "ChildCancelledBeforeStart",
+          "CanonicalCall",
           tenantId,
           parentRunId,
-          callId,
+          nodeInstanceId,
           "parent-cause-1"
         )
       ],
@@ -273,9 +295,10 @@ describe("ChildWorkflowV3", () => {
         ),
         tuple(
           "AbandonChild",
+          "CanonicalCall",
           tenantId,
           parentRunId,
-          callId,
+          nodeInstanceId,
           "parent-cause-1"
         )
       ],
@@ -288,10 +311,11 @@ describe("ChildWorkflowV3", () => {
         ),
         tuple(
           "ChildStartFailed",
+          "CanonicalCall",
           tenantId,
           parentRunId,
-          callId,
-          startRequestId
+          nodeInstanceId,
+          "CanonicalStartRequest"
         )
       ]
     ]
@@ -347,13 +371,11 @@ describe("ChildWorkflowV3", () => {
     const validTarget = target()
     const validParent = parentLink()
     const validRelation = relation()
-    const validState = state({ _tag: "Scheduled" })
 
     Schema.decodeUnknownSync(Child.ChildClosePolicy)(validTarget.closePolicy)
     Schema.decodeUnknownSync(Child.ChildTargetPin)(validTarget)
     Schema.decodeUnknownSync(Child.ParentRunLink)(validParent)
     Schema.decodeUnknownSync(Child.ChildRelation)(validRelation)
-    Schema.decodeUnknownSync(Child.ChildCallState)(validState)
 
     assert.throws(() =>
       Schema.decodeUnknownSync(Child.ChildClosePolicy)({
@@ -386,18 +408,6 @@ describe("ChildWorkflowV3", () => {
       Schema.decodeUnknownSync(Child.ChildRelation)({
         ...validRelation,
         futureRelation: true
-      })
-    )
-    assert.throws(() =>
-      Schema.decodeUnknownSync(Child.ChildCallState)({
-        ...validState,
-        phase: { _tag: "Scheduled", futurePhase: true }
-      })
-    )
-    assert.throws(() =>
-      Schema.decodeUnknownSync(Child.ChildCallState)({
-        ...validState,
-        callStateVersion: 2
       })
     )
   })
@@ -448,8 +458,17 @@ describe("ChildWorkflowV3", () => {
       Child.validateChildTargetPin(mismatchedFamily),
       Child.ValidationCodes.IdentityMismatch
     )
-    assert.throws(() =>
-      Schema.decodeUnknownSync(Child.ChildTargetPin)(mismatchedFamily)
+    assert.throws(() => Schema.decodeUnknownSync(Child.ChildTargetPin)(mismatchedFamily))
+
+    expectCode(
+      Child.validateChildTargetPin({
+        ...target(),
+        definition: {
+          ...target().definition,
+          id: "\ud800"
+        }
+      }),
+      Child.ValidationCodes.InvalidSchema
     )
   })
 
@@ -565,8 +584,7 @@ describe("ChildWorkflowV3", () => {
     expectCode(
       Child.validateParentRunLink({
         ...valid,
-        parentWorkflowFamilyIdentity:
-          repeatedWorkflowParent.workflowFamilyIdentity,
+        parentWorkflowFamilyIdentity: repeatedWorkflowParent.workflowFamilyIdentity,
         ancestry: [root, repeatedWorkflowParent]
       }),
       Child.ValidationCodes.RepeatedWorkflowIdentity
@@ -630,8 +648,7 @@ describe("ChildWorkflowV3", () => {
             ...valid.target.definition,
             id: "orders"
           },
-          workflowFamilyIdentity:
-            valid.parent.ancestry[0]!.workflowFamilyIdentity
+          workflowFamilyIdentity: valid.parent.ancestry[0]!.workflowFamilyIdentity
         }
       }),
       Child.ValidationCodes.RepeatedWorkflowIdentity
@@ -680,162 +697,34 @@ describe("ChildWorkflowV3", () => {
     }
   })
 
-  it("validates canonical identities for every closed child-call phase", () => {
-    const validRelation = relation()
-    const parent = validRelation.parent
-    const coordinates = [
-      parent.tenantId,
-      parent.parentRunId,
-      parent.callId
-    ] as const
-    const causeEventId = "parent-cause-1"
-    const childCancellationEventId = "child-cancellation-1"
-    const childStartedEventId = "child-started-1"
-    const childTerminalEventId = "child-terminal-1"
-    const phases: ReadonlyArray<Record<string, unknown>> = [
-      { _tag: "Scheduled" },
-      {
-        _tag: "Running",
-        childRunStartedEventId: childStartedEventId,
-        startProjectionEventId: Child.childStartProjectionEventId(
-          ...coordinates,
-          childStartedEventId
-        )
-      },
-      {
-        _tag: "StartFailed",
-        startFailedEventId: Child.childStartFailedEventId(
-          ...coordinates,
-          validRelation.startRequestId
-        )
-      },
-      {
-        _tag: "CancellationRequested",
-        parentCauseEventId: causeEventId,
-        cancellationCommandId: Child.requestChildCancellationCommandId(
-          ...coordinates,
-          causeEventId
-        )
-      },
-      {
-        _tag: "CancellationAccepted",
-        parentCauseEventId: causeEventId,
-        cancellationCommandId: Child.requestChildCancellationCommandId(
-          ...coordinates,
-          causeEventId
-        ),
-        childCancellationEventId,
-        acceptedEventId: Child.childCancellationAcceptedEventId(
-          ...coordinates,
-          childCancellationEventId
-        )
-      },
-      ...(["Succeeded", "Failed", "Cancelled"] as const).map((_tag) => ({
-        _tag,
-        childTerminalEventId,
-        terminalProjectionEventId: Child.childTerminalProjectionEventId(
-          ...coordinates,
-          childTerminalEventId
-        )
-      })),
-      {
-        _tag: "CancelledBeforeStart",
-        parentCauseEventId: causeEventId,
-        cancelledBeforeStartEventId: Child.childCancelledBeforeStartEventId(
-          ...coordinates,
-          causeEventId
-        )
-      },
-      {
-        _tag: "Abandoned",
-        parentCauseEventId: causeEventId,
-        abandonEventId: Child.abandonChildEventId(
-          ...coordinates,
-          causeEventId
-        )
-      }
-    ]
-
-    for (const phase of phases) {
-      expectSuccess(Child.validateChildCallState({
-        callStateVersion: 3,
-        relation: validRelation,
-        phase
-      }))
-    }
-
-    const forgedPhases: ReadonlyArray<Record<string, unknown>> = [
-      {
-        ...phases[1]!,
-        startProjectionEventId: "forged"
-      },
-      {
-        ...phases[2]!,
-        startFailedEventId: "forged"
-      },
-      {
-        ...phases[3]!,
-        cancellationCommandId: "forged"
-      },
-      {
-        ...phases[4]!,
-        acceptedEventId: "forged"
-      },
-      {
-        ...phases[5]!,
-        terminalProjectionEventId: "forged"
-      },
-      {
-        ...phases[8]!,
-        cancelledBeforeStartEventId: "forged"
-      },
-      {
-        ...phases[9]!,
-        abandonEventId: "forged"
-      }
-    ]
-    for (const phase of forgedPhases) {
-      expectCode(
-        Child.validateChildCallState({
-          callStateVersion: 3,
-          relation: validRelation,
-          phase
-        }),
-        Child.ValidationCodes.IdentityMismatch
-      )
-    }
-  })
-
-  it("returns detached recursively frozen target, lineage, relation, and state records", () => {
-    const original = state({ _tag: "Scheduled" })
+  it("returns detached recursively frozen target, lineage, and relation records", () => {
+    const original = relation()
     const admitted = expectSuccess(
-      Child.validateChildCallState(original)
+      Child.validateChildRelation(original)
     )
 
     assert.isTrue(Object.isFrozen(admitted))
-    assert.isTrue(Object.isFrozen(admitted.relation))
-    assert.isTrue(Object.isFrozen(admitted.relation.target))
-    assert.isTrue(Object.isFrozen(admitted.relation.target.plan))
-    assert.isTrue(Object.isFrozen(admitted.relation.target.definition))
-    assert.isTrue(Object.isFrozen(admitted.relation.target.closePolicy))
-    assert.isTrue(Object.isFrozen(admitted.relation.parent))
-    assert.isTrue(Object.isFrozen(admitted.relation.parent.ancestry))
-    assert.isTrue(Object.isFrozen(admitted.relation.parent.ancestry[0]))
-    assert.isTrue(Object.isFrozen(admitted.phase))
+    assert.isTrue(Object.isFrozen(admitted.target))
+    assert.isTrue(Object.isFrozen(admitted.target.plan))
+    assert.isTrue(Object.isFrozen(admitted.target.definition))
+    assert.isTrue(Object.isFrozen(admitted.target.closePolicy))
+    assert.isTrue(Object.isFrozen(admitted.parent))
+    assert.isTrue(Object.isFrozen(admitted.parent.ancestry))
+    assert.isTrue(Object.isFrozen(admitted.parent.ancestry[0]))
 
-    original.relation.parent.ancestry[0]!.runId = "mutated-run"
-    original.relation.target.plan.id = "mutated-plan"
-    const mutableClosePolicy = original.relation.target.closePolicy as {
+    original.parent.ancestry[0]!.runId = "mutated-run"
+    original.target.plan.id = "mutated-plan"
+    const mutableClosePolicy = original.target.closePolicy as {
       onParentFailure: string
     }
     mutableClosePolicy.onParentFailure = "Abandon"
     assert.strictEqual(
-      admitted.relation.parent.ancestry[0]!.runId,
+      admitted.parent.ancestry[0]!.runId,
       parentRunId
     )
-    assert.strictEqual(admitted.relation.target.plan.id, "payment-plan")
+    assert.strictEqual(admitted.target.plan.id, "payment-plan")
     assert.strictEqual(
-      admitted.relation.target.closePolicy.onParentFailure,
+      admitted.target.closePolicy.onParentFailure,
       "CancelAndWait"
     )
 
