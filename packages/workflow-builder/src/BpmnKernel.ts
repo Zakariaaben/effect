@@ -691,6 +691,47 @@ const resolveKernel = (
   return Result.succeed(trusted)
 }
 
+/**
+ * Resolves the immutable protocol-v3 binding for one BPMN Task from an exact
+ * compiled-kernel authority.
+ *
+ * **Details**
+ *
+ * This accessor is intended for trusted execution adapters that must reject a
+ * mismatched semantic invocation before dispatching its first activity. A
+ * structural copy of a kernel is not an authority and is rejected.
+ *
+ * @category accessors
+ * @since 4.0.0
+ */
+export const taskBinding = (
+  kernel: CompiledKernel,
+  taskNodeId: unknown
+): Result.Result<BpmnActivityV3.TaskBinding, Diagnostic.CompilationError> => {
+  const resolvedKernel = resolveKernel(kernel)
+  if (Result.isFailure(resolvedKernel)) {
+    return Result.fail(resolvedKernel.failure)
+  }
+  if (typeof taskNodeId !== "string" || taskNodeId.length === 0) {
+    return Result.fail(compilationError(error(
+      Codes.InvalidCommand,
+      "Task-binding lookup requires a non-empty task node identifier",
+      ["taskNodeId"]
+    )))
+  }
+  const binding = resolvedKernel.success.taskBindingByTaskNodeId.get(
+    taskNodeId
+  )
+  if (binding === undefined) {
+    return Result.fail(compilationError(error(
+      Codes.InvalidCommand,
+      `Task '${taskNodeId}' has no compiled protocol-v3 binding`,
+      ["taskNodeId"]
+    )))
+  }
+  return Result.succeed(binding)
+}
+
 const sameInvocation = (
   left: BpmnExecutionState.InvocationIdentity,
   right: BpmnExecutionState.InvocationIdentity

@@ -465,6 +465,22 @@ describe("BpmnKernel", () => {
     )
     const binding = taskBinding("task")
     const compiled = compile(definition, [binding])
+    const resolvedBinding = BpmnKernel.taskBinding(compiled, "task")
+    assert(Result.isSuccess(resolvedBinding))
+    assert.deepStrictEqual(resolvedBinding.success, binding)
+    const copiedKernelBinding = BpmnKernel.taskBinding(
+      { ...compiled },
+      "task"
+    )
+    assert(Result.isFailure(copiedKernelBinding))
+    assert(
+      copiedKernelBinding.failure.diagnostics.some((diagnostic) => diagnostic.code === BpmnKernel.Codes.InvalidKernel)
+    )
+    const missingBinding = BpmnKernel.taskBinding(compiled, "missing")
+    assert(Result.isFailure(missingBinding))
+    assert(
+      missingBinding.failure.diagnostics.some((diagnostic) => diagnostic.code === BpmnKernel.Codes.InvalidCommand)
+    )
     const initialized = BpmnKernel.initialize(compiled, services())
     assert(Result.isSuccess(initialized))
     const token = initialized.success.state.tokens.find((candidate) =>

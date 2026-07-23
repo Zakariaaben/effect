@@ -17,11 +17,15 @@ import * as NativeDeferred from "effect/unstable/workflow/DurableDeferred"
 import * as NativeWorkflow from "effect/unstable/workflow/Workflow"
 import { createHash } from "node:crypto"
 import * as ActivityPolicyV3 from "../src/ActivityPolicyV3.ts"
+import * as BpmnActivityV3 from "../src/BpmnActivityV3.ts"
+import * as BpmnKernel from "../src/BpmnKernel.ts"
+import * as BpmnModel from "../src/BpmnModel.ts"
 import * as ChildWorkflowV3 from "../src/ChildWorkflowV3.ts"
 import * as CompilerV2 from "../src/CompilerV2.ts"
 import * as Deployment from "../src/Deployment.ts"
 import * as DeploymentHandlers from "../src/DeploymentHandlers.ts"
 import * as DigestV3 from "../src/DigestV3.ts"
+import * as EffectWorkflowBpmnV3 from "../src/EffectWorkflowBpmnV3.ts"
 import * as NativeName from "../src/EffectWorkflowOperationV3.ts"
 import * as Retry from "../src/EffectWorkflowRetryV3.ts"
 import * as NativeSemantic from "../src/EffectWorkflowSemanticV3.ts"
@@ -518,12 +522,44 @@ const WorkflowFailure = Schema.Union([
   NativeSemantic.EffectWorkflowSemanticError
 ])
 
+const DetailedWorkflowFailure = Schema.Union([
+  Retry.EffectWorkflowRetryError,
+  NativeSemantic.EffectWorkflowSemanticError
+])
+
 const RuntimeWorkflow = NativeWorkflow.make(
   "WorkflowBuilder/EffectWorkflowRetryV3/Runtime",
   {
     payload: { id: Schema.String },
     success: WorkflowOutput,
     error: WorkflowFailure,
+    idempotencyKey: ({ id }) => id
+  }
+)
+
+const DetailedWorkflow = NativeWorkflow.make(
+  "WorkflowBuilder/EffectWorkflowRetryV3/Detailed",
+  {
+    payload: { id: Schema.String },
+    success: Retry.RetryExecutionOutcome,
+    error: DetailedWorkflowFailure,
+    idempotencyKey: ({ id }) => id
+  }
+)
+
+const BridgeWorkflowFailure = Schema.Union([
+  EffectWorkflowBpmnV3.EffectWorkflowBpmnError,
+  Retry.ScheduleToCloseTimedOut,
+  Retry.EffectWorkflowRetryError,
+  NativeSemantic.EffectWorkflowSemanticError
+])
+
+const BridgeWorkflow = NativeWorkflow.make(
+  "WorkflowBuilder/EffectWorkflowRetryV3/BpmnBridge",
+  {
+    payload: { id: Schema.String },
+    success: EffectWorkflowBpmnV3.ExecutedTaskResolution,
+    error: BridgeWorkflowFailure,
     idempotencyKey: ({ id }) => id
   }
 )
@@ -561,13 +597,34 @@ const retryExecution = (
     Crypto.Crypto | NativeSemantic.Requirements
   >
 
+const detailedRetryExecution = (
+  invocation: Retry.PreparedRetryInvocation
+) =>
+  Retry.executeDetailed(invocation, {
+    interruptRetryPolicy: noInterruptRetry
+  })
+
+const bridgeRetryExecution = (
+  kernel: BpmnKernel.CompiledKernel,
+  invocation: Retry.PreparedRetryInvocation,
+  target: EffectWorkflowBpmnV3.TaskResolutionTarget
+) =>
+  EffectWorkflowBpmnV3.executeTask(
+    kernel,
+    invocation,
+    target,
+    {
+      interruptRetryPolicy: noInterruptRetry
+    }
+  )
+
 const pollUntilObserved = Effect.fnUntraced(function*<
   W extends NativeWorkflow.AnyWithProps
 >(
   workflow: W,
   executionId: string
 ) {
-  for (let attempt = 0; attempt < 100; attempt++) {
+  for (let attempt = 0; attempt < 1_000; attempt++) {
     const polled = yield* workflow.poll(executionId)
     if (Option.isSome(polled)) return polled.value
     yield* Effect.yieldNow
@@ -583,7 +640,7 @@ const pollUntilComplete = Effect.fnUntraced(function*<
   workflow: W,
   executionId: string
 ) {
-  for (let attempt = 0; attempt < 100; attempt++) {
+  for (let attempt = 0; attempt < 1_000; attempt++) {
     const polled = yield* workflow.poll(executionId)
     if (
       Option.isSome(polled) &&
@@ -616,6 +673,217 @@ const businessFailure = (
   code,
   message
 })
+
+const bpmnNow = "2026-07-23T10:00:00.000Z" as const
+const bpmnProcessId = "retry-bridge-process"
+const bpmnTaskNodeId = "retry-bridge-task"
+
+const bpmnServices = (): BpmnKernel.Services => ({
+  now: bpmnNow,
+  evaluateCondition: () =>
+    Result.succeed({
+      result: false,
+      steps: 1
+    })
+})
+
+const bridgeBpmnModel = (
+  errorRef?: string
+): BpmnModel.BpmnModel => {
+  const hasBoundary = errorRef !== undefined
+  const taskSuccessFlowId = "flow-task-success"
+  const boundaryFlowId = "flow-boundary-error"
+  return {
+    modelKind: "BpmnModel",
+    modelVersion: BpmnModel.BpmnModelVersion,
+    bpmnSpecVersion: "2.0.2",
+    imports: [],
+    extensionElements: [],
+    collaborations: [],
+    processes: [{
+      id: bpmnProcessId,
+      isExecutable: true,
+      extensionElements: []
+    }],
+    flowNodes: [
+      {
+        _tag: "StartEvent",
+        id: "start",
+        processId: bpmnProcessId,
+        parentScopeId: bpmnProcessId,
+        incomingSequenceFlowIds: [],
+        outgoingSequenceFlowIds: ["flow-start-task"],
+        eventDefinitions: [],
+        eventDefinitionRefs: [],
+        extensionElements: []
+      },
+      {
+        _tag: "Task",
+        id: bpmnTaskNodeId,
+        processId: bpmnProcessId,
+        parentScopeId: bpmnProcessId,
+        taskKind: "generic",
+        incomingSequenceFlowIds: ["flow-start-task"],
+        outgoingSequenceFlowIds: [taskSuccessFlowId],
+        extensionElements: []
+      },
+      ...(hasBoundary
+        ? [{
+          _tag: "BoundaryEvent" as const,
+          id: "boundary-error",
+          processId: bpmnProcessId,
+          parentScopeId: bpmnProcessId,
+          incomingSequenceFlowIds: [],
+          outgoingSequenceFlowIds: [boundaryFlowId],
+          eventDefinitions: [{
+            _tag: "ErrorEventDefinition" as const,
+            errorRef
+          }],
+          eventDefinitionRefs: [],
+          attachedToRef: bpmnTaskNodeId,
+          cancelActivity: true,
+          extensionElements: []
+        }]
+        : []),
+      {
+        _tag: "EndEvent",
+        id: "end-success",
+        processId: bpmnProcessId,
+        parentScopeId: bpmnProcessId,
+        incomingSequenceFlowIds: [taskSuccessFlowId],
+        outgoingSequenceFlowIds: [],
+        eventDefinitions: [],
+        eventDefinitionRefs: [],
+        extensionElements: []
+      },
+      ...(hasBoundary
+        ? [{
+          _tag: "EndEvent" as const,
+          id: "end-error",
+          processId: bpmnProcessId,
+          parentScopeId: bpmnProcessId,
+          incomingSequenceFlowIds: [boundaryFlowId],
+          outgoingSequenceFlowIds: [],
+          eventDefinitions: [],
+          eventDefinitionRefs: [],
+          extensionElements: []
+        }]
+        : [])
+    ],
+    sequenceFlows: [
+      {
+        id: "flow-start-task",
+        processId: bpmnProcessId,
+        parentScopeId: bpmnProcessId,
+        sourceId: "start",
+        targetId: bpmnTaskNodeId,
+        kind: "normal",
+        extensionElements: []
+      },
+      {
+        id: taskSuccessFlowId,
+        processId: bpmnProcessId,
+        parentScopeId: bpmnProcessId,
+        sourceId: bpmnTaskNodeId,
+        targetId: "end-success",
+        kind: "normal",
+        extensionElements: []
+      },
+      ...(hasBoundary
+        ? [{
+          id: boundaryFlowId,
+          processId: bpmnProcessId,
+          parentScopeId: bpmnProcessId,
+          sourceId: "boundary-error",
+          targetId: "end-error",
+          kind: "normal" as const,
+          extensionElements: []
+        }]
+        : [])
+    ],
+    ...(errorRef === undefined
+      ? {}
+      : {
+        errors: [{
+          id: errorRef,
+          errorCode: "BRIDGE_BUSINESS"
+        }]
+      })
+  }
+}
+
+const prepareBridgeKernel = (
+  invocation: Retry.PreparedRetryInvocation,
+  errorMapping?: {
+    readonly errorTag: string
+    readonly errorCode: string | null
+    readonly errorRef: string
+  },
+  bindingOverrides: {
+    readonly artifactDigest?: Wire.ArtifactDigest
+    readonly semanticNodeId?: Wire.AtomicIdentifier
+  } = {}
+) =>
+  Effect.gen(function*() {
+    const binding: BpmnActivityV3.TaskBinding = {
+      bindingVersion: BpmnActivityV3.BindingVersion,
+      executionProtocolVersion: 3,
+      taskNodeId: bpmnTaskNodeId,
+      artifactDigest: bindingOverrides.artifactDigest ??
+        invocation.artifactDigest,
+      semanticNodeId: bindingOverrides.semanticNodeId ??
+        invocation.nodeId,
+      errorMappings: errorMapping === undefined
+        ? []
+        : [{
+          identity: {
+            failureIdentityVersion: 1,
+            errorTag: errorMapping.errorTag,
+            errorCode: errorMapping.errorCode
+          },
+          errorRef: errorMapping.errorRef
+        }]
+    }
+    const kernel = yield* BpmnKernel.prepare(
+      bridgeBpmnModel(errorMapping?.errorRef),
+      {
+        profileId: "retry-bridge-profile-v1",
+        rootProcessId: bpmnProcessId,
+        limits: {
+          maxAutomaticTransitions: 100
+        },
+        evaluatorBindings: [],
+        taskBindings: [binding]
+      }
+    ).pipe(Effect.orDie)
+    const initialized = BpmnKernel.initialize(
+      kernel,
+      bpmnServices()
+    )
+    if (Result.isFailure(initialized)) {
+      return yield* Effect.die(initialized.failure)
+    }
+    const token = initialized.success.state.tokens.find(
+      (candidate) =>
+        candidate.status === "active" &&
+        candidate.position._tag === "AtNode" &&
+        candidate.position.nodeId === bpmnTaskNodeId
+    )
+    if (token === undefined) {
+      return yield* Effect.die(
+        "Expected initialized BPMN bridge Task token"
+      )
+    }
+    return {
+      kernel,
+      initialized: initialized.success,
+      target: {
+        scopeInstanceId: token.scopeInstanceId,
+        taskNodeId: bpmnTaskNodeId,
+        tokenId: token.tokenId
+      } satisfies EffectWorkflowBpmnV3.TaskResolutionTarget
+    }
+  })
 
 describe("EffectWorkflowRetryV3 contracts", () => {
   it("admits only the closed persisted node-attempt outcomes", () => {
@@ -905,7 +1173,881 @@ describe("EffectWorkflowRetryV3 contracts", () => {
     }).pipe(provideCrypto))
 })
 
+describe("EffectWorkflowRetryV3 BPMN bridge integration", () => {
+  it.effect("executes once, retains the raw success, and resolves and replays the exact BPMN Task", () =>
+    Effect.gen(function*() {
+      let handlerRuns = 0
+      const fixture = yield* makeFixture({
+        handler: (() =>
+          Effect.sync(() => {
+            handlerRuns++
+            return { value: 41 }
+          })) as Node.Handler<typeof retryNode>
+      })
+      const preparedOccurrence = yield* occurrence(
+        fixture,
+        "bridge-success"
+      )
+      const invocation = yield* Retry.prepare({
+        artifact: fixture.resolved,
+        occurrence: preparedOccurrence,
+        input: { _tag: "Inline", value: {} }
+      })
+      const authority = yield* prepareBridgeKernel(invocation)
+      const registration = BridgeWorkflow.toLayer(() =>
+        bridgeRetryExecution(
+          authority.kernel,
+          invocation,
+          authority.target
+        )
+      )
+
+      const receipt = yield* Effect.gen(function*() {
+        const executionId = yield* BridgeWorkflow.execute(
+          { id: "bridge-success" },
+          { discard: true }
+        )
+        const terminal = yield* pollUntilComplete(
+          BridgeWorkflow,
+          executionId
+        )
+        if (Exit.isFailure(terminal.exit)) {
+          return yield* Effect.die(terminal.exit.cause)
+        }
+        return terminal.exit.value
+      }).pipe(
+        Effect.provide(
+          registration.pipe(
+            Layer.provideMerge(WorkflowEngine.layerMemory)
+          )
+        )
+      )
+
+      assert.strictEqual(handlerRuns, 1)
+      assert.strictEqual(receipt.retryOutcome._tag, "Succeeded")
+      if (receipt.retryOutcome._tag !== "Succeeded") {
+        return yield* Effect.die(
+          "Expected native successful retry outcome"
+        )
+      }
+      assert.deepStrictEqual(receipt.retryOutcome.output, {
+        _tag: "Inline",
+        value: { value: 41 }
+      })
+      assert.deepStrictEqual(receipt.command, {
+        commandVersion: BpmnActivityV3.CommandVersion,
+        scopeInstanceId: authority.target.scopeInstanceId,
+        taskNodeId: authority.target.taskNodeId,
+        tokenId: authority.target.tokenId,
+        outcome: {
+          _tag: "Succeeded",
+          outcomeVersion: BpmnActivityV3.OutcomeVersion,
+          artifactDigest: invocation.artifactDigest,
+          semanticNodeId: invocation.nodeId,
+          occurrenceDigest: invocation.occurrenceDigest,
+          firstActivityDigest: invocation.firstActivityDigest,
+          attempt: 1,
+          completedActivityDigest: receipt.retryOutcome.activityDigest
+        }
+      })
+      assert.strictEqual(
+        receipt.retryOutcome.activityDigest,
+        invocation.firstActivityDigest
+      )
+
+      const resolved = BpmnKernel.resolveTask(
+        authority.kernel,
+        authority.initialized.state,
+        receipt.command,
+        bpmnServices()
+      )
+      assert(Result.isSuccess(resolved))
+      assert.strictEqual(resolved.success.state.status, "completed")
+      assert.deepStrictEqual(
+        resolved.success.state.activityResolutions[0]?.outcome,
+        receipt.command.outcome
+      )
+      const replayed = BpmnKernel.resolveTask(
+        authority.kernel,
+        resolved.success.state,
+        receipt.command,
+        bpmnServices()
+      )
+      assert(Result.isSuccess(replayed))
+      assert.deepStrictEqual(replayed.success.events, [{
+        _tag: "TaskOutcomeReplayed",
+        tokenId: authority.target.tokenId,
+        occurrenceDigest: invocation.occurrenceDigest,
+        observedAt: bpmnNow
+      }])
+    }).pipe(provideCrypto))
+
+  it.effect("promotes an exact policy override into the mapped interrupting Boundary Error", () =>
+    Effect.gen(function*() {
+      let handlerRuns = 0
+      let classifierRuns = 0
+      const errorRef = "bridge-business-error"
+      const fixture = yield* makeFixture({
+        handler: (() =>
+          Effect.suspend(() => {
+            handlerRuns++
+            return Effect.fail(
+              businessFailure(
+                "BOUNDARY_DENIED",
+                "mapped policy denial"
+              )
+            )
+          })) as Node.Handler<typeof retryNode>,
+        classifier: () =>
+          Effect.sync(() => {
+            classifierRuns++
+            return {
+              _tag: "Retryable" as const,
+              classificationVersion: 1 as const
+            }
+          }),
+        nonRetryableErrorCodes: ["BOUNDARY_DENIED"]
+      })
+      const preparedOccurrence = yield* occurrence(
+        fixture,
+        "bridge-business-failure"
+      )
+      const invocation = yield* Retry.prepare({
+        artifact: fixture.resolved,
+        occurrence: preparedOccurrence,
+        input: { _tag: "Inline", value: {} }
+      })
+      const authority = yield* prepareBridgeKernel(
+        invocation,
+        {
+          errorTag: "BusinessFailure",
+          errorCode: "BOUNDARY_DENIED",
+          errorRef
+        }
+      )
+      const registration = BridgeWorkflow.toLayer(() =>
+        bridgeRetryExecution(
+          authority.kernel,
+          invocation,
+          authority.target
+        )
+      )
+
+      const receipt = yield* Effect.gen(function*() {
+        const executionId = yield* BridgeWorkflow.execute(
+          { id: "bridge-business-failure" },
+          { discard: true }
+        )
+        const terminal = yield* pollUntilComplete(
+          BridgeWorkflow,
+          executionId
+        )
+        if (Exit.isFailure(terminal.exit)) {
+          return yield* Effect.die(terminal.exit.cause)
+        }
+        return terminal.exit.value
+      }).pipe(
+        Effect.provide(
+          registration.pipe(
+            Layer.provideMerge(WorkflowEngine.layerMemory)
+          )
+        )
+      )
+
+      assert.strictEqual(handlerRuns, 1)
+      assert.strictEqual(classifierRuns, 0)
+      assert.strictEqual(
+        receipt.retryOutcome._tag,
+        "NonRetryable"
+      )
+      assert.strictEqual(
+        receipt.command.outcome._tag,
+        "BusinessFailed"
+      )
+      if (
+        receipt.retryOutcome._tag !== "NonRetryable" ||
+        receipt.command.outcome._tag !== "BusinessFailed"
+      ) {
+        return yield* Effect.die(
+          "Expected exact bridged business terminal"
+        )
+      }
+      assert.deepStrictEqual(
+        receipt.retryOutcome.decision,
+        {
+          _tag: "PolicyOverride",
+          decisionVersion: 1,
+          matchedBy: "ErrorCode"
+        }
+      )
+      assert.deepStrictEqual(
+        receipt.command.outcome.identity,
+        {
+          failureIdentityVersion: 1,
+          errorTag: "BusinessFailure",
+          errorCode: "BOUNDARY_DENIED"
+        }
+      )
+      assert.deepStrictEqual(
+        receipt.command.outcome.terminal,
+        {
+          _tag: "NonRetryable",
+          terminalVersion: 1,
+          decision: receipt.retryOutcome.decision
+        }
+      )
+      assert.strictEqual(
+        receipt.command.outcome.failedActivityDigest,
+        receipt.retryOutcome.cause.activityDigest
+      )
+
+      const resolved = BpmnKernel.resolveTask(
+        authority.kernel,
+        authority.initialized.state,
+        receipt.command,
+        bpmnServices()
+      )
+      assert(Result.isSuccess(resolved))
+      assert.strictEqual(resolved.success.state.status, "completed")
+      assert(
+        resolved.success.events.some((event) =>
+          event._tag === "BoundaryErrorCaught" &&
+          event.taskNodeId === bpmnTaskNodeId &&
+          event.boundaryEventId === "boundary-error" &&
+          event.errorRef === errorRef
+        )
+      )
+      assert.isFalse(
+        resolved.success.events.some((event) => event._tag === "ExecutionFailed")
+      )
+    }).pipe(provideCrypto))
+
+  it.effect("preserves an exhausted retry explanation in the BPMN business-failure command", () =>
+    Effect.gen(function*() {
+      let handlerRuns = 0
+      let classifierRuns = 0
+      const fixture = yield* makeFixture({
+        handler: (() =>
+          Effect.suspend(() => {
+            handlerRuns++
+            return Effect.fail(
+              businessFailure(
+                "STILL_RETRYABLE",
+                "attempt budget exhausted"
+              )
+            )
+          })) as Node.Handler<typeof retryNode>,
+        classifier: () =>
+          Effect.sync(() => {
+            classifierRuns++
+            return {
+              _tag: "Retryable" as const,
+              classificationVersion: 1 as const
+            }
+          }),
+        maximumAttempts: 1
+      })
+      const preparedOccurrence = yield* occurrence(
+        fixture,
+        "bridge-exhausted"
+      )
+      const invocation = yield* Retry.prepare({
+        artifact: fixture.resolved,
+        occurrence: preparedOccurrence,
+        input: { _tag: "Inline", value: {} }
+      })
+      const authority = yield* prepareBridgeKernel(invocation)
+      const registration = BridgeWorkflow.toLayer(() =>
+        bridgeRetryExecution(
+          authority.kernel,
+          invocation,
+          authority.target
+        )
+      )
+
+      const receipt = yield* Effect.gen(function*() {
+        const executionId = yield* BridgeWorkflow.execute(
+          { id: "bridge-exhausted" },
+          { discard: true }
+        )
+        const terminal = yield* pollUntilComplete(
+          BridgeWorkflow,
+          executionId
+        )
+        if (Exit.isFailure(terminal.exit)) {
+          return yield* Effect.die(terminal.exit.cause)
+        }
+        return terminal.exit.value
+      }).pipe(
+        Effect.provide(
+          registration.pipe(
+            Layer.provideMerge(WorkflowEngine.layerMemory)
+          )
+        )
+      )
+
+      assert.strictEqual(handlerRuns, 1)
+      assert.strictEqual(classifierRuns, 1)
+      assert.strictEqual(receipt.retryOutcome._tag, "Exhausted")
+      assert.strictEqual(
+        receipt.command.outcome._tag,
+        "BusinessFailed"
+      )
+      if (
+        receipt.retryOutcome._tag !== "Exhausted" ||
+        receipt.command.outcome._tag !== "BusinessFailed" ||
+        receipt.command.outcome.terminal._tag !== "Exhausted"
+      ) {
+        return yield* Effect.die(
+          "Expected exact bridged exhausted terminal"
+        )
+      }
+      assert.strictEqual(
+        receipt.retryOutcome.reason,
+        "AttemptLimitReached"
+      )
+      assert.strictEqual(
+        receipt.command.outcome.terminal.reason,
+        receipt.retryOutcome.reason
+      )
+      assert.strictEqual(
+        receipt.command.outcome.terminal
+          .classificationActivityDigest,
+        receipt.retryOutcome.classificationActivityDigest
+      )
+      assert.strictEqual(
+        receipt.command.outcome.failedActivityDigest,
+        receipt.retryOutcome.cause.activityDigest
+      )
+      assert.strictEqual(
+        receipt.command.outcome.attempt,
+        receipt.retryOutcome.cause.attempt
+      )
+
+      const resolved = BpmnKernel.resolveTask(
+        authority.kernel,
+        authority.initialized.state,
+        receipt.command,
+        bpmnServices()
+      )
+      assert(Result.isSuccess(resolved))
+      assert.strictEqual(resolved.success.state.status, "failed")
+      assert(
+        resolved.success.events.some((event) =>
+          event._tag === "ExecutionFailed" &&
+          event.failureKind === "UnmappedBusinessFailure" &&
+          event.taskNodeId === bpmnTaskNodeId
+        )
+      )
+    }).pipe(provideCrypto))
+
+  it.effect("rejects copied invocation provenance before the bridge handler runs", () =>
+    Effect.gen(function*() {
+      let handlerRuns = 0
+      const fixture = yield* makeFixture({
+        handler: (() =>
+          Effect.sync(() => {
+            handlerRuns++
+            return { value: 43 }
+          })) as Node.Handler<typeof retryNode>
+      })
+      const preparedOccurrence = yield* occurrence(
+        fixture,
+        "bridge-copied-invocation"
+      )
+      const invocation = yield* Retry.prepare({
+        artifact: fixture.resolved,
+        occurrence: preparedOccurrence,
+        input: { _tag: "Inline", value: {} }
+      })
+      const authority = yield* prepareBridgeKernel(invocation)
+      const copied = {
+        ...invocation
+      } as Retry.PreparedRetryInvocation
+      const registration = BridgeWorkflow.toLayer(() =>
+        bridgeRetryExecution(
+          authority.kernel,
+          copied,
+          authority.target
+        )
+      )
+
+      yield* Effect.gen(function*() {
+        const executionId = yield* BridgeWorkflow.execute(
+          { id: "bridge-copied-invocation" },
+          { discard: true }
+        )
+        const terminal = yield* pollUntilComplete(
+          BridgeWorkflow,
+          executionId
+        )
+        const failure = failReason(terminal.exit)
+        assert.instanceOf(
+          failure,
+          EffectWorkflowBpmnV3.EffectWorkflowBpmnError
+        )
+        assert.strictEqual(
+          (failure as EffectWorkflowBpmnV3.EffectWorkflowBpmnError)
+            .code,
+          EffectWorkflowBpmnV3.ErrorCodes.InvalidInvocation
+        )
+        assert.strictEqual(handlerRuns, 0)
+      }).pipe(
+        Effect.provide(
+          registration.pipe(
+            Layer.provideMerge(WorkflowEngine.layerMemory)
+          )
+        )
+      )
+    }).pipe(provideCrypto))
+
+  it.effect("rejects an artifact-mismatched compiled Task binding before the handler runs", () =>
+    Effect.gen(function*() {
+      let handlerRuns = 0
+      const fixture = yield* makeFixture({
+        handler: (() =>
+          Effect.sync(() => {
+            handlerRuns++
+            return { value: 44 }
+          })) as Node.Handler<typeof retryNode>
+      })
+      const preparedOccurrence = yield* occurrence(
+        fixture,
+        "bridge-binding-mismatch"
+      )
+      const invocation = yield* Retry.prepare({
+        artifact: fixture.resolved,
+        occurrence: preparedOccurrence,
+        input: { _tag: "Inline", value: {} }
+      })
+      const authority = yield* prepareBridgeKernel(
+        invocation,
+        undefined,
+        {
+          artifactDigest: digest("f") as Wire.ArtifactDigest
+        }
+      )
+      const registration = BridgeWorkflow.toLayer(() =>
+        bridgeRetryExecution(
+          authority.kernel,
+          invocation,
+          authority.target
+        )
+      )
+
+      yield* Effect.gen(function*() {
+        const executionId = yield* BridgeWorkflow.execute(
+          { id: "bridge-binding-mismatch" },
+          { discard: true }
+        )
+        const terminal = yield* pollUntilComplete(
+          BridgeWorkflow,
+          executionId
+        )
+        const failure = failReason(terminal.exit)
+        assert.instanceOf(
+          failure,
+          EffectWorkflowBpmnV3.EffectWorkflowBpmnError
+        )
+        assert.strictEqual(
+          (failure as EffectWorkflowBpmnV3.EffectWorkflowBpmnError)
+            .code,
+          EffectWorkflowBpmnV3.ErrorCodes
+            .InvocationBindingMismatch
+        )
+        assert.strictEqual(handlerRuns, 0)
+      }).pipe(
+        Effect.provide(
+          registration.pipe(
+            Layer.provideMerge(WorkflowEngine.layerMemory)
+          )
+        )
+      )
+    }).pipe(provideCrypto))
+
+  it.effect("rejects an accessor-backed Task target without invoking it or the handler", () =>
+    Effect.gen(function*() {
+      let handlerRuns = 0
+      let getterReads = 0
+      const fixture = yield* makeFixture({
+        handler: (() =>
+          Effect.sync(() => {
+            handlerRuns++
+            return { value: 45 }
+          })) as Node.Handler<typeof retryNode>
+      })
+      const preparedOccurrence = yield* occurrence(
+        fixture,
+        "bridge-accessor-target"
+      )
+      const invocation = yield* Retry.prepare({
+        artifact: fixture.resolved,
+        occurrence: preparedOccurrence,
+        input: { _tag: "Inline", value: {} }
+      })
+      const authority = yield* prepareBridgeKernel(invocation)
+      const target: Record<string, unknown> = {
+        scopeInstanceId: authority.target.scopeInstanceId,
+        taskNodeId: authority.target.taskNodeId
+      }
+      Object.defineProperty(target, "tokenId", {
+        enumerable: true,
+        get() {
+          getterReads++
+          return authority.target.tokenId
+        }
+      })
+      const registration = BridgeWorkflow.toLayer(() =>
+        bridgeRetryExecution(
+          authority.kernel,
+          invocation,
+          target as unknown as EffectWorkflowBpmnV3.TaskResolutionTarget
+        )
+      )
+
+      yield* Effect.gen(function*() {
+        const executionId = yield* BridgeWorkflow.execute(
+          { id: "bridge-accessor-target" },
+          { discard: true }
+        )
+        const terminal = yield* pollUntilComplete(
+          BridgeWorkflow,
+          executionId
+        )
+        const failure = failReason(terminal.exit)
+        assert.instanceOf(
+          failure,
+          EffectWorkflowBpmnV3.EffectWorkflowBpmnError
+        )
+        assert.strictEqual(
+          (failure as EffectWorkflowBpmnV3.EffectWorkflowBpmnError)
+            .code,
+          EffectWorkflowBpmnV3.ErrorCodes.InvalidTaskTarget
+        )
+        assert.strictEqual(getterReads, 0)
+        assert.strictEqual(handlerRuns, 0)
+      }).pipe(
+        Effect.provide(
+          registration.pipe(
+            Layer.provideMerge(WorkflowEngine.layerMemory)
+          )
+        )
+      )
+    }).pipe(provideCrypto))
+
+  it.effect("keeps schedule-to-close timeout in the typed bridge failure channel", () =>
+    Effect.gen(function*() {
+      const started = yield* Deferred.make<void>()
+      let handlerRuns = 0
+      const fixture = yield* makeFixture({
+        handler: (() =>
+          Effect.gen(function*() {
+            handlerRuns++
+            yield* Deferred.succeed(started, undefined)
+            yield* Effect.sleep(101)
+            return { value: 47 }
+          })) as Node.Handler<typeof retryNode>,
+        scheduleToClose: {
+          _tag: "After",
+          durationMillis: 100
+        }
+      })
+      const preparedOccurrence = yield* occurrence(
+        fixture,
+        "bridge-schedule-to-close"
+      )
+      const invocation = yield* Retry.prepare({
+        artifact: fixture.resolved,
+        occurrence: preparedOccurrence,
+        input: { _tag: "Inline", value: {} }
+      })
+      const authority = yield* prepareBridgeKernel(invocation)
+      const registration = BridgeWorkflow.toLayer(() =>
+        bridgeRetryExecution(
+          authority.kernel,
+          invocation,
+          authority.target
+        )
+      )
+
+      yield* Effect.gen(function*() {
+        yield* TestClock.setTime(
+          Date.parse("2026-01-02T03:04:05.006Z")
+        )
+        const executionId = yield* BridgeWorkflow.execute(
+          { id: "bridge-schedule-to-close" },
+          { discard: true }
+        )
+        yield* Deferred.await(started)
+        yield* TestClock.adjust(101)
+        const terminal = yield* pollUntilComplete(
+          BridgeWorkflow,
+          executionId
+        )
+        assert(Exit.isFailure(terminal.exit))
+        const failure = failReason(terminal.exit)
+        assert.strictEqual(
+          (failure as { readonly _tag?: unknown })._tag,
+          "ScheduleToCloseTimedOut"
+        )
+        assert.strictEqual(handlerRuns, 1)
+      }).pipe(
+        Effect.provide(
+          registration.pipe(
+            Layer.provideMerge(WorkflowEngine.layerMemory)
+          )
+        )
+      )
+    }).pipe(provideCrypto))
+})
+
 describe("EffectWorkflowRetryV3 managed runtime", () => {
+  it.effect("returns one raw successful attempt with durable coordinates and encoded output", () =>
+    Effect.gen(function*() {
+      let handlerRuns = 0
+      const fixture = yield* makeFixture({
+        handler: (() =>
+          Effect.sync(() => {
+            handlerRuns++
+            return { value: 17 }
+          })) as Node.Handler<typeof retryNode>
+      })
+      const preparedOccurrence = yield* occurrence(
+        fixture,
+        "detailed-success"
+      )
+      const invocation = yield* Retry.prepare({
+        artifact: fixture.resolved,
+        occurrence: preparedOccurrence,
+        input: { _tag: "Inline", value: {} }
+      })
+      const registration = DetailedWorkflow.toLayer(() => detailedRetryExecution(invocation))
+
+      yield* Effect.gen(function*() {
+        const executionId = yield* DetailedWorkflow.execute(
+          { id: "detailed-success" },
+          { discard: true }
+        )
+        const terminal = yield* pollUntilComplete(
+          DetailedWorkflow,
+          executionId
+        )
+        assert(Exit.isSuccess(terminal.exit))
+        if (Exit.isSuccess(terminal.exit)) {
+          assert.strictEqual(terminal.exit.value._tag, "Succeeded")
+          if (terminal.exit.value._tag === "Succeeded") {
+            assert.strictEqual(terminal.exit.value.attempt, 1)
+            assert.strictEqual(
+              terminal.exit.value.activityDigest,
+              invocation.firstActivityDigest
+            )
+            assert.deepStrictEqual(terminal.exit.value.output, {
+              _tag: "Inline",
+              value: { value: 17 }
+            })
+          }
+        }
+        assert.strictEqual(handlerRuns, 1)
+      }).pipe(
+        Effect.provide(
+          registration.pipe(
+            Layer.provideMerge(WorkflowEngine.layerMemory)
+          )
+        )
+      )
+    }).pipe(provideCrypto))
+
+  it.effect("returns a business terminal as a detailed success value", () =>
+    Effect.gen(function*() {
+      let handlerRuns = 0
+      let classifierRuns = 0
+      const fixture = yield* makeFixture({
+        handler: (() =>
+          Effect.suspend(() => {
+            handlerRuns++
+            return Effect.fail(
+              businessFailure(
+                "DETAILED_DENIED",
+                "detailed denial"
+              )
+            )
+          })) as Node.Handler<
+            typeof retryNode
+          >,
+        classifier: () =>
+          Effect.sync(() => {
+            classifierRuns++
+            return {
+              _tag: "NonRetryable" as const,
+              classificationVersion: 1 as const
+            }
+          })
+      })
+      const preparedOccurrence = yield* occurrence(
+        fixture,
+        "detailed-non-retryable"
+      )
+      const invocation = yield* Retry.prepare({
+        artifact: fixture.resolved,
+        occurrence: preparedOccurrence,
+        input: { _tag: "Inline", value: {} }
+      })
+      const registration = DetailedWorkflow.toLayer(() => detailedRetryExecution(invocation))
+
+      yield* Effect.gen(function*() {
+        const executionId = yield* DetailedWorkflow.execute(
+          { id: "detailed-non-retryable" },
+          { discard: true }
+        )
+        const terminal = yield* pollUntilComplete(
+          DetailedWorkflow,
+          executionId
+        )
+        assert(Exit.isSuccess(terminal.exit))
+        if (Exit.isSuccess(terminal.exit)) {
+          assert.strictEqual(
+            terminal.exit.value._tag,
+            "NonRetryable"
+          )
+          if (terminal.exit.value._tag === "NonRetryable") {
+            assert.strictEqual(
+              terminal.exit.value.cause.activityDigest,
+              invocation.firstActivityDigest
+            )
+            assert.strictEqual(
+              terminal.exit.value.cause.identity.errorCode,
+              "DETAILED_DENIED"
+            )
+          }
+        }
+        assert.strictEqual(handlerRuns, 1)
+        assert.strictEqual(classifierRuns, 1)
+      }).pipe(
+        Effect.provide(
+          registration.pipe(
+            Layer.provideMerge(WorkflowEngine.layerMemory)
+          )
+        )
+      )
+    }).pipe(provideCrypto))
+
+  it.effect("returns schedule-to-close timeout as a detailed success value", () =>
+    Effect.gen(function*() {
+      const started = yield* Deferred.make<void>()
+      const fixture = yield* makeFixture({
+        handler: (() =>
+          Effect.gen(function*() {
+            yield* Deferred.succeed(started, undefined)
+            yield* Effect.sleep(101)
+            return { value: 29 }
+          })) as Node.Handler<typeof retryNode>,
+        scheduleToClose: {
+          _tag: "After",
+          durationMillis: 100
+        }
+      })
+      const preparedOccurrence = yield* occurrence(
+        fixture,
+        "detailed-schedule-to-close"
+      )
+      const invocation = yield* Retry.prepare({
+        artifact: fixture.resolved,
+        occurrence: preparedOccurrence,
+        input: { _tag: "Inline", value: {} }
+      })
+      const registration = DetailedWorkflow.toLayer(() => detailedRetryExecution(invocation))
+
+      yield* Effect.gen(function*() {
+        yield* TestClock.setTime(
+          Date.parse("2026-01-02T03:04:05.006Z")
+        )
+        const executionId = yield* DetailedWorkflow.execute(
+          { id: "detailed-schedule-to-close" },
+          { discard: true }
+        )
+        yield* Deferred.await(started)
+        yield* TestClock.adjust(101)
+        const terminal = yield* pollUntilComplete(
+          DetailedWorkflow,
+          executionId
+        )
+        assert(Exit.isSuccess(terminal.exit))
+        if (Exit.isSuccess(terminal.exit)) {
+          assert.strictEqual(
+            terminal.exit.value._tag,
+            "ScheduleToCloseTimedOut"
+          )
+          if (
+            terminal.exit.value._tag ===
+              "ScheduleToCloseTimedOut"
+          ) {
+            assert.strictEqual(
+              terminal.exit.value.firstActivityDigest,
+              invocation.firstActivityDigest
+            )
+            assert.strictEqual(
+              terminal.exit.value.controllerOperationDigest,
+              invocation.scheduleToCloseControllerDigest
+            )
+          }
+        }
+      }).pipe(
+        Effect.provide(
+          registration.pipe(
+            Layer.provideMerge(WorkflowEngine.layerMemory)
+          )
+        )
+      )
+    }).pipe(provideCrypto))
+
+  it.effect("rejects a copied invocation before the detailed handler runs", () =>
+    Effect.gen(function*() {
+      let handlerRuns = 0
+      const fixture = yield* makeFixture({
+        handler: (() =>
+          Effect.sync(() => {
+            handlerRuns++
+            return { value: 23 }
+          })) as Node.Handler<typeof retryNode>
+      })
+      const preparedOccurrence = yield* occurrence(
+        fixture,
+        "detailed-copied-invocation"
+      )
+      const invocation = yield* Retry.prepare({
+        artifact: fixture.resolved,
+        occurrence: preparedOccurrence,
+        input: { _tag: "Inline", value: {} }
+      })
+      const copied = {
+        ...invocation
+      } as Retry.PreparedRetryInvocation
+      const registration = DetailedWorkflow.toLayer(() => detailedRetryExecution(copied))
+
+      yield* Effect.gen(function*() {
+        const executionId = yield* DetailedWorkflow.execute(
+          { id: "detailed-copied-invocation" },
+          { discard: true }
+        )
+        const terminal = yield* pollUntilComplete(
+          DetailedWorkflow,
+          executionId
+        )
+        const failure = failReason(terminal.exit)
+        assert.strictEqual(
+          (failure as Retry.EffectWorkflowRetryError).code,
+          Retry.ErrorCodes.InvalidInvocation
+        )
+        assert.strictEqual(handlerRuns, 0)
+      }).pipe(
+        Effect.provide(
+          registration.pipe(
+            Layer.provideMerge(WorkflowEngine.layerMemory)
+          )
+        )
+      )
+    }).pipe(provideCrypto))
+
   it.effect("completes the managed loop before an armed schedule-to-close deadline", () =>
     Effect.gen(function*() {
       const attempts: Array<number> = []

@@ -77,9 +77,12 @@ Implemented foundations:
   commits immutable task bindings and exact business-failure identity mappings.
   Exact success follows the normal route; an explicitly promoted failure may
   be caught by one matching interrupting Boundary Error; unmapped or uncaught
-  failure deterministically fails the root. Resolution idempotency, terminal
-  cleanup, and causal replay are enforced without claiming the complete
-  Activity or event lifecycle; and
+  failure deterministically fails the root. A native Effect Workflow bridge
+  checks the exact compiled binding before dispatch, executes the retry
+  composition once, and emits a portable resolution command plus its raw
+  outcome. Operational timeout, defects, and interruption are not promoted to
+  BPMN Error. Resolution idempotency, terminal cleanup, and causal replay are
+  enforced without claiming the complete Activity or event lifecycle; and
 - a resource-bounded namespace-aware XML 1.0 infoset parser, semantic
   validator, and serializer;
 - strict profile `bpmn-2.0.2-core-process-di-v2`, which fails closed while
@@ -138,7 +141,9 @@ Implemented foundations:
   attempts and publication are clock-fenced, and the recorded
   completion/timeout/defect winner is coordinate- and policy-checked. Loser
   interruption is never joined; timeout fences semantic completion without
-  claiming rollback of an external side effect.
+  claiming rollback of an external side effect. The same closed result is
+  available through `executeDetailed` without another execution or successful
+  output decoding.
   Schedule-to-start, start-to-close, and cancellation propagation remain
   rejected until the required worker lifecycle protocol exists, so this is
   backend evidence rather than a complete BPMN Activity or boundary-event
@@ -149,8 +154,8 @@ Implemented foundations:
 Not yet implemented and therefore not claimed:
 
 - semantic and DI XML mapping outside the strict named slice, lossless unknown
-  extension preservation, and import/export validation against the normative
-  XSDs;
+  extension preservation, protocol-v3 task-binding admission through the XML
+  executable facade, and import/export validation against the normative XSDs;
 - the complete BPMN Common Executable metamodel, including its full data,
   resource, correlation, interface/operation, lane, artifact, and visual
   interchange surfaces;

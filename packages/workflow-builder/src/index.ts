@@ -247,6 +247,11 @@ export * as EffectWorkflowBackendV3 from "./EffectWorkflowBackendV3.ts"
 /**
  * @since 4.0.0
  */
+export * as EffectWorkflowBpmnV3 from "./EffectWorkflowBpmnV3.ts"
+
+/**
+ * @since 4.0.0
+ */
 export * as EffectWorkflowOperationV3 from "./EffectWorkflowOperationV3.ts"
 
 /**
@@ -398,8 +403,20 @@ export * as RunStateV2 from "./RunStateV2.ts"
  * @since 4.0.0
  */
 export * as SemanticExecutableRegistryV3 from "./SemanticExecutableRegistryV3.ts"
+
+/**
+ * @since 4.0.0
+ */
 export * as SemanticOccurrenceV3 from "./SemanticOccurrenceV3.ts"
+
+/**
+ * @since 4.0.0
+ */
 export * as SemanticOperationV3 from "./SemanticOperationV3.ts"
+
+/**
+ * @since 4.0.0
+ */
 export * as SemanticTime from "./SemanticTime.ts"
 
 /**

@@ -1,7 +1,7 @@
 {
   "formatVersion": 1,
   "catalogId": "effect-workflow-builder-bpmn-2.0.2",
-  "catalogRevision": 6,
+  "catalogRevision": 7,
   "implementation": "@effect/workflow-builder",
   "implementationVersion": "4.0.0-beta.100",
   "reviewedAt": "2026-07-23",
@@ -99,7 +99,7 @@
     {
       "requirementId": "BPMN-EXECUTION-TASK-BOUNDARY-ERROR-SLICE",
       "supportLevel": "executable",
-      "summary": "A fingerprinted protocol-v3 binding admits exact durable Task success or business-failure outcomes. Only a compiled exact failure-identity mapping promotes a failure to a BPMN Error; one matching interrupting Boundary Error catches it, while unmapped or uncaught failures deterministically fail the root execution. Resolution idempotency and causal journal replay are enforced. The complete Activity lifecycle and wider event catalogue remain unsupported.",
+      "summary": "A fingerprinted protocol-v3 binding admits exact durable Task success or business-failure outcomes. A native Effect Workflow bridge checks that binding before dispatch and translates one raw managed-retry result into a portable resolution command without rerunning the handler. Only a compiled exact failure-identity mapping promotes a failure to a BPMN Error; one matching interrupting Boundary Error catches it, while unmapped or uncaught failures deterministically fail the root execution. Operational timeout, defects, and interruption remain outside Error routing. Resolution idempotency and causal journal replay are enforced. The complete Activity lifecycle and wider event catalogue remain unsupported.",
       "evidence": [
         {
           "kind": "source",
@@ -110,6 +110,26 @@
           "kind": "source",
           "path": "src/BpmnKernel.ts",
           "symbol": "resolveTask"
+        },
+        {
+          "kind": "source",
+          "path": "src/EffectWorkflowBpmnV3.ts",
+          "symbol": "executeTask"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/EffectWorkflowRetryV3.test.ts",
+          "testName": "executes once, retains the raw success, and resolves and replays the exact BPMN Task"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/EffectWorkflowRetryV3.test.ts",
+          "testName": "promotes an exact policy override into the mapped interrupting Boundary Error"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/EffectWorkflowRetryV3.test.ts",
+          "testName": "preserves an exhausted retry explanation in the BPMN business-failure command"
         },
         {
           "kind": "transition-test",

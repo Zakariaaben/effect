@@ -331,6 +331,29 @@ export type RetryScheduleToCloseOutcome = Schema.Schema.Type<
   typeof RetryScheduleToCloseOutcome
 >
 
+/**
+ * Closed raw result of one managed retry execution.
+ *
+ * **Details**
+ *
+ * Unlike {@link execute}, this vocabulary retains the encoded successful
+ * output and returns business terminals as values. It is suitable for
+ * orchestration adapters that must inspect the exact durable activity
+ * coordinates without executing the invocation a second time.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const RetryExecutionOutcome = RetryScheduleToCloseOutcome
+
+/**
+ * The decoded type of {@link RetryExecutionOutcome}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type RetryExecutionOutcome = RetryScheduleToCloseOutcome
+
 const RetryScheduleToCloseWinnerStruct = Schema.Struct({
   _tag: Schema.Literal("RetryScheduleToCloseWinner"),
   outcomeEnvelopeVersion: Schema.Literal(1),
@@ -1235,12 +1258,6 @@ const exhaustedTerminal = (
     reason
   })
 
-type RetryLoopOutcome =
-  | SemanticOperationV3.NodeAttemptSucceeded
-  | NonRetryable
-  | Exhausted
-  | ScheduleToCloseTimedOut
-
 type RetryTimer = (
   operation: SemanticOperationV3.PreparedOperation
 ) => Effect.Effect<
@@ -1263,7 +1280,7 @@ const retryLoop = (
   sleep: RetryTimer = EffectWorkflowSemanticV3.sleep,
   attemptFence?: AttemptFence | undefined
 ): Effect.Effect<
-  RetryLoopOutcome,
+  RetryExecutionOutcome,
   | EffectWorkflowRetryError
   | EffectWorkflowSemanticV3.EffectWorkflowSemanticError,
   | Crypto.Crypto
@@ -1992,8 +2009,7 @@ const scheduleToClose = (
   controller: PreparedScheduleToClose,
   options: ExecutionOptions
 ): Effect.Effect<
-  unknown,
-  | TerminalFailure
+  RetryExecutionOutcome,
   | EffectWorkflowRetryError
   | EffectWorkflowSemanticV3.EffectWorkflowSemanticError,
   | Crypto.Crypto
@@ -2191,8 +2207,59 @@ const scheduleToClose = (
       outcome,
       options
     ).pipe(Effect.orDie)
-    return yield* completeRetryOutcome(state, outcome)
+    return outcome
   })
+
+const executePrepared = (
+  state: InvocationState,
+  options: ExecutionOptions
+): Effect.Effect<
+  RetryExecutionOutcome,
+  | EffectWorkflowRetryError
+  | EffectWorkflowSemanticV3.EffectWorkflowSemanticError,
+  | Crypto.Crypto
+  | EffectWorkflowSemanticV3.Requirements
+> =>
+  state.scheduleToClose === undefined
+    ? retryLoop(state, options)
+    : scheduleToClose(state, state.scheduleToClose, options)
+
+/**
+ * Executes an opaque prepared invocation and returns its raw durable outcome.
+ *
+ * **Details**
+ *
+ * Successful activity output remains encoded and `NonRetryable`, `Exhausted`,
+ * and `ScheduleToCloseTimedOut` are returned in the success channel. Defects
+ * and interruption retain their native Effect semantics. The exact prepared
+ * invocation provenance check happens before any handler can run.
+ *
+ * This and {@link execute} project the same private execution primitive;
+ * consumers that need both activity metadata and a terminal classification
+ * must call this function once rather than execute the workflow again.
+ *
+ * @category execution
+ * @since 4.0.0
+ */
+export const executeDetailed = (
+  invocation: PreparedRetryInvocation,
+  options: ExecutionOptions
+): Effect.Effect<
+  RetryExecutionOutcome,
+  | EffectWorkflowRetryError
+  | EffectWorkflowSemanticV3.EffectWorkflowSemanticError,
+  | Crypto.Crypto
+  | EffectWorkflowSemanticV3.Requirements
+> => {
+  const state = invocationStates.get(invocation)
+  if (state === undefined) {
+    return Effect.fail(retryError(
+      ErrorCodes.InvalidInvocation,
+      "Retry execution requires the exact PreparedRetryInvocation returned by prepare"
+    ))
+  }
+  return executePrepared(state, options)
+}
 
 /**
  * Executes an opaque prepared invocation through native durable activities and
@@ -2245,15 +2312,8 @@ export const execute = (
       "Retry execution requires the exact PreparedRetryInvocation returned by prepare"
     ))
   }
-  if (state.scheduleToClose !== undefined) {
-    return scheduleToClose(
-      state,
-      state.scheduleToClose,
-      options
-    )
-  }
   return Effect.flatMap(
-    retryLoop(state, options),
+    executePrepared(state, options),
     (outcome) => completeRetryOutcome(state, outcome)
   )
 }

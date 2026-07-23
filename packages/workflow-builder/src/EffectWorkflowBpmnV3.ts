@@ -1,0 +1,397 @@
+/**
+ * Trusted bridge from native Effect Workflow retry execution to portable BPMN
+ * Task resolution.
+ *
+ * **Details**
+ *
+ * This module owns no activity, timer, persistence, replay, or BPMN state
+ * implementation. It executes one exact protocol-v3 retry invocation through
+ * {@link EffectWorkflowRetryV3}, then translates its authenticated terminal
+ * coordinates into one {@link BpmnActivityV3.ResolveTaskCommand}.
+ *
+ * The command is intentionally not applied here. A durable coordinator must
+ * serialize or compare-and-swap the later {@link BpmnKernel.resolveTask}
+ * transition. Schedule-to-close timeout, defects, interruption, and adapter
+ * failures never become BPMN Error outcomes.
+ *
+ * @since 4.0.0
+ */
+import type * as Crypto from "effect/Crypto"
+import * as Effect from "effect/Effect"
+import * as Result from "effect/Result"
+import * as Schema from "effect/Schema"
+import * as BpmnActivityV3 from "./BpmnActivityV3.ts"
+import * as BpmnKernel from "./BpmnKernel.ts"
+import * as EffectWorkflowRetryV3 from "./EffectWorkflowRetryV3.ts"
+import * as EffectWorkflowSemanticV3 from "./EffectWorkflowSemanticV3.ts"
+import * as Json from "./internal/json.ts"
+
+const strictParseOptions = {
+  errors: "all",
+  onExcessProperty: "error"
+} as const
+
+/**
+ * Version of the native-Effect-to-BPMN bridge receipt.
+ *
+ * @category constants
+ * @since 4.0.0
+ */
+export const BridgeVersion = 1 as const
+
+/**
+ * Exact BPMN wait-state coordinates selected by a durable coordinator.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const TaskResolutionTarget = Schema.Struct({
+  scopeInstanceId: Schema.NonEmptyString,
+  taskNodeId: Schema.NonEmptyString,
+  tokenId: Schema.NonEmptyString
+}).annotate({
+  identifier: "WorkflowEffectWorkflowBpmnV3TaskResolutionTarget",
+  parseOptions: strictParseOptions
+})
+
+/**
+ * The decoded type of {@link TaskResolutionTarget}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type TaskResolutionTarget = Schema.Schema.Type<
+  typeof TaskResolutionTarget
+>
+
+/**
+ * Retry outcomes that may resolve a BPMN Task.
+ *
+ * **Details**
+ *
+ * Schedule-to-close timeout is deliberately excluded. A future Boundary
+ * Timer integration needs a distinct BPMN timer subscription and must not
+ * masquerade as an Error event.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const ResolvableRetryOutcome = Schema.Union([
+  EffectWorkflowRetryV3.NodeAttemptSucceeded,
+  EffectWorkflowRetryV3.NonRetryable,
+  EffectWorkflowRetryV3.Exhausted
+]).annotate({
+  identifier: "WorkflowEffectWorkflowBpmnV3ResolvableRetryOutcome",
+  parseOptions: strictParseOptions
+})
+
+/**
+ * The decoded type of {@link ResolvableRetryOutcome}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type ResolvableRetryOutcome = Schema.Schema.Type<
+  typeof ResolvableRetryOutcome
+>
+
+/**
+ * Portable result of one bridge execution.
+ *
+ * **Details**
+ *
+ * `command` is the minimal durable input for the BPMN kernel.
+ * `retryOutcome` retains the encoded success output or complete retry
+ * explanation for downstream data mapping and observability without a second
+ * workflow execution.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const ExecutedTaskResolution = Schema.Struct({
+  bridgeVersion: Schema.Literal(BridgeVersion),
+  command: BpmnActivityV3.ResolveTaskCommand,
+  retryOutcome: ResolvableRetryOutcome
+}).annotate({
+  identifier: "WorkflowEffectWorkflowBpmnV3ExecutedTaskResolution",
+  parseOptions: strictParseOptions
+})
+
+/**
+ * The decoded type of {@link ExecutedTaskResolution}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type ExecutedTaskResolution = Schema.Schema.Type<
+  typeof ExecutedTaskResolution
+>
+
+/**
+ * Stable bridge failure codes.
+ *
+ * @category constants
+ * @since 4.0.0
+ */
+export const ErrorCodes = {
+  InvalidTaskTarget: "InvalidTaskTarget",
+  InvalidKernelAuthority: "InvalidKernelAuthority",
+  TaskBindingUnavailable: "TaskBindingUnavailable",
+  InvalidInvocation: "InvalidInvocation",
+  InvocationBindingMismatch: "InvocationBindingMismatch",
+  InvalidResolutionReceipt: "InvalidResolutionReceipt"
+} as const
+
+/**
+ * A stable bridge failure code.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type ErrorCode = typeof ErrorCodes[keyof typeof ErrorCodes]
+
+const ErrorCode = Schema.Literals([
+  ErrorCodes.InvalidTaskTarget,
+  ErrorCodes.InvalidKernelAuthority,
+  ErrorCodes.TaskBindingUnavailable,
+  ErrorCodes.InvalidInvocation,
+  ErrorCodes.InvocationBindingMismatch,
+  ErrorCodes.InvalidResolutionReceipt
+])
+
+/**
+ * Typed admission or translation failure at the Effect Workflow / BPMN
+ * boundary.
+ *
+ * @category errors
+ * @since 4.0.0
+ */
+export class EffectWorkflowBpmnError extends Schema.TaggedErrorClass<
+  EffectWorkflowBpmnError
+>("@effect/workflow-builder/EffectWorkflowBpmnV3/Error")(
+  "EffectWorkflowBpmnError",
+  {
+    code: ErrorCode,
+    message: Schema.NonEmptyString,
+    scopeInstanceId: Schema.optionalKey(Schema.NonEmptyString),
+    taskNodeId: Schema.optionalKey(Schema.NonEmptyString),
+    tokenId: Schema.optionalKey(Schema.NonEmptyString)
+  },
+  { parseOptions: strictParseOptions }
+) {}
+
+const bridgeError = (
+  code: ErrorCode,
+  message: string,
+  target?: TaskResolutionTarget
+): EffectWorkflowBpmnError =>
+  new EffectWorkflowBpmnError({
+    code,
+    message,
+    ...(target === undefined
+      ? undefined
+      : {
+        scopeInstanceId: target.scopeInstanceId,
+        taskNodeId: target.taskNodeId,
+        tokenId: target.tokenId
+      })
+  })
+
+const decodeTarget = Schema.decodeUnknownResult(
+  TaskResolutionTarget,
+  strictParseOptions
+)
+const decodeReceipt = Schema.decodeUnknownResult(
+  ExecutedTaskResolution,
+  strictParseOptions
+)
+
+const captureTarget = (
+  input: unknown
+): Result.Result<TaskResolutionTarget, EffectWorkflowBpmnError> => {
+  const snapshot = Json.snapshot(input)
+  if (Result.isFailure(snapshot)) {
+    return Result.fail(bridgeError(
+      ErrorCodes.InvalidTaskTarget,
+      snapshot.failure.message
+    ))
+  }
+  const decoded = decodeTarget(snapshot.success)
+  if (Result.isFailure(decoded)) {
+    return Result.fail(bridgeError(
+      ErrorCodes.InvalidTaskTarget,
+      "Invalid BPMN Task resolution target"
+    ))
+  }
+  return Result.succeed(
+    snapshot.success as unknown as TaskResolutionTarget
+  )
+}
+
+const lookupBinding = (
+  kernel: BpmnKernel.CompiledKernel,
+  target: TaskResolutionTarget
+): Result.Result<BpmnActivityV3.TaskBinding, EffectWorkflowBpmnError> => {
+  const binding = BpmnKernel.taskBinding(kernel, target.taskNodeId)
+  if (Result.isSuccess(binding)) {
+    return Result.succeed(binding.success)
+  }
+  const diagnostic = binding.failure.diagnostics[0]
+  return Result.fail(bridgeError(
+    diagnostic.code === BpmnKernel.Codes.InvalidKernel
+      ? ErrorCodes.InvalidKernelAuthority
+      : ErrorCodes.TaskBindingUnavailable,
+    diagnostic.message,
+    target
+  ))
+}
+
+const succeededOutcome = (
+  invocation: EffectWorkflowRetryV3.PreparedRetryInvocation,
+  outcome: EffectWorkflowRetryV3.NodeAttemptSucceeded
+): BpmnActivityV3.TaskSucceeded => ({
+  _tag: "Succeeded",
+  outcomeVersion: BpmnActivityV3.OutcomeVersion,
+  artifactDigest: invocation.artifactDigest,
+  semanticNodeId: invocation.nodeId,
+  occurrenceDigest: invocation.occurrenceDigest,
+  firstActivityDigest: invocation.firstActivityDigest,
+  attempt: outcome.attempt,
+  completedActivityDigest: outcome.activityDigest
+})
+
+const businessFailureOutcome = (
+  invocation: EffectWorkflowRetryV3.PreparedRetryInvocation,
+  outcome:
+    | EffectWorkflowRetryV3.NonRetryable
+    | EffectWorkflowRetryV3.Exhausted
+): BpmnActivityV3.TaskBusinessFailed => ({
+  _tag: "BusinessFailed",
+  outcomeVersion: BpmnActivityV3.OutcomeVersion,
+  artifactDigest: invocation.artifactDigest,
+  semanticNodeId: invocation.nodeId,
+  occurrenceDigest: invocation.occurrenceDigest,
+  firstActivityDigest: invocation.firstActivityDigest,
+  terminal: outcome._tag === "NonRetryable"
+    ? {
+      _tag: "NonRetryable",
+      terminalVersion: outcome.terminalVersion,
+      decision: outcome.decision
+    }
+    : {
+      _tag: "Exhausted",
+      terminalVersion: outcome.terminalVersion,
+      classificationActivityDigest: outcome.classificationActivityDigest,
+      reason: outcome.reason
+    },
+  failedActivityDigest: outcome.cause.activityDigest,
+  attempt: outcome.cause.attempt,
+  identity: outcome.cause.identity
+})
+
+const resolutionReceipt = (
+  invocation: EffectWorkflowRetryV3.PreparedRetryInvocation,
+  target: TaskResolutionTarget,
+  outcome: ResolvableRetryOutcome
+): Result.Result<ExecutedTaskResolution, EffectWorkflowBpmnError> => {
+  const command: BpmnActivityV3.ResolveTaskCommand = {
+    commandVersion: BpmnActivityV3.CommandVersion,
+    scopeInstanceId: target.scopeInstanceId,
+    taskNodeId: target.taskNodeId,
+    tokenId: target.tokenId,
+    outcome: outcome._tag === "Succeeded"
+      ? succeededOutcome(invocation, outcome)
+      : businessFailureOutcome(invocation, outcome)
+  }
+  const snapshot = Json.snapshot({
+    bridgeVersion: BridgeVersion,
+    command,
+    retryOutcome: outcome
+  })
+  if (Result.isFailure(snapshot)) {
+    return Result.fail(bridgeError(
+      ErrorCodes.InvalidResolutionReceipt,
+      snapshot.failure.message,
+      target
+    ))
+  }
+  const decoded = decodeReceipt(snapshot.success)
+  if (Result.isFailure(decoded)) {
+    return Result.fail(bridgeError(
+      ErrorCodes.InvalidResolutionReceipt,
+      "Native retry outcome could not be represented as a BPMN Task resolution",
+      target
+    ))
+  }
+  return Result.succeed(
+    snapshot.success as unknown as ExecutedTaskResolution
+  )
+}
+
+/**
+ * Executes one exact native retry invocation and prepares its portable BPMN
+ * Task-resolution command.
+ *
+ * **Details**
+ *
+ * The exact compiled kernel is consulted before execution, so a structural
+ * kernel copy, unbound task, or artifact/node mismatch cannot dispatch the
+ * first handler. The returned command is not applied automatically: its
+ * optimistic token coordinates must still be checked by
+ * {@link BpmnKernel.resolveTask} in the caller's durable state transaction.
+ *
+ * The native retry loop runs exactly once. Business terminal failures are
+ * preserved as values long enough to become `BusinessFailed`; a
+ * schedule-to-close timeout remains a typed operational failure. Defects and
+ * interruption retain their native cause.
+ *
+ * @category execution
+ * @since 4.0.0
+ */
+export const executeTask = (
+  kernel: BpmnKernel.CompiledKernel,
+  invocation: EffectWorkflowRetryV3.PreparedRetryInvocation,
+  targetInput: unknown,
+  options: EffectWorkflowRetryV3.ExecutionOptions
+): Effect.Effect<
+  ExecutedTaskResolution,
+  | EffectWorkflowBpmnError
+  | EffectWorkflowRetryV3.ScheduleToCloseTimedOut
+  | EffectWorkflowRetryV3.EffectWorkflowRetryError
+  | EffectWorkflowSemanticV3.EffectWorkflowSemanticError,
+  | Crypto.Crypto
+  | EffectWorkflowSemanticV3.Requirements
+> =>
+  Effect.gen(function*() {
+    const target = yield* Effect.fromResult(captureTarget(targetInput))
+    const binding = yield* Effect.fromResult(
+      lookupBinding(kernel, target)
+    )
+    if (!EffectWorkflowRetryV3.isPrepared(invocation)) {
+      return yield* Effect.fail(bridgeError(
+        ErrorCodes.InvalidInvocation,
+        "BPMN Task execution requires an exact prepared retry invocation",
+        target
+      ))
+    }
+    if (
+      binding.artifactDigest !== invocation.artifactDigest ||
+      binding.semanticNodeId !== invocation.nodeId
+    ) {
+      return yield* Effect.fail(bridgeError(
+        ErrorCodes.InvocationBindingMismatch,
+        `Prepared retry invocation does not match BPMN Task binding '${target.taskNodeId}'`,
+        target
+      ))
+    }
+    const outcome = yield* EffectWorkflowRetryV3.executeDetailed(
+      invocation,
+      options
+    )
+    if (outcome._tag === "ScheduleToCloseTimedOut") {
+      return yield* Effect.fail(outcome)
+    }
+    return yield* Effect.fromResult(
+      resolutionReceipt(invocation, target, outcome)
+    )
+  })

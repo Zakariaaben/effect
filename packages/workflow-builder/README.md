@@ -71,10 +71,15 @@ Today the package provides:
   of the executable fingerprint. `resolveTask` routes exact success normally,
   catches a mapped business failure through at most one matching interrupting
   Boundary Error, and fails the root execution for unmapped or uncaught
-  failures. Durable resolutions are idempotent and causally replayed. This does
-  not yet cover the complete BPMN Activity lifecycle, parent-scope Error
-  propagation, timers, BPMN Cancel, non-interrupting boundaries, or event
-  subprocesses;
+  failures. A native Effect Workflow bridge checks the exact compiled task
+  binding before dispatch, executes the prepared retry invocation once, and
+  returns a strict portable `resolveTask` command plus the raw retry outcome.
+  Schedule-to-close timeout, defects, interruption, and adapter failures remain
+  outside BPMN Error routing. Durable resolutions are idempotent and causally
+  replayed. This does not yet cover the complete BPMN Activity lifecycle,
+  parent-scope Error propagation, timers, BPMN Cancel, non-interrupting
+  boundaries, event subprocesses, or task-binding admission through the XML
+  executable facade;
 - a strict BPMN executable facade proving the named XML profile can be imported,
   compiled directly to that token kernel, executed through conditional/default
   and parallel/subprocess paths, replayed, canonically exported, re-imported,
@@ -171,8 +176,11 @@ Today the package provides:
   winner coordinates and deterministic policy facts are revalidated, and loser
   interruption is fire-and-forget rather than joined. The timeout fences
   semantic completion but cannot promise rollback of an external side effect
-  already dispatched. Schedule-to-start and start-to-close remain rejected
-  until a persistent worker start/lease acknowledgement exists;
+  already dispatched. `executeDetailed` exposes that same closed durable
+  outcome without decoding or rerunning the handler, allowing trusted adapters
+  to retain attempt and activity coordinates. Schedule-to-start and
+  start-to-close remain rejected until a persistent worker start/lease
+  acknowledgement exists;
   `maximumElapsed` remains an admission budget and does not interrupt an
   attempt already running;
 - protocol-v3 child-workflow collision-free identities, exact
