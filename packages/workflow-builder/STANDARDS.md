@@ -311,6 +311,20 @@ Implemented foundations:
   first-write and deduplicate the source fact, allocate its source coordinates
   once, compare-and-set the parent relation head, and atomically append or
   enqueue the prepared projection; and
+- an optional native child-lifecycle decorator with stable accepted-start and
+  shared terminal Activity identities. It submits a complete artifact/run/
+  locator-bound report to an injected application outbox, validates the exact
+  canonical first-write receipt both before Activity persistence and after
+  replay, and rejects report, terminal-kind, payload, or fact drift. The
+  report-bound typed-failure envelope applies the same drift check when native
+  replay returns an Activity error, and the supplied retry schedule is narrowed
+  to interruption causes so typed application errors are attempted once. The
+  accepted-start Activity precedes handler construction; only a validated
+  success or typed closed `RunFailure` reaches the terminal Activity. Defects,
+  interruption, suspension, polling, and workflow absence publish no lifecycle
+  terminal. The application outbox still owns source deduplication, atomic fact
+  plus egress insertion, stable source sequence/time allocation, typed retry
+  policy, authenticated relay, and persistent backend evidence; and
 - a thin protocol-v3 host over an injected native Effect `WorkflowEngine`, plus
   bounded replay-stable operation names and memory-backed contract tests for
   native activity replay, deferred suspension/resume, forced-durable clocks,
@@ -405,10 +419,10 @@ Not yet implemented and therefore not claimed:
   `FixedMultiInstance/1` or `CollectionMultiInstance/1` journals;
 - a persistent transactional parent/child execution authority and the backend
   mechanisms that it requires: store, scheduler, outbox relay, cooperating
-  child lifecycle source outbox, authenticated ingress/transport, and cluster
-  crash/restart/failover proof. Pure lifecycle preparation plus native
-  deterministic start and interruption delegation do not by themselves supply
-  those guarantees;
+  child lifecycle source outbox implementation, authenticated ingress/
+  transport, and cluster crash/restart/failover proof. Pure lifecycle
+  preparation plus native Activity reporting, deterministic start, and
+  interruption delegation do not by themselves supply those guarantees;
 - a production native Effect Workflow adapter, rebuildable BPMN semantic
   timeline/export, externally authenticated history anchors, migration tooling
   for pre-fingerprint states/journals, and isolated evaluator adapters or any

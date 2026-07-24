@@ -420,6 +420,26 @@ explicitly produces no semantic child event: a cooperating child host/authority
 must publish accepted-start, cancellation, and terminal facts with durable
 source identities and sequence allocation. The module owns no store, relay,
 polling loop, scheduler, worker, lifecycle event source, or backend SPI.
+
+`EffectWorkflowChildLifecycleV3.ts` is the complementary opt-in child-host
+decorator. One stable accepted-start Activity runs before handler construction,
+and one stable terminal Activity is shared by success and typed failure so a
+changed outcome cannot acquire a new native identity. The handler result is
+closed through the same exported `EffectWorkflowBackendV3` validation boundary
+before publication. An injected `ChildLifecycleSourceOutbox` must atomically
+first-write the immutable report, canonical source fact, and egress entry,
+allocating source sequence and occurrence time once. Its receipt has no
+first/replayed flag and must be byte-semantically identical on every retry.
+The adapter validates the report/fact relation before Activity persistence and
+again after native replay. Typed Activity failures carry a portable snapshot of
+the same complete report, so failed replay cannot bypass drift detection; their
+original typed error is restored only after that check. The supplied retry
+schedule is narrowed to interruption causes. It uses no polling and publishes
+nothing for defects, interruption, suspension, or workflow absence. It owns no
+outbox implementation, relay, parent store, retry controller, or backend
+lifecycle hook; completion of finalizers registered directly on the outer
+workflow scope remains observable only through a future native backend
+lifecycle outbox.
 Version `2` success and application-failure timestamps remain portable
 observability facts and are checked against that receipt. A pre-deadline defect
 keeps its non-interrupt native Cause semantics; an at-or-after-deadline defect

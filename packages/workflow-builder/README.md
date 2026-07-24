@@ -187,6 +187,23 @@ Today the package provides:
   source deduplication, first-write timestamp allocation, transactional inbox/
   outbox, authenticated delivery, and replay/conflict receipts remain host
   authority responsibilities;
+- an optional `EffectWorkflowChildLifecycleV3` native child-host decorator.
+  Stable `started` and shared `terminal` Activities submit strict reports to an
+  injected `ChildLifecycleSourceOutbox`. The accepted-start receipt commits
+  before the semantic handler is constructed; success is output-contract
+  validated and typed failure is closed to the native `RunFailure` vocabulary
+  before the terminal Activity. Each receipt repeats the exact report, first
+  source sequence/time allocation, canonical fact, and outbox entry identity;
+  native replay revalidates that complete receipt and detects success/failure
+  or payload drift. Persisted publication errors repeat the complete report as
+  a versioned portable envelope and are checked for the same replay drift
+  before their typed error is restored. A caller policy is filtered to retry
+  only interruption causes; typed outbox failures are never retried
+  implicitly. The outbox must first-write the source fact and egress entry
+  atomically and return exactly the first receipt after a crash. The decorator
+  owns no store, relay, poller, clock, scheduler, application outbox retry
+  policy, or alternate engine, and never infers cancellation from interruption,
+  polling, suspension, defects, or workflow absence;
 - an explicitly bounded protocol-v3 Task/Boundary Error execution slice.
   Immutable task bindings and exact failure-identity-to-Error mappings are part
   of the executable fingerprint. `resolveTask` routes exact success normally,
@@ -574,16 +591,17 @@ BPMN Error, Cancel, or success.
 This is portable parent/child semantics plus an optional native dispatch
 adapter, not a complete backend implementation. The package still supplies no
 persistent relation store, scheduler, outbox relay, inbox/transport,
-authoritative lifecycle source outbox, or cluster/failover authority. The
-package prepares strict child-source facts and their exact parent projection,
-but a host must first-write and deduplicate each source fact, atomically
-coordinate the committed parent transition and egress command, then deliver
-the canonical fact. In particular, replay must reuse the first allocated
-source sequence and occurrence time. The native adapter delegates deterministic
-start and safe interruption to Effect Workflow without deriving semantic facts
-from operational acknowledgements. Persistent crash/restart and multi-worker
-evidence remains pending, and the package makes no full BPMN Process Execution
-Conformance claim.
+authoritative lifecycle source outbox implementation, or cluster/failover
+authority. The package can record strict child-source reports through a native
+Activity and prepare their exact parent projections, but a host outbox must
+first-write and deduplicate each source fact, atomically coordinate the
+committed parent transition and egress command, then deliver the canonical
+fact. In particular, replay must reuse the first allocated source sequence and
+occurrence time. Native start, safe interruption, and lifecycle Activity
+receipts still derive no semantic cancellation from operational
+acknowledgements. Persistent crash/restart and multi-worker evidence remains
+pending, and the package makes no full BPMN Process Execution Conformance
+claim.
 
 See the runnable [typed DAG example](./examples/basic.ts),
 [BPMN XML execution example](./examples/bpmn-executable.ts), and detailed

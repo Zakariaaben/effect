@@ -632,10 +632,28 @@ const invariantFailure = (
   }
 })
 
-const validateSuccess = (
+/**
+ * Validates a semantic handler success against the exact prepared output
+ * contract.
+ *
+ * **Details**
+ *
+ * The same boundary is exported for opt-in handler decorators which must
+ * publish only the terminal value that the native workflow host will accept.
+ *
+ * @category validation
+ * @since 4.0.0
+ */
+export const validateRunSuccess = (
   binding: PreparedBinding,
   input: unknown
 ): Result.Result<RunSuccess, RunFailure> => {
+  if (!isPrepared(binding)) {
+    return Result.fail(invariantFailure(
+      "UnpreparedBinding",
+      "Run success validation requires the exact PreparedBinding returned by prepare"
+    ))
+  }
   const decoded = decodeSnapshot(
     RunSuccess,
     input,
@@ -660,7 +678,19 @@ const validateSuccess = (
   return Result.succeed(decoded.success)
 }
 
-const validateFailure = (
+/**
+ * Closes an arbitrary semantic handler failure into the native run-failure
+ * vocabulary.
+ *
+ * **Details**
+ *
+ * Invalid failure envelopes become `AdapterInvariant` failures. This keeps
+ * opt-in decorators and the base native host on the same terminal boundary.
+ *
+ * @category validation
+ * @since 4.0.0
+ */
+export const validateRunFailure = (
   input: unknown
 ): RunFailure => {
   const decoded = decodeSnapshot(
@@ -715,9 +745,9 @@ export const toLayer = <R>(
     return Effect.matchEffect(
       handler(execution),
       {
-        onFailure: (failure) => Effect.fail(validateFailure(failure)),
+        onFailure: (failure) => Effect.fail(validateRunFailure(failure)),
         onSuccess: (success) => {
-          const validated = validateSuccess(binding, success)
+          const validated = validateRunSuccess(binding, success)
           return Result.isFailure(validated)
             ? Effect.fail(validated.failure)
             : Effect.succeed(validated.success)

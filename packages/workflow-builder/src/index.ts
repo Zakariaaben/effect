@@ -292,6 +292,11 @@ export * as EffectWorkflowBpmnV3 from "./EffectWorkflowBpmnV3.ts"
 /**
  * @since 4.0.0
  */
+export * as EffectWorkflowChildLifecycleV3 from "./EffectWorkflowChildLifecycleV3.ts"
+
+/**
+ * @since 4.0.0
+ */
 export * as EffectWorkflowOperationV3 from "./EffectWorkflowOperationV3.ts"
 
 /**
