@@ -50,6 +50,69 @@ claim. Product documentation must report exactly one of:
 Unsupported and implementation-defined constructs produce diagnostics. They are
 never silently approximated while retaining a BPMN conformance label.
 
+## Operational instance withdrawal
+
+`OperationalInstanceWithdrawal/1` is an external control-plane extension. It
+must never be presented as BPMN Cancel, Terminate, or compensation:
+
+- BPMN `CancelEventDefinition` is restricted to Transaction Sub-Processes. A
+  catch Cancel Intermediate Event may only be attached to a Transaction
+  boundary and a Cancel End Event may only occur inside a Transaction
+  (BPMN 2.0.2 §10.5.5, pp. 261–262). Transaction cancellation can include
+  rollback and compensation and leaves through the Cancel boundary only after
+  those actions complete (§10.3.5, pp. 176–178; §13.5.6, p. 443).
+- An interrupting boundary event is a modeled event occurrence. With
+  `cancelActivity=true` it cancels its attached Activity and then follows the
+  boundary Sequence Flow; for Multi-Instance Activities it cancels all
+  instances (§10.5.6, pp. 275–279; §13.5.3, p. 440).
+- A Terminate End Event is reached by modeled control flow. It immediately ends
+  the current Process scope, including Multi-Instance Activities, without
+  compensation or event handling (Table 10.88, pp. 246–247). At Sub-Process
+  level it affects only that instance and not a higher-level Process or sibling
+  instance (§13.5.6, p. 443).
+- Compensation reverses effects of already successfully completed Activities;
+  an active Activity must be canceled instead (§10.7, pp. 301–304; §13.5.5,
+  pp. 441–442).
+
+Workflow Patterns WCP19 Cancel Task withdraws one enabled/running task, removes
+its work-list reference, and emits no normal continuation; effective stopping
+can lose a race with completion (book §4.8, pp. 178–179).
+WCP20 Cancel Case withdraws the complete process instance, current and future
+tasks, and all subprocesses, can originate outside the instance, and records an
+unsuccessful outcome (§4.8, pp. 184–185). These patterns are capability
+requirements, not BPMN event definitions or OMG conformance classes.
+The book lists BPMN Terminate as a Cancel Case implementation option on p. 185;
+that capability mapping does not turn an external operator command into either
+a Terminate End Event or a BPMN Cancel Event.
+
+The implemented version is deliberately only partial WCP20. Its
+`RequestInstanceWithdrawalCommand` carries an idempotent `requestId`, root,
+`WithdrawalAuditAttribution`, and optional `reasonCode`. The successful
+portable commit/CAS of `OperationalWithdrawalRequested` and
+`OperationalWithdrawalSchedulingFenced` is the linearization point. It fences
+all later scheduling, deterministically closes owned embedded scopes, gateway
+and loop frames, fixed/collection Multi-Instance groups, catch waits,
+subscriptions, and timers, emits no outgoing Sequence Flow, and records late
+task results only as fenced audit. Exact replay is idempotent.
+Only descendants represented inside the selected portable root are affected;
+another process instance, sibling root, or merely message-correlated execution
+is not implicitly withdrawn.
+
+`OperationalWithdrawalCompleted` means logical engine closure, not physical
+stop or reversal of side effects. Version `1` excludes executable Call Activity
+propagation, work items/human tasks, Transaction Cancel, compensation,
+Terminate End Event semantics, targeted task/scope withdrawal, and any
+physical-stop guarantee. `prepareCommittedWithdrawal` first authenticates the
+committed portable snapshot. Local catch channels then use
+`prepareCancelledWaitNotification` plus `notifyCancelledWait`, whose deferred
+state-change value is only a reload hint. The separate
+`interruptCommittedHost` operation is allowed only when the native execution is
+exactly the whole instance to end and delegates to public safe
+`Workflow.interrupt`; `interruptUnsafe` and a second scheduler/store/journal
+are prohibited.
+
+`BPMN Process Execution Conformance: not claimed`.
+
 ## Current implementation boundary
 
 Implemented foundations:
@@ -204,8 +267,8 @@ Implemented foundations:
 - an Effectful executable-preparation boundary whose domain-separated
   SHA-256 fingerprint commits to the normalized semantic model, root process,
   kernel semantic version, limits, named profile, and exact evaluator-build
-  manifest; kernel semantic version `6`, state version `7`, fingerprint version
-  `5`, and transition-journal version `6` fail closed on a model/profile
+  manifest; kernel semantic version `7`, state version `8`, fingerprint version
+  `6`, and transition-journal version `7` fail closed on a model/profile
   mismatch;
 - a strict Effect evaluator registry with full language/version/build/limit
   tuple resolution and no compatibility or latest fallback, plus exact
@@ -525,22 +588,22 @@ does not reimplement or require those native capabilities.
 
 ### Concurrency, triggers, cancellation, and completion
 
-| Pattern and book pages                   | Semantic obligation                                                                                | BPMN                                                         |
-| ---------------------------------------- | -------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
-| Sequence, 167–168                        | Transfer each token independently; never coalesce concurrent invocations.                          | **N**                                                        |
-| Interleaved routing, 168–169             | Execute every member exactly once in any order with one durable region mutex.                      | **C**, sequential ad-hoc SubProcess has completion ambiguity |
-| Interleaved parallel routing, 169–171    | Respect a partial order while allowing only one member to execute at once.                         | **C**, sequential ad-hoc SubProcess                          |
-| Critical section, 171–172                | Hold a fenced durable lease for a whole region, including crash/cancel release.                    | **E**                                                        |
-| Milestone, 172–174                       | Atomically test a state window keyed by a milestone epoch; loops may reopen it.                    | **E**                                                        |
-| Transient trigger, 174–176               | Consume only while a matching wait exists; otherwise discard.                                      | **N/C**, BPMN does not standardize transport retention       |
-| Persistent trigger, 176–177              | Buffer each deduplicated trigger for later ordered consumption.                                    | **E**                                                        |
-| Cancel task, 178–179                     | Withdraw enabled/running work, fence late results, and emit no normal continuation.                | **N/C**, interrupting boundary event                         |
-| Cancel MI task, 180–181                  | Cancel unfinished group members, retain completed members, and emit no group success.              | **N**                                                        |
-| Complete MI task, 181–183                | Force immediate successful group completion and cancel the remainder.                              | **C/E**, standard completion condition need not be immediate |
-| Cancel region, 183–184                   | Cancel an explicit, possibly disconnected membership set.                                          | **C/E**, BPMN boundary cancellation is scope-connected       |
-| Cancel case, 184–185                     | Cancel current/future root work, children, timers, and subscriptions; terminal status is canceled. | **N/C**, Terminate End Event plus engine status              |
-| Explicit successful termination, 185–186 | Cancel other work but record successful completion.                                                | **E**                                                        |
-| Implicit termination, 186–187            | Complete only at true quiescence; distinguish deadlock from success.                               | **N/C**, natural completion                                  |
+| Pattern and book pages                   | Semantic obligation                                                                                                  | BPMN                                                                                                                                       |
+| ---------------------------------------- | -------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| Sequence, 167–168                        | Transfer each token independently; never coalesce concurrent invocations.                                            | **N**                                                                                                                                      |
+| Interleaved routing, 168–169             | Execute every member exactly once in any order with one durable region mutex.                                        | **C**, sequential ad-hoc SubProcess has completion ambiguity                                                                               |
+| Interleaved parallel routing, 169–171    | Respect a partial order while allowing only one member to execute at once.                                           | **C**, sequential ad-hoc SubProcess                                                                                                        |
+| Critical section, 171–172                | Hold a fenced durable lease for a whole region, including crash/cancel release.                                      | **E**                                                                                                                                      |
+| Milestone, 172–174                       | Atomically test a state window keyed by a milestone epoch; loops may reopen it.                                      | **E**                                                                                                                                      |
+| Transient trigger, 174–176               | Consume only while a matching wait exists; otherwise discard.                                                        | **N/C**, BPMN does not standardize transport retention                                                                                     |
+| Persistent trigger, 176–177              | Buffer each deduplicated trigger for later ordered consumption.                                                      | **E**                                                                                                                                      |
+| Cancel task / WCP19, 178–179             | Withdraw one enabled/running task, remove work-list references, fence late results, and emit no normal continuation. | **N/C**, interrupting boundary event; **unsupported** by `OperationalInstanceWithdrawal/1`, which has no targeted task/work-item operation |
+| Cancel MI task, 180–181                  | Cancel unfinished group members, retain completed members, and emit no group success.                                | **N**                                                                                                                                      |
+| Complete MI task, 181–183                | Force immediate successful group completion and cancel the remainder.                                                | **C/E**, standard completion condition need not be immediate                                                                               |
+| Cancel region, 183–184                   | Cancel an explicit, possibly disconnected membership set.                                                            | **C/E**, BPMN boundary cancellation is scope-connected                                                                                     |
+| Cancel case / WCP20, 184–185             | Withdraw current/future root work, subprocesses, timers, and subscriptions; terminal status is unsuccessful.         | **N/C**; `OperationalInstanceWithdrawal/1` is a partial logical **E**, not BPMN Cancel or Terminate                                        |
+| Explicit successful termination, 185–186 | Cancel other work but record successful completion.                                                                  | **E**                                                                                                                                      |
+| Implicit termination, 186–187            | Complete only at true quiescence; distinguish deadlock from success.                                                 | **N/C**, natural completion                                                                                                                |
 
 ## Data-pattern traceability
 
@@ -632,6 +695,9 @@ immutable audit fact. Assignment and ownership never imply authorization.
 The first extension profile must use a namespace and version and cover only
 semantics that cannot be represented exactly in portable BPMN:
 
+- external `OperationalInstanceWithdrawal/1`, with its audit attribution,
+  idempotency, scheduling fence, descendant logical closure, late-result
+  policy, and explicit no-rollback/no-physical-stop boundary;
 - canceling partial joins;
 - open/dynamic MI groups and noncanceling partial MI joins;
 - region critical sections and milestone windows;

@@ -883,9 +883,9 @@ describe("BpmnExecutionState", () => {
   it("admits a durable BPMN execution-state snapshot against a validated model", () => {
     const result = BpmnExecutionState.validate(model(), state())
 
-    assert.strictEqual(BpmnExecutionState.BpmnExecutionStateVersion, 7)
-    assert.strictEqual(BpmnExecutionState.BpmnExecutableFingerprintVersion, 5)
-    assert.strictEqual(BpmnExecutionState.BpmnKernelSemanticVersion, "6")
+    assert.strictEqual(BpmnExecutionState.BpmnExecutionStateVersion, 8)
+    assert.strictEqual(BpmnExecutionState.BpmnExecutableFingerprintVersion, 6)
+    assert.strictEqual(BpmnExecutionState.BpmnKernelSemanticVersion, "7")
     assert.isTrue(Result.isSuccess(result))
     if (Result.isFailure(result)) {
       throw result.failure

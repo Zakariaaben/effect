@@ -1,7 +1,7 @@
 {
   "formatVersion": 1,
   "catalogId": "effect-workflow-builder-bpmn-2.0.2",
-  "catalogRevision": 11,
+  "catalogRevision": 12,
   "standard": {
     "name": "Business Process Model and Notation",
     "version": "2.0.2",
@@ -320,6 +320,71 @@
       ]
     },
     {
+      "id": "BPMN-EXECUTION-INTERRUPTING-BOUNDARY-EVENTS",
+      "title": "Interrupting boundary Event operational semantics",
+      "facet": "execution",
+      "source": {
+        "authority": "OMG",
+        "document": "Business Process Model and Notation 2.0.2",
+        "section": "10.5.4, 10.5.6, and 13.5.3",
+        "pages": "256-257, 275-279, 440",
+        "url": "https://www.omg.org/spec/BPMN/2.0.2"
+      },
+      "dependsOn": [
+        "BPMN-EXECUTION-ACTIVITY-LIFECYCLE"
+      ],
+      "notes": "A modeled boundary Event with cancelActivity=true cancels its attached Activity and follows the boundary Sequence Flow; a Multi-Instance attachment cancels all instances. This requirement is distinct from an external control-plane withdrawal."
+    },
+    {
+      "id": "BPMN-EXECUTION-TERMINATE-END-EVENT",
+      "title": "Terminate End Event operational semantics",
+      "facet": "execution",
+      "source": {
+        "authority": "OMG",
+        "document": "Business Process Model and Notation 2.0.2",
+        "section": "10.5.3, 10.5.6, and 13.5.6",
+        "pages": "246-247, 279, 443",
+        "url": "https://www.omg.org/spec/BPMN/2.0.2"
+      },
+      "dependsOn": [
+        "BPMN-EXECUTION-ACTIVITY-LIFECYCLE"
+      ],
+      "notes": "Terminate is reached by modeled control flow, ends the current Process scope without compensation or event handling, and at Sub-Process level does not terminate higher or sibling instances. OperationalInstanceWithdrawal/1 is not evidence for this requirement."
+    },
+    {
+      "id": "BPMN-EXECUTION-TRANSACTION-CANCEL",
+      "title": "Transaction Sub-Process Cancel Event semantics",
+      "facet": "execution",
+      "source": {
+        "authority": "OMG",
+        "document": "Business Process Model and Notation 2.0.2",
+        "section": "10.3.5, 10.5.5, 10.5.6, and 13.5.6",
+        "pages": "176-178, 261-262, 279, 443",
+        "url": "https://www.omg.org/spec/BPMN/2.0.2"
+      },
+      "dependsOn": [
+        "BPMN-EXECUTION-ACTIVITY-LIFECYCLE",
+        "BPMN-EXECUTION-COMPENSATION"
+      ],
+      "notes": "CancelEventDefinition is restricted to Transaction Sub-Processes. Transaction cancellation can include rollback and compensation before control leaves through the Cancel boundary. No external operational withdrawal may claim this meaning."
+    },
+    {
+      "id": "BPMN-EXECUTION-COMPENSATION",
+      "title": "Compensation handler and triggering semantics",
+      "facet": "execution",
+      "source": {
+        "authority": "OMG",
+        "document": "Business Process Model and Notation 2.0.2",
+        "section": "10.7 and 13.5.5",
+        "pages": "301-304, 441-442",
+        "url": "https://www.omg.org/spec/BPMN/2.0.2"
+      },
+      "dependsOn": [
+        "BPMN-EXECUTION-ACTIVITY-LIFECYCLE"
+      ],
+      "notes": "Compensation reverses effects of successfully completed Activities through explicit handlers; an active Activity must be canceled instead. Logical withdrawal without handler execution is not compensation evidence."
+    },
+    {
       "id": "WFP-CONTROL-FLOW-CATALOG",
       "title": "Control-flow pattern catalogue",
       "facet": "validation",
@@ -408,6 +473,55 @@
         "BPMN-EXECUTION-EVENT-BASED-GATEWAY-CHOICE-SLICE"
       ],
       "notes": "CatchEventChoice/1 supplies the bounded transient-trigger form of Deferred Choice: all exact Message/Timer alternatives remain enabled after the gateway opens, one accepted trigger wins, and winner routing plus withdrawal of all losers is atomic. The delivery transition requires receipt.acceptedAt to equal services.now; that atomic acceptance instant and materialized Timer deadlines define the deterministic race. A Timer wins equality and equal Timers use immutable branch order. Late and duplicate deliveries are fenced, and replay consumes the recorded winner without rerunning the race. Early-message retention, persistent triggers, human work, Receive Tasks, signals, conditions, multiple events, and broader Event-Based Gateway configurations require different profiles and are not WCP16 evidence here."
+    },
+    {
+      "id": "WFP-WCP19-CANCEL-TASK",
+      "title": "WCP19 Cancel Task",
+      "facet": "execution",
+      "source": {
+        "authority": "WorkflowPatterns",
+        "document": "Workflow Patterns: The Definitive Guide",
+        "section": "4.8",
+        "pages": "178-179",
+        "url": "https://www.workflowpatterns.com/patterns/control/"
+      },
+      "dependsOn": [
+        "WFP-CONTROL-FLOW-CATALOG"
+      ],
+      "notes": "WCP19 withdraws one enabled or running task, removes work-list references, and emits no normal continuation. OperationalInstanceWithdrawal/1 has no targeted task or work-item command and therefore does not claim WCP19."
+    },
+    {
+      "id": "WFP-WCP20-CANCEL-CASE",
+      "title": "WCP20 Cancel Case",
+      "facet": "execution",
+      "source": {
+        "authority": "WorkflowPatterns",
+        "document": "Workflow Patterns: The Definitive Guide",
+        "section": "4.8",
+        "pages": "184-185",
+        "url": "https://www.workflowpatterns.com/patterns/control/"
+      },
+      "dependsOn": [
+        "WFP-CONTROL-FLOW-CATALOG"
+      ],
+      "notes": "WCP20 withdraws a complete process instance, including current and future tasks and all subprocesses, from an internal or external trigger, and records unsuccessful completion. OperationalInstanceWithdrawal/1 supplies only bounded logical case withdrawal and excludes executable CallActivity descendants, work items, human tasks, and physical-stop guarantees."
+    },
+    {
+      "id": "EXT-OPERATIONAL-INSTANCE-WITHDRAWAL-1",
+      "title": "OperationalInstanceWithdrawal/1 external control-plane extension",
+      "facet": "extension",
+      "source": {
+        "authority": "WorkflowPatterns",
+        "document": "Workflow Patterns: The Definitive Guide",
+        "section": "4.8",
+        "pages": "184-185",
+        "url": "https://www.workflowpatterns.com/patterns/control/"
+      },
+      "dependsOn": [
+        "BPMN-FOUNDATION-DURABLE-MARKING",
+        "WFP-WCP20-CANCEL-CASE"
+      ],
+      "notes": "The successful portable commit/CAS of the request and scheduling fence is the linearization point. requestId is idempotent; rootScopeInstanceId, WithdrawalAuditAttribution, and optional reasonCode are audited; owned embedded scopes, loop/gateway frames, fixed/collection Multi-Instance groups, catch waits, subscriptions, and timers close without outgoing flow; late task outcomes are fenced. The profile is never BPMN Cancel, Terminate, compensation, rollback, or proof that an external side effect stopped."
     },
     {
       "id": "WFP-WCP13-MULTI-INSTANCE-DESIGN-TIME",

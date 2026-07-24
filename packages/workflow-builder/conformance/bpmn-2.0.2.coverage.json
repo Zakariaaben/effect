@@ -1,7 +1,7 @@
 {
   "formatVersion": 1,
   "catalogId": "effect-workflow-builder-bpmn-2.0.2",
-  "catalogRevision": 11,
+  "catalogRevision": 12,
   "implementation": "@effect/workflow-builder",
   "implementationVersion": "4.0.0-beta.100",
   "reviewedAt": "2026-07-24",
@@ -824,6 +824,54 @@
       "evidence": []
     },
     {
+      "requirementId": "BPMN-EXECUTION-INTERRUPTING-BOUNDARY-EVENTS",
+      "supportLevel": "unsupported",
+      "summary": "A bounded interrupting Boundary Error Task slice exists, but the complete boundary Event lifecycle, every permitted trigger, Multi-Instance attachment behavior, and exact handler continuation semantics are not implemented. External operational withdrawal is not counted as boundary Event evidence.",
+      "evidence": [
+        {
+          "kind": "specification",
+          "path": "STANDARDS.md",
+          "locator": "Operational instance withdrawal"
+        }
+      ]
+    },
+    {
+      "requirementId": "BPMN-EXECUTION-TERMINATE-END-EVENT",
+      "supportLevel": "unsupported",
+      "summary": "Terminate End Event execution is excluded. OperationalInstanceWithdrawal/1 is an external control-plane extension and is not evidence for a modeled Terminate reached by Sequence Flow.",
+      "evidence": [
+        {
+          "kind": "specification",
+          "path": "STANDARDS.md",
+          "locator": "Operational instance withdrawal"
+        }
+      ]
+    },
+    {
+      "requirementId": "BPMN-EXECUTION-TRANSACTION-CANCEL",
+      "supportLevel": "unsupported",
+      "summary": "Transaction Sub-Process Cancel, transaction-protocol abort, rollback, compensation-before-boundary-continuation, and Cancel Event validation/execution are not implemented.",
+      "evidence": [
+        {
+          "kind": "specification",
+          "path": "STANDARDS.md",
+          "locator": "Operational instance withdrawal"
+        }
+      ]
+    },
+    {
+      "requirementId": "BPMN-EXECUTION-COMPENSATION",
+      "supportLevel": "unsupported",
+      "summary": "Execution state can represent compensation registrations, but Compensation Event handlers, snapshots, triggering, ordering, and default compensation semantics are not implemented. Logical withdrawal performs no compensation.",
+      "evidence": [
+        {
+          "kind": "specification",
+          "path": "STANDARDS.md",
+          "locator": "Operational instance withdrawal"
+        }
+      ]
+    },
+    {
       "requirementId": "WFP-CONTROL-FLOW-CATALOG",
       "supportLevel": "unsupported",
       "summary": "The control-flow family is analyzed in prose, while only nine separately listed atomic patterns have executable evidence.",
@@ -964,6 +1012,139 @@
           "testName": "rejects an event-based gateway branch that is not a direct Message or Timer catch"
         }
       ]
+    },
+    {
+      "requirementId": "WFP-WCP19-CANCEL-TASK",
+      "supportLevel": "unsupported",
+      "summary": "No targeted task or work-item withdrawal command exists. Root-instance withdrawal may logically close active Tasks, but that is not WCP19 Cancel Task evidence.",
+      "evidence": [
+        {
+          "kind": "specification",
+          "path": "STANDARDS.md",
+          "locator": "Concurrency, triggers, cancellation, and completion"
+        }
+      ]
+    },
+    {
+      "requirementId": "WFP-WCP20-CANCEL-CASE",
+      "supportLevel": "extension",
+      "summary": "OperationalInstanceWithdrawal/1 supplies bounded partial logical WCP20 behavior: one externally requested root is scheduling-fenced, owned embedded scopes, gateway/loop/Multi-Instance frames, catch waits, subscriptions, and timers are closed, late Task outcomes are fenced, no outgoing flow is emitted, and the result is unsuccessful. Executable CallActivity descendants, work items, human tasks, and physical-stop guarantees remain excluded, so complete WCP20 is not claimed.",
+      "evidence": [
+        {
+          "kind": "source",
+          "path": "src/BpmnOperationalV3.ts",
+          "symbol": "OperationalInstanceWithdrawalVersion"
+        },
+        {
+          "kind": "source",
+          "path": "src/BpmnKernel.ts",
+          "symbol": "withdrawExecution"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/BpmnOperationalWithdrawalKernel.test.ts",
+          "testName": "withdraws every parallel branch without activating the join or outgoing work"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/BpmnOperationalWithdrawalKernel.test.ts",
+          "testName": "closes embedded subprocess descendants before their root scope"
+        },
+        {
+          "kind": "replay-test",
+          "path": "test/BpmnOperationalWithdrawalKernel.test.ts",
+          "testName": "replays the exact request idempotently, fences another request, and survives restart from the full journal"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/BpmnOperationalWithdrawalKernel.test.ts",
+          "testName": "linearizes completion and withdrawal in either order and fences late completion"
+        },
+        {
+          "kind": "specification",
+          "path": "STANDARDS.md",
+          "locator": "Operational instance withdrawal"
+        }
+      ],
+      "extension": {
+        "profileId": "OperationalInstanceWithdrawal",
+        "profileVersion": "1",
+        "supportLevel": "executable",
+        "portabilityWarning": "External control-plane extension with partial logical WCP20 behavior only; not BPMN Cancel, Terminate, compensation, rollback, targeted task cancellation, or proof of physical stop."
+      }
+    },
+    {
+      "requirementId": "EXT-OPERATIONAL-INSTANCE-WITHDRAWAL-1",
+      "supportLevel": "extension",
+      "summary": "RequestInstanceWithdrawalCommand uses an idempotent requestId, rootScopeInstanceId, WithdrawalAuditAttribution, and optional reasonCode. Its successful portable commit/CAS is the scheduling-fence linearization point; descendant logical closure and late-result fencing replay exactly without normal continuation. prepareCommittedWithdrawal authenticates only committed state; prepareCancelledWaitNotification plus notifyCancelledWait provide a local reload hint, while interruptCommittedHost is the separate safe whole-host choice. Every backend action is post-commit and never creates another semantic authority.",
+      "evidence": [
+        {
+          "kind": "source",
+          "path": "src/BpmnOperationalV3.ts",
+          "symbol": "RequestInstanceWithdrawalCommand"
+        },
+        {
+          "kind": "source",
+          "path": "src/BpmnKernel.ts",
+          "symbol": "withdrawExecution"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/BpmnOperationalWithdrawalKernel.test.ts",
+          "testName": "withdraws one waiting task, fences scheduling, and emits no BPMN continuation"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/BpmnOperationalWithdrawalKernel.test.ts",
+          "testName": "closes an active Standard Loop without another condition evaluation or iteration"
+        },
+        {
+          "kind": "replay-test",
+          "path": "test/BpmnOperationalWithdrawalKernel.test.ts",
+          "testName": "rejects forged terminal state and tampered, reordered, or truncated withdrawal journals"
+        },
+        {
+          "kind": "source",
+          "path": "src/EffectWorkflowBpmnOperationalV3.ts",
+          "symbol": "prepareCommittedWithdrawal"
+        },
+        {
+          "kind": "source",
+          "path": "src/EffectWorkflowBpmnOperationalV3.ts",
+          "symbol": "prepareCancelledWaitNotification"
+        },
+        {
+          "kind": "source",
+          "path": "src/EffectWorkflowBpmnOperationalV3.ts",
+          "symbol": "notifyCancelledWait"
+        },
+        {
+          "kind": "source",
+          "path": "src/EffectWorkflowBpmnOperationalV3.ts",
+          "symbol": "interruptCommittedHost"
+        },
+        {
+          "kind": "profile-test",
+          "path": "test/EffectWorkflowBpmnOperationalV3.test.ts",
+          "testName": "authenticates only a committed withdrawal and keeps its capability opaque"
+        },
+        {
+          "kind": "state-test",
+          "path": "test/EffectWorkflowBpmnOperationalV3.test.ts",
+          "testName": "notifies one cancelled native wait only after portable withdrawal commits"
+        },
+        {
+          "kind": "specification",
+          "path": "DESIGN.md",
+          "locator": "OperationalInstanceWithdrawal/1"
+        }
+      ],
+      "extension": {
+        "profileId": "OperationalInstanceWithdrawal",
+        "profileVersion": "1",
+        "supportLevel": "executable",
+        "portabilityWarning": "Portable logical instance withdrawal only. No BPMN Process Execution Conformance, Cancel Event, Terminate End Event, compensation, CallActivity cascade, work-item cancellation, rollback, or physical-stop guarantee."
+      }
     },
     {
       "requirementId": "WFP-WCP13-MULTI-INSTANCE-DESIGN-TIME",

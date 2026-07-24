@@ -12,6 +12,11 @@
  * sequence flows, exclusive gateways, and parallel gateways. Unsupported BPMN
  * constructs are rejected at compile time with aggregate diagnostics.
  *
+ * The kernel also exposes the portable control-plane contract
+ * `OperationalInstanceWithdrawal/1`. That authority-level withdrawal closes
+ * an execution without interpreting the request as BPMN Cancel, Terminate, or
+ * compensation and without selecting a backend.
+ *
  * @since 4.0.0
  */
 import type * as Crypto from "effect/Crypto"
@@ -26,6 +31,7 @@ import * as BpmnExecutionState from "./BpmnExecutionState.ts"
 import * as BpmnExpression from "./BpmnExpression.ts"
 import * as BpmnExpressionEvaluator from "./BpmnExpressionEvaluator.ts"
 import * as BpmnModel from "./BpmnModel.ts"
+import * as BpmnOperationalV3 from "./BpmnOperationalV3.ts"
 import * as BpmnTime from "./BpmnTime.ts"
 import * as Diagnostic from "./Diagnostic.ts"
 import * as DigestV2 from "./DigestV2.ts"
@@ -152,7 +158,7 @@ export const KernelSemanticVersion = BpmnExecutionState.BpmnKernelSemanticVersio
  * @category constants
  * @since 4.0.0
  */
-export const TransitionJournalVersion = 6 as const
+export const TransitionJournalVersion = 7 as const
 
 /**
  * Hard ceiling for one execution-state snapshot presented to a compiled
@@ -696,6 +702,20 @@ export const TransitionEvent = Schema.Union([
     occurrenceDigest: ProtocolV3Wire.OccurrenceDigest,
     observedAt: ProtocolV2Wire.Timestamp
   }),
+  Schema.TaggedStruct("TaskCompletionFenced", {
+    scopeInstanceId: Identifier,
+    taskNodeId: Identifier,
+    tokenId: Identifier,
+    withdrawalRequestId: ProtocolV3Wire.AtomicIdentifier,
+    reason: Schema.Literal("operational-withdrawal"),
+    observedAt: ProtocolV2Wire.Timestamp
+  }),
+  Schema.TaggedStruct("TaskOutcomeFenced", {
+    command: BpmnActivityV3.ResolveTaskCommand,
+    withdrawalRequestId: ProtocolV3Wire.AtomicIdentifier,
+    reason: Schema.Literal("operational-withdrawal"),
+    observedAt: ProtocolV2Wire.Timestamp
+  }),
   Schema.TaggedStruct("BoundaryErrorCaught", {
     tokenId: Identifier,
     taskNodeId: Identifier,
@@ -739,6 +759,50 @@ export const TransitionEvent = Schema.Union([
     ]),
     errorRef: Schema.optionalKey(Identifier),
     failedAt: ProtocolV2Wire.Timestamp
+  }),
+  Schema.TaggedStruct("OperationalWithdrawalRequested", {
+    record: BpmnOperationalV3.OperationalInstanceWithdrawalRecord
+  }),
+  Schema.TaggedStruct("OperationalWithdrawalSchedulingFenced", {
+    rootScopeInstanceId: Identifier,
+    requestId: ProtocolV3Wire.AtomicIdentifier,
+    fencedAt: ProtocolV2Wire.Timestamp
+  }),
+  Schema.TaggedStruct("OperationalWithdrawalGatewayFrameClosed", {
+    frameId: Identifier,
+    requestId: ProtocolV3Wire.AtomicIdentifier,
+    closedAt: ProtocolV2Wire.Timestamp
+  }),
+  Schema.TaggedStruct("OperationalWithdrawalLoopFrameClosed", {
+    frameId: Identifier,
+    activityId: Identifier,
+    activation: NonNegativeInt,
+    requestId: ProtocolV3Wire.AtomicIdentifier,
+    closedAt: ProtocolV2Wire.Timestamp
+  }),
+  Schema.TaggedStruct("OperationalWithdrawalMultiInstanceGroupClosed", {
+    groupId: Identifier,
+    activityId: Identifier,
+    activation: NonNegativeInt,
+    requestId: ProtocolV3Wire.AtomicIdentifier,
+    counters: MultiInstanceRuntimeCounters,
+    closedAt: ProtocolV2Wire.Timestamp
+  }),
+  Schema.TaggedStruct("OperationalWithdrawalScopeClosed", {
+    scopeInstanceId: Identifier,
+    definitionId: Identifier,
+    requestId: ProtocolV3Wire.AtomicIdentifier,
+    closedAt: ProtocolV2Wire.Timestamp
+  }),
+  Schema.TaggedStruct("OperationalWithdrawalCompleted", {
+    rootScopeInstanceId: Identifier,
+    requestId: ProtocolV3Wire.AtomicIdentifier,
+    command: BpmnOperationalV3.RequestInstanceWithdrawalCommand,
+    completedAt: ProtocolV2Wire.Timestamp
+  }),
+  Schema.TaggedStruct("OperationalWithdrawalReplayed", {
+    command: BpmnOperationalV3.RequestInstanceWithdrawalCommand,
+    observedAt: ProtocolV2Wire.Timestamp
   })
 ]).annotate({
   identifier: "WorkflowBpmnTransitionEvent",
@@ -1262,6 +1326,10 @@ const decodeInitializeCommand = Schema.decodeUnknownResult(
 )
 const decodeCompleteTaskCommand = Schema.decodeUnknownResult(CompleteTaskCommand, strictParseOptions)
 const decodeResolveTaskCommand = Schema.decodeUnknownResult(ResolveTaskCommand, strictParseOptions)
+const decodeRequestInstanceWithdrawalCommand = Schema.decodeUnknownResult(
+  BpmnOperationalV3.RequestInstanceWithdrawalCommand,
+  strictParseOptions
+)
 const decodeDeliverMessageCommand = Schema.decodeUnknownResult(
   BpmnEventV3.DeliverMessageCommand,
   strictParseOptions
@@ -1295,6 +1363,9 @@ const latestStateTimestamp = (
   const timestamps: Array<ProtocolV2Wire.Timestamp> = [state.startedAt]
   if (state.completedAt !== undefined) {
     timestamps.push(state.completedAt)
+  }
+  if (state.operationalWithdrawal !== undefined) {
+    timestamps.push(state.operationalWithdrawal.requestedAt)
   }
   for (const scope of state.scopeInstances) {
     timestamps.push(scope.enteredAt)
@@ -2053,7 +2124,8 @@ const validateKernelState = (
   if (
     state.status !== "active" &&
     state.status !== "completed" &&
-    state.status !== "failed"
+    state.status !== "failed" &&
+    state.status !== "cancelled"
   ) {
     stateError(
       `Execution status '${state.status}' is outside this token-kernel subset`,
@@ -2072,6 +2144,12 @@ const validateKernelState = (
   if (state.status === "failed" && rootScope?.status !== "failed") {
     stateError("A failed execution requires a failed root scope", ["scopeInstances"])
   }
+  if (state.status === "cancelled" && rootScope?.status !== "cancelled") {
+    stateError(
+      "An operationally withdrawn execution requires a cancelled root scope",
+      ["scopeInstances"]
+    )
+  }
 
   for (let index = 0; index < state.scopeInstances.length; index++) {
     const scope = state.scopeInstances[index]!
@@ -2079,7 +2157,8 @@ const validateKernelState = (
       scope.status !== "active" &&
       scope.status !== "completed" &&
       !(state.status === "failed" &&
-        (scope.status === "failed" || scope.status === "cancelled"))
+        (scope.status === "failed" || scope.status === "cancelled")) &&
+      !(state.status === "cancelled" && scope.status === "cancelled")
     ) {
       stateError(
         `Scope status '${scope.status}' is outside this token-kernel subset`,
@@ -2107,6 +2186,7 @@ const validateKernelState = (
     const admittedWithdrawal = token.status === "withdrawn" &&
       (
         state.status === "failed" ||
+        state.status === "cancelled" ||
         resolution?.outcome._tag === "BusinessFailed" ||
         multiInstanceMember?.status === "terminated"
       )
@@ -2325,7 +2405,11 @@ const validateKernelState = (
         ["gatewayFrames", index, "gatewayId"]
       )
     }
-    if (frame.status === "cancelled" && state.status !== "failed") {
+    if (
+      frame.status === "cancelled" &&
+      state.status !== "failed" &&
+      state.status !== "cancelled"
+    ) {
       stateError(
         `Gateway frame status '${frame.status}' is outside this token-kernel subset`,
         ["gatewayFrames", index, "status"]
@@ -2712,7 +2796,11 @@ const validateKernelState = (
     }
   }
 
-  if (state.status === "completed" || state.status === "failed") {
+  if (
+    state.status === "completed" ||
+    state.status === "failed" ||
+    state.status === "cancelled"
+  ) {
     if (state.scopeInstances.some((scope) => scope.status === "active")) {
       stateError(`A ${state.status} execution cannot retain active scopes`, ["scopeInstances"])
     }
@@ -2727,6 +2815,31 @@ const validateKernelState = (
     }
     if (state.multiInstanceGroups.some((group) => group.status === "active")) {
       stateError(`A ${state.status} execution cannot retain active multi-instance groups`, ["multiInstanceGroups"])
+    }
+    if (state.catchWaitGroups.some((group) => group.status === "waiting")) {
+      stateError(`A ${state.status} execution cannot retain waiting catch groups`, ["catchWaitGroups"])
+    }
+    if (state.subscriptions.some((subscription) => subscription.status === "waiting")) {
+      stateError(`A ${state.status} execution cannot retain waiting subscriptions`, ["subscriptions"])
+    }
+    if (state.timers.some((timer) => timer.status === "scheduled" || timer.status === "armed")) {
+      stateError(`A ${state.status} execution cannot retain live timers`, ["timers"])
+    }
+  }
+
+  if (state.status === "cancelled") {
+    const withdrawal = state.operationalWithdrawal
+    if (
+      withdrawal === undefined ||
+      rootScope === undefined ||
+      withdrawal.command.rootScopeInstanceId !== rootScope.scopeInstanceId ||
+      withdrawal.requestedAt !== state.completedAt ||
+      rootScope.exitedAt !== withdrawal.requestedAt
+    ) {
+      stateError(
+        "Cancelled execution state does not retain the exact committed operational withdrawal",
+        ["operationalWithdrawal"]
+      )
     }
   }
 
@@ -6310,6 +6423,21 @@ interface PendingFailureCleanup {
   readonly rootScopeInstanceId: string
 }
 
+interface PendingOperationalWithdrawal {
+  readonly record: BpmnOperationalV3.OperationalInstanceWithdrawalRecord
+  readonly tokenIds: Array<string>
+  readonly frameIds: Array<string>
+  readonly loopFrameIds: Array<string>
+  readonly multiInstanceGroups: Array<{
+    readonly groupId: string
+    readonly itemIndexes: Array<number>
+  }>
+  readonly catchWaitGroupIds: Array<string>
+  readonly scopeInstanceIds: Array<string>
+  readonly rootScopeInstanceId: string
+  schedulingFenced: boolean
+}
+
 const samePosition = (
   left: BpmnExecutionState.TokenPosition,
   right: BpmnExecutionState.TokenPosition
@@ -6520,6 +6648,7 @@ const replayJournal = (
   let pendingLoopTransition: PendingLoopTransition | undefined
   let pendingMultiInstanceTransition: PendingMultiInstanceTransition | undefined
   let pendingFailureCleanup: PendingFailureCleanup | undefined
+  let pendingOperationalWithdrawal: PendingOperationalWithdrawal | undefined
   let pendingExecutionCompletion: string | undefined
   let lastTimestamp = header.startedAt
 
@@ -6607,6 +6736,9 @@ const replayJournal = (
       ? event.resolution.resolvedAt
       : event._tag === "TaskOutcomeReplayed"
       ? event.observedAt
+      : event._tag === "TaskCompletionFenced" ||
+          event._tag === "TaskOutcomeFenced"
+      ? event.observedAt
       : event._tag === "BoundaryErrorCaught"
       ? event.caughtAt
       : event._tag === "GatewayFrameCancelled"
@@ -6621,6 +6753,19 @@ const replayJournal = (
       ? event.completedAt
       : event._tag === "ExecutionFailed"
       ? event.failedAt
+      : event._tag === "OperationalWithdrawalRequested"
+      ? event.record.requestedAt
+      : event._tag === "OperationalWithdrawalSchedulingFenced"
+      ? event.fencedAt
+      : event._tag === "OperationalWithdrawalGatewayFrameClosed" ||
+          event._tag === "OperationalWithdrawalLoopFrameClosed" ||
+          event._tag === "OperationalWithdrawalMultiInstanceGroupClosed" ||
+          event._tag === "OperationalWithdrawalScopeClosed"
+      ? event.closedAt
+      : event._tag === "OperationalWithdrawalCompleted"
+      ? event.completedAt
+      : event._tag === "OperationalWithdrawalReplayed"
+      ? event.observedAt
       : undefined
     if (eventTimestamp !== undefined) {
       if (eventTimestamp < lastTimestamp) {
@@ -6803,12 +6948,56 @@ const replayJournal = (
         return journalFailure(index, "Unmatched business failure cleanup was omitted or reordered")
       }
     }
+    if (pendingOperationalWithdrawal !== undefined) {
+      const pending = pendingOperationalWithdrawal
+      const pendingGroup = pending.multiInstanceGroups[0]
+      const pendingMemberIndex = pendingGroup?.itemIndexes[0]
+      const pendingGroupState = pendingGroup === undefined
+        ? undefined
+        : state.multiInstanceGroups.find((candidate) => candidate.groupId === pendingGroup.groupId)
+      const pendingMember = pendingMemberIndex === undefined
+        ? undefined
+        : pendingGroupState?.members[pendingMemberIndex]
+      const expectedTag = !pending.schedulingFenced
+        ? "OperationalWithdrawalSchedulingFenced"
+        : pending.tokenIds.length > 0
+        ? "TokenWithdrawn"
+        : pending.frameIds.length > 0
+        ? "OperationalWithdrawalGatewayFrameClosed"
+        : pending.loopFrameIds.length > 0
+        ? "OperationalWithdrawalLoopFrameClosed"
+        : pendingGroup !== undefined &&
+            pendingGroup.itemIndexes.length > 0
+        ? pendingMember?.status === "pending"
+          ? "MultiInstanceItemNotGenerated"
+          : "MultiInstanceItemTerminated"
+        : pendingGroup !== undefined
+        ? "OperationalWithdrawalMultiInstanceGroupClosed"
+        : pending.catchWaitGroupIds.length > 0
+        ? "CatchWaitCancelled"
+        : pending.scopeInstanceIds.length > 0
+        ? "OperationalWithdrawalScopeClosed"
+        : "OperationalWithdrawalCompleted"
+      if (event._tag !== expectedTag) {
+        return journalFailure(
+          index,
+          "Operational withdrawal cascade was omitted or reordered"
+        )
+      }
+    }
     if (
-      (state.status === "completed" || state.status === "failed") &&
+      (
+        state.status === "completed" ||
+        state.status === "failed" ||
+        state.status === "cancelled"
+      ) &&
       event._tag !== "TaskCompletionReplayed" &&
       event._tag !== "TaskOutcomeReplayed" &&
+      event._tag !== "TaskCompletionFenced" &&
+      event._tag !== "TaskOutcomeFenced" &&
       event._tag !== "CatchIngressReplayed" &&
-      event._tag !== "CatchIngressFenced"
+      event._tag !== "CatchIngressFenced" &&
+      event._tag !== "OperationalWithdrawalReplayed"
     ) {
       return journalFailure(index, "A terminal execution cannot accept further state-changing events")
     }
@@ -6816,6 +7005,114 @@ const replayJournal = (
     switch (event._tag) {
       case "JournalStarted": {
         return journalFailure(index, "A transition journal may contain only one leading header")
+      }
+
+      case "OperationalWithdrawalRequested": {
+        const rootScope = state.scopeInstances.find(
+          (scope) => scope.parentScopeInstanceId === undefined
+        )
+        if (
+          state.status !== "active" ||
+          state.operationalWithdrawal !== undefined ||
+          rootScope === undefined ||
+          rootScope.status !== "active" ||
+          event.record.command.rootScopeInstanceId !==
+            rootScope.scopeInstanceId ||
+          event.record.requestedAt < state.startedAt ||
+          pendingOperationalWithdrawal !== undefined ||
+          pendingEmissions.length > 0 ||
+          pendingRoute !== undefined ||
+          pendingScopeEntry !== undefined ||
+          pendingGatewayArrival !== undefined ||
+          pendingTaskWait !== undefined ||
+          pendingCatchOpen !== undefined ||
+          pendingCatchResolution !== undefined ||
+          pendingCatchFence !== undefined ||
+          pendingImmediateTimer !== undefined ||
+          pendingResolvedTask !== undefined ||
+          pendingBoundaryErrorCatch !== undefined ||
+          pendingLoopTransition !== undefined ||
+          pendingMultiInstanceTransition !== undefined ||
+          pendingFailureCleanup !== undefined ||
+          pendingExecutionCompletion !== undefined
+        ) {
+          return journalFailure(
+            index,
+            "Operational withdrawal request has no exact stable active root cause"
+          )
+        }
+        const scopeById = new Map(
+          state.scopeInstances.map((scope) => [scope.scopeInstanceId, scope] as const)
+        )
+        pendingOperationalWithdrawal = {
+          record: directClone(event.record),
+          tokenIds: state.tokens
+            .filter((token) => token.status === "active")
+            .map((token) => token.tokenId)
+            .sort(stableIdentifierOrder),
+          frameIds: state.gatewayFrames
+            .filter((frame) =>
+              frame.status === "waiting" ||
+              frame.status === "satisfied"
+            )
+            .map((frame) => frame.frameId)
+            .sort(stableIdentifierOrder),
+          loopFrameIds: state.loopFrames
+            .filter((frame) => frame.status === "active")
+            .map((frame) => frame.frameId)
+            .sort(stableIdentifierOrder),
+          multiInstanceGroups: state.multiInstanceGroups
+            .filter((group) => group.status === "active")
+            .sort((left, right) => stableIdentifierOrder(left.groupId, right.groupId))
+            .map((group) => ({
+              groupId: group.groupId,
+              itemIndexes: group.members
+                .filter((member) =>
+                  member.status === "active" ||
+                  member.status === "pending"
+                )
+                .map((member) => member.index)
+            })),
+          catchWaitGroupIds: state.catchWaitGroups
+            .filter((group) => group.status === "waiting")
+            .map((group) => group.waitGroupId)
+            .sort(stableIdentifierOrder),
+          scopeInstanceIds: state.scopeInstances
+            .filter((scope) => scope.status === "active")
+            .sort((left, right) => {
+              const depth = scopeDepth(right, scopeById) -
+                scopeDepth(left, scopeById)
+              return depth !== 0
+                ? depth
+                : stableIdentifierOrder(
+                  left.scopeInstanceId,
+                  right.scopeInstanceId
+                )
+            })
+            .map((scope) => scope.scopeInstanceId),
+          rootScopeInstanceId: rootScope.scopeInstanceId,
+          schedulingFenced: false
+        }
+        state.operationalWithdrawal = directClone(event.record)
+        break
+      }
+
+      case "OperationalWithdrawalSchedulingFenced": {
+        const pending = pendingOperationalWithdrawal
+        if (
+          pending === undefined ||
+          pending.schedulingFenced ||
+          event.rootScopeInstanceId !== pending.rootScopeInstanceId ||
+          event.requestId !== pending.record.command.requestId ||
+          event.fencedAt !== pending.record.requestedAt
+        ) {
+          return journalFailure(
+            index,
+            "Operational scheduling fence does not match its withdrawal request"
+          )
+        }
+        pending.schedulingFenced = true
+        break
       }
 
       case "ScopeEntered": {
@@ -7789,6 +8086,75 @@ const replayJournal = (
       }
 
       case "CatchWaitCancelled": {
+        const operational = pendingOperationalWithdrawal
+        if (operational !== undefined) {
+          const expectedGroupId = operational.catchWaitGroupIds[0]
+          const group = state.catchWaitGroups.find((candidate) => candidate.waitGroupId === event.waitGroupId)
+          const expectedTimerIds = group?.armIds.flatMap((armId) => {
+            const timer = state.timers.find((candidate) =>
+              candidate.waitGroupId === group.waitGroupId &&
+              candidate.armId === armId
+            )
+            return timer === undefined ? [] : [timer.timerId]
+          }) ?? []
+          if (
+            event.waitGroupId !== expectedGroupId ||
+            event.reason !== "execution-cancelled" ||
+            event.cancelledAt !== operational.record.requestedAt ||
+            group === undefined ||
+            group.status !== "waiting" ||
+            !sameStringArray(event.armIds, group.armIds) ||
+            !sameStringArray(event.timerIds, expectedTimerIds)
+          ) {
+            return journalFailure(
+              index,
+              `Operational catch-wait cancellation '${event.waitGroupId}' is out of order`
+            )
+          }
+          group.status = "cancelled"
+          group.cancellationReason = "execution-cancelled"
+          group.closedAt = event.cancelledAt
+          for (const armId of group.armIds) {
+            const arm = state.subscriptions.find((candidate) =>
+              candidate.waitGroupId === group.waitGroupId &&
+              candidate.armId === armId
+            )
+            if (arm === undefined || arm.status !== "waiting") {
+              return journalFailure(
+                index,
+                `Operational catch-wait cancellation '${event.waitGroupId}' lost active arm '${armId}'`
+              )
+            }
+            arm.status = "cancelled"
+            arm.closedAt = event.cancelledAt
+            arm.cancellationReason = "execution-cancelled"
+            if (arm._tag === "MessageCatchSubscription") {
+              delete arm.receipt
+            }
+          }
+          for (const timerId of expectedTimerIds) {
+            const timer = state.timers.find((candidate) => candidate.timerId === timerId)
+            if (
+              timer === undefined ||
+              (
+                timer.status !== "scheduled" &&
+                timer.status !== "armed"
+              )
+            ) {
+              return journalFailure(
+                index,
+                `Operational catch-wait cancellation '${event.waitGroupId}' lost live Timer '${timerId}'`
+              )
+            }
+            timer.status = "cancelled"
+            timer.cancelledAt = event.cancelledAt
+            timer.cancellationReason = "execution-cancelled"
+            delete timer.observedAt
+            delete timer.firedAt
+          }
+          operational.catchWaitGroupIds.shift()
+          break
+        }
         const cleanup = pendingFailureCleanup
         const expectedGroupId = cleanup?.catchWaitGroupIds[0]
         const group = state.catchWaitGroups.find((candidate) => candidate.waitGroupId === event.waitGroupId)
@@ -8835,6 +9201,45 @@ const replayJournal = (
       }
 
       case "MultiInstanceItemTerminated": {
+        const operational = pendingOperationalWithdrawal
+        if (operational !== undefined) {
+          const pendingGroup = operational.multiInstanceGroups[0]
+          const group = pendingGroup === undefined
+            ? undefined
+            : state.multiInstanceGroups.find((candidate) => candidate.groupId === pendingGroup.groupId)
+          const expectedIndex = pendingGroup?.itemIndexes[0]
+          const member = expectedIndex === undefined
+            ? undefined
+            : group?.members[expectedIndex]
+          const token = member?.tokenId === undefined
+            ? undefined
+            : state.tokens.find((candidate) => candidate.tokenId === member.tokenId)
+          if (
+            pendingGroup === undefined ||
+            group === undefined ||
+            group.status !== "active" ||
+            member === undefined ||
+            member.status !== "active" ||
+            token?.status !== "withdrawn" ||
+            event.groupId !== group.groupId ||
+            event.activityId !== group.activityId ||
+            event.activation !== group.activation ||
+            event.itemIndex !== member.index ||
+            event.itemKey !== member.itemKey ||
+            event.reason !== "execution-cancelled" ||
+            event.terminatedAt !== operational.record.requestedAt
+          ) {
+            return journalFailure(
+              index,
+              `Operational multi-instance termination '${event.groupId}:${event.itemIndex}' is out of order`
+            )
+          }
+          member.status = "terminated"
+          member.terminationReason = "execution-cancelled"
+          member.endedAt = event.terminatedAt
+          pendingGroup.itemIndexes.shift()
+          break
+        }
         const pending = pendingMultiInstanceTransition
         const cleanup = pendingFailureCleanup
         const pendingGroup = pending?.kind === "terminate-and-finish" ||
@@ -8897,6 +9302,41 @@ const replayJournal = (
       }
 
       case "MultiInstanceItemNotGenerated": {
+        const operational = pendingOperationalWithdrawal
+        if (operational !== undefined) {
+          const pendingGroup = operational.multiInstanceGroups[0]
+          const group = pendingGroup === undefined
+            ? undefined
+            : state.multiInstanceGroups.find((candidate) => candidate.groupId === pendingGroup.groupId)
+          const expectedIndex = pendingGroup?.itemIndexes[0]
+          const member = expectedIndex === undefined
+            ? undefined
+            : group?.members[expectedIndex]
+          if (
+            pendingGroup === undefined ||
+            group === undefined ||
+            group.status !== "active" ||
+            member === undefined ||
+            member.status !== "pending" ||
+            member.tokenId !== undefined ||
+            event.groupId !== group.groupId ||
+            event.activityId !== group.activityId ||
+            event.activation !== group.activation ||
+            event.itemIndex !== member.index ||
+            event.itemKey !== member.itemKey ||
+            event.reason !== "execution-cancelled" ||
+            event.notGeneratedAt !== operational.record.requestedAt
+          ) {
+            return journalFailure(
+              index,
+              `Operational multi-instance non-generation '${event.groupId}:${event.itemIndex}' is out of order`
+            )
+          }
+          member.status = "not-generated"
+          member.nonGenerationReason = "execution-cancelled"
+          pendingGroup.itemIndexes.shift()
+          break
+        }
         const pending = pendingMultiInstanceTransition
         const cleanup = pendingFailureCleanup
         const pendingGroup = pending?.kind === "terminate-and-finish" ||
@@ -9083,6 +9523,42 @@ const replayJournal = (
         } else {
           cleanup!.multiInstanceGroups.shift()
         }
+        break
+      }
+
+      case "OperationalWithdrawalMultiInstanceGroupClosed": {
+        const pending = pendingOperationalWithdrawal
+        const pendingGroup = pending?.multiInstanceGroups[0]
+        const group = pendingGroup === undefined
+          ? undefined
+          : state.multiInstanceGroups.find((candidate) => candidate.groupId === pendingGroup.groupId)
+        if (
+          pending === undefined ||
+          pendingGroup === undefined ||
+          pendingGroup.itemIndexes.length !== 0 ||
+          group === undefined ||
+          group.status !== "active" ||
+          group.members.some((member) =>
+            member.status === "active" ||
+            member.status === "pending"
+          ) ||
+          event.groupId !== group.groupId ||
+          event.activityId !== group.activityId ||
+          event.activation !== group.activation ||
+          event.requestId !== pending.record.command.requestId ||
+          event.closedAt !== pending.record.requestedAt ||
+          !sameJson(event.counters, multiInstanceCounters(group))
+        ) {
+          return journalFailure(
+            index,
+            `Operational multi-instance closure '${event.groupId}' is inconsistent`
+          )
+        }
+        group.status = "cancelled"
+        group.completionReason = "execution-cancelled"
+        group.closedAt = event.closedAt
+        delete group.output
+        pending.multiInstanceGroups.shift()
         break
       }
 
@@ -9490,6 +9966,26 @@ const replayJournal = (
             `Withdrawn token '${event.tokenId}' is missing, inactive, or chronologically invalid`
           )
         }
+        const operationalWithdrawal = pendingOperationalWithdrawal
+        if (operationalWithdrawal !== undefined) {
+          const expectedTokenId = operationalWithdrawal.tokenIds[0]
+          if (
+            !operationalWithdrawal.schedulingFenced ||
+            event.tokenId !== expectedTokenId ||
+            event.reason !== "execution-cancelled" ||
+            event.withdrawnAt !==
+              operationalWithdrawal.record.requestedAt
+          ) {
+            return journalFailure(
+              index,
+              `Operational token withdrawal '${event.tokenId}' is out of order`
+            )
+          }
+          token.status = "withdrawn"
+          token.consumedAt = event.withdrawnAt
+          operationalWithdrawal.tokenIds.shift()
+          break
+        }
         const pendingMultiInstance = pendingMultiInstanceTransition
         if (
           pendingMultiInstance?.kind === "terminate-and-finish" ||
@@ -9743,6 +10239,33 @@ const replayJournal = (
         break
       }
 
+      case "OperationalWithdrawalGatewayFrameClosed": {
+        const pending = pendingOperationalWithdrawal
+        const expectedFrameId = pending?.frameIds[0]
+        const frame = state.gatewayFrames.find(
+          (candidate) => candidate.frameId === event.frameId
+        )
+        if (
+          pending === undefined ||
+          event.frameId !== expectedFrameId ||
+          event.requestId !== pending.record.command.requestId ||
+          event.closedAt !== pending.record.requestedAt ||
+          frame === undefined ||
+          (
+            frame.status !== "waiting" &&
+            frame.status !== "satisfied"
+          )
+        ) {
+          return journalFailure(
+            index,
+            `Operational gateway-frame closure '${event.frameId}' is out of order`
+          )
+        }
+        frame.status = "cancelled"
+        pending.frameIds.shift()
+        break
+      }
+
       case "LoopFrameCancelled": {
         const pending = pendingLoopTransition
         if (pending?.kind === "cancel-before-boundary") {
@@ -9796,6 +10319,34 @@ const replayJournal = (
         delete frame.activeIteration
         frame.closedAt = event.cancelledAt
         cleanup.loopFrameIds.shift()
+        break
+      }
+
+      case "OperationalWithdrawalLoopFrameClosed": {
+        const pending = pendingOperationalWithdrawal
+        const expectedFrameId = pending?.loopFrameIds[0]
+        const frame = state.loopFrames.find(
+          (candidate) => candidate.frameId === event.frameId
+        )
+        if (
+          pending === undefined ||
+          event.frameId !== expectedFrameId ||
+          event.requestId !== pending.record.command.requestId ||
+          event.closedAt !== pending.record.requestedAt ||
+          frame === undefined ||
+          frame.status !== "active" ||
+          event.activityId !== frame.activityId ||
+          event.activation !== frame.activation
+        ) {
+          return journalFailure(
+            index,
+            `Operational loop-frame closure '${event.frameId}' is out of order`
+          )
+        }
+        frame.status = "cancelled"
+        delete frame.activeIteration
+        frame.closedAt = event.closedAt
+        pending.loopFrameIds.shift()
         break
       }
 
@@ -9969,9 +10520,15 @@ const replayJournal = (
             candidate.index === itemBranch.itemIndex &&
             candidate.itemKey === itemBranch.itemKey
           )
+        const operationallyWithdrawn = state.status === "cancelled" &&
+          state.operationalWithdrawal !== undefined &&
+          token?.status === "withdrawn" &&
+          token.consumedAt ===
+            state.operationalWithdrawal.requestedAt
         const terminalTaskWait = token?.status === "consumed" ||
           (
             token?.status === "withdrawn" &&
+            !operationallyWithdrawn &&
             member?.status === "terminated" &&
             member.tokenId === token.tokenId
           )
@@ -10004,6 +10561,67 @@ const replayJournal = (
           return journalFailure(
             index,
             `Task-outcome replay '${event.tokenId}' has no identical durable resolution`
+          )
+        }
+        break
+      }
+
+      case "TaskCompletionFenced": {
+        const withdrawal = state.operationalWithdrawal
+        const token = state.tokens.find((candidate) => candidate.tokenId === event.tokenId)
+        const task = token?.position._tag === "AtNode"
+          ? kernel.nodeById.get(token.position.nodeId)
+          : undefined
+        if (
+          state.status !== "cancelled" ||
+          withdrawal === undefined ||
+          token === undefined ||
+          token.status !== "withdrawn" ||
+          token.consumedAt !== withdrawal.requestedAt ||
+          token.scopeInstanceId !== event.scopeInstanceId ||
+          token.position._tag !== "AtNode" ||
+          token.position.nodeId !== event.taskNodeId ||
+          task?._tag !== "Task" ||
+          kernel.taskBindingByTaskNodeId.has(event.taskNodeId) ||
+          state.activityResolutions.some((resolution) => resolution.tokenId === event.tokenId) ||
+          event.withdrawalRequestId !==
+            withdrawal.command.requestId ||
+          event.observedAt < withdrawal.requestedAt
+        ) {
+          return journalFailure(
+            index,
+            `Fenced task completion '${event.tokenId}' has no exact operational withdrawal`
+          )
+        }
+        break
+      }
+
+      case "TaskOutcomeFenced": {
+        const withdrawal = state.operationalWithdrawal
+        const command = event.command
+        const token = state.tokens.find((candidate) => candidate.tokenId === command.tokenId)
+        const binding = kernel.taskBindingByTaskNodeId.get(
+          command.taskNodeId
+        )
+        if (
+          state.status !== "cancelled" ||
+          withdrawal === undefined ||
+          token === undefined ||
+          token.status !== "withdrawn" ||
+          token.consumedAt !== withdrawal.requestedAt ||
+          token.scopeInstanceId !== command.scopeInstanceId ||
+          token.position._tag !== "AtNode" ||
+          token.position.nodeId !== command.taskNodeId ||
+          binding === undefined ||
+          !bindingMatchesOutcome(binding, command.outcome) ||
+          state.activityResolutions.some((resolution) => resolution.tokenId === command.tokenId) ||
+          event.withdrawalRequestId !==
+            withdrawal.command.requestId ||
+          event.observedAt < withdrawal.requestedAt
+        ) {
+          return journalFailure(
+            index,
+            `Fenced task outcome '${command.tokenId}' has no exact operational withdrawal and binding`
           )
         }
         break
@@ -10054,6 +10672,30 @@ const replayJournal = (
         scope.status = "failed"
         scope.exitedAt = event.exitedAt
         cleanup.failedScopeIds.shift()
+        break
+      }
+
+      case "OperationalWithdrawalScopeClosed": {
+        const pending = pendingOperationalWithdrawal
+        const expectedScopeId = pending?.scopeInstanceIds[0]
+        const scope = state.scopeInstances.find((candidate) => candidate.scopeInstanceId === event.scopeInstanceId)
+        if (
+          pending === undefined ||
+          event.scopeInstanceId !== expectedScopeId ||
+          event.requestId !== pending.record.command.requestId ||
+          event.closedAt !== pending.record.requestedAt ||
+          scope === undefined ||
+          scope.status !== "active" ||
+          event.definitionId !== scope.definitionId
+        ) {
+          return journalFailure(
+            index,
+            `Operational scope closure '${event.scopeInstanceId}' is out of order`
+          )
+        }
+        scope.status = "cancelled"
+        scope.exitedAt = event.closedAt
+        pending.scopeInstanceIds.shift()
         break
       }
 
@@ -10188,6 +10830,74 @@ const replayJournal = (
         pendingFailureCleanup = undefined
         break
       }
+
+      case "OperationalWithdrawalCompleted": {
+        const pending = pendingOperationalWithdrawal
+        const rootScope = state.scopeInstances.find((scope) => scope.scopeInstanceId === event.rootScopeInstanceId)
+        if (
+          pending === undefined ||
+          !pending.schedulingFenced ||
+          pending.tokenIds.length !== 0 ||
+          pending.frameIds.length !== 0 ||
+          pending.loopFrameIds.length !== 0 ||
+          pending.multiInstanceGroups.length !== 0 ||
+          pending.catchWaitGroupIds.length !== 0 ||
+          pending.scopeInstanceIds.length !== 0 ||
+          event.rootScopeInstanceId !== pending.rootScopeInstanceId ||
+          event.requestId !== pending.record.command.requestId ||
+          !sameWithdrawalCommand(
+            event.command,
+            pending.record.command
+          ) ||
+          event.completedAt !== pending.record.requestedAt ||
+          rootScope === undefined ||
+          rootScope.parentScopeInstanceId !== undefined ||
+          rootScope.status !== "cancelled" ||
+          rootScope.exitedAt !== event.completedAt ||
+          state.scopeInstances.some((scope) => scope.status === "active") ||
+          state.tokens.some((token) => token.status === "active") ||
+          state.gatewayFrames.some((frame) =>
+            frame.status === "waiting" ||
+            frame.status === "satisfied"
+          ) ||
+          state.loopFrames.some((frame) => frame.status === "active") ||
+          state.multiInstanceGroups.some((group) => group.status === "active") ||
+          state.catchWaitGroups.some((group) => group.status === "waiting") ||
+          state.subscriptions.some((subscription) => subscription.status === "waiting") ||
+          state.timers.some((timer) =>
+            timer.status === "scheduled" ||
+            timer.status === "armed"
+          )
+        ) {
+          return journalFailure(
+            index,
+            "Operational withdrawal completion is inconsistent with its exact closed marking"
+          )
+        }
+        state.status = "cancelled"
+        state.completedAt = event.completedAt
+        pendingOperationalWithdrawal = undefined
+        break
+      }
+
+      case "OperationalWithdrawalReplayed": {
+        const withdrawal = state.operationalWithdrawal
+        if (
+          state.status !== "cancelled" ||
+          withdrawal === undefined ||
+          !sameWithdrawalCommand(
+            withdrawal.command,
+            event.command
+          ) ||
+          event.observedAt < withdrawal.requestedAt
+        ) {
+          return journalFailure(
+            index,
+            "Operational withdrawal replay does not match the committed command"
+          )
+        }
+        break
+      }
     }
   }
 
@@ -10206,6 +10916,7 @@ const replayJournal = (
     pendingLoopTransition !== undefined ||
     pendingMultiInstanceTransition !== undefined ||
     pendingFailureCleanup !== undefined ||
+    pendingOperationalWithdrawal !== undefined ||
     pendingExecutionCompletion !== undefined
   ) {
     return journalFailure(events.length, "The transition journal ends before its causal transition completes")
@@ -11541,6 +12252,311 @@ export const advance = (
   })
 }
 
+const sameWithdrawalCommand = (
+  left: BpmnOperationalV3.RequestInstanceWithdrawalCommand,
+  right: BpmnOperationalV3.RequestInstanceWithdrawalCommand
+): boolean =>
+  sameJson(
+    left as unknown as Schema.Json,
+    right as unknown as Schema.Json
+  )
+
+const stableIdentifierOrder = (
+  left: string,
+  right: string
+): number => left < right ? -1 : left > right ? 1 : 0
+
+const scopeDepth = (
+  scope: BpmnExecutionState.ScopeInstance,
+  scopeById: ReadonlyMap<string, BpmnExecutionState.ScopeInstance>
+): number => {
+  let depth = 0
+  let current: BpmnExecutionState.ScopeInstance | undefined = scope
+  const visited = new Set<string>()
+  while (
+    current.parentScopeInstanceId !== undefined &&
+    !visited.has(current.scopeInstanceId)
+  ) {
+    visited.add(current.scopeInstanceId)
+    const parent = scopeById.get(current.parentScopeInstanceId)
+    if (parent === undefined) {
+      break
+    }
+    depth++
+    current = parent
+  }
+  return depth
+}
+
+/**
+ * Atomically withdraws one active BPMN root execution for operational reasons.
+ *
+ * **Details**
+ *
+ * This portable control is not BPMN Cancel, Terminate, or compensation. The
+ * command is authenticated before mutation, the single trusted timestamp is
+ * supplied by `services.now`, and the returned batch records an explicit
+ * scheduling fence before deterministically closing every live structure.
+ *
+ * An exact retry after commit leaves state unchanged and emits only
+ * `OperationalWithdrawalReplayed`. A different request, or a request against
+ * a naturally completed or failed execution, is rejected deterministically.
+ *
+ * @category constructors
+ * @since 4.0.0
+ */
+export const withdrawExecution = (
+  kernel: CompiledKernel,
+  stateInput: unknown,
+  commandInput: unknown,
+  services: Services
+): Result.Result<TransitionBatch, Diagnostic.CompilationError> => {
+  const resolvedKernel = resolveKernel(kernel)
+  if (Result.isFailure(resolvedKernel)) {
+    return Result.fail(resolvedKernel.failure)
+  }
+  const authority = resolvedKernel.success
+  const commandSnapshot = Json.snapshot(commandInput)
+  if (Result.isFailure(commandSnapshot)) {
+    return Result.fail(compilationError(error(
+      Codes.InvalidCommand,
+      commandSnapshot.failure.message,
+      ["command", ...commandSnapshot.failure.path]
+    )))
+  }
+  const decodedCommand = decodeRequestInstanceWithdrawalCommand(
+    commandSnapshot.success
+  )
+  if (Result.isFailure(decodedCommand)) {
+    return Result.fail(compilationError(error(
+      Codes.InvalidCommand,
+      "Invalid operational instance-withdrawal command",
+      ["command"],
+      { issue: String(decodedCommand.failure) }
+    )))
+  }
+  const command = commandSnapshot.success as unknown as BpmnOperationalV3.RequestInstanceWithdrawalCommand
+  const validated = validateKernelState(authority, stateInput)
+  if (Result.isFailure(validated)) {
+    return Result.fail(validated.failure)
+  }
+  const resolvedServices = resolveServices(
+    services,
+    latestStateTimestamp(validated.success)
+  )
+  if (Result.isFailure(resolvedServices)) {
+    return Result.fail(resolvedServices.failure)
+  }
+  const runtimeServices = resolvedServices.success
+  const durableState = validated.success
+  const rootScope = durableState.scopeInstances.find(
+    (scope) => scope.parentScopeInstanceId === undefined
+  )
+  if (
+    rootScope === undefined ||
+    rootScope.scopeInstanceId !== command.rootScopeInstanceId
+  ) {
+    return Result.fail(compilationError(error(
+      Codes.InvalidCommand,
+      `Operational withdrawal does not identify the execution root scope '${command.rootScopeInstanceId}'`,
+      ["command", "rootScopeInstanceId"]
+    )))
+  }
+
+  if (durableState.status === "cancelled") {
+    const committed = durableState.operationalWithdrawal
+    if (
+      committed === undefined ||
+      !sameWithdrawalCommand(committed.command, command)
+    ) {
+      return Result.fail(compilationError(error(
+        Codes.InvalidCommand,
+        "Execution was already operationally withdrawn by a different request",
+        ["command", "requestId"],
+        {
+          committedRequestId: committed?.command.requestId ??
+            "missing-withdrawal-record",
+          requestedRequestId: command.requestId
+        }
+      )))
+    }
+    const replayed: Array<TransitionEvent> = []
+    recordEvent(replayed, {
+      _tag: "OperationalWithdrawalReplayed",
+      command,
+      observedAt: runtimeServices.now
+    })
+    return Result.succeed({
+      state: durableState,
+      events: immutableEvents(replayed)
+    })
+  }
+  if (durableState.status !== "active" || rootScope.status !== "active") {
+    return Result.fail(compilationError(error(
+      Codes.InvalidCommand,
+      `Execution status '${durableState.status}' cannot accept operational withdrawal`,
+      ["state", "status"]
+    )))
+  }
+
+  const state = directClone(durableState) as MutableState
+  const journal: Array<TransitionEvent> = []
+  const now = runtimeServices.now
+  const record: BpmnOperationalV3.OperationalInstanceWithdrawalRecord = {
+    withdrawalVersion: BpmnOperationalV3.OperationalInstanceWithdrawalVersion,
+    command: directClone(command),
+    requestedAt: now
+  }
+  state.operationalWithdrawal = directClone(record)
+  recordEvent(journal, {
+    _tag: "OperationalWithdrawalRequested",
+    record
+  })
+  recordEvent(journal, {
+    _tag: "OperationalWithdrawalSchedulingFenced",
+    rootScopeInstanceId: rootScope.scopeInstanceId,
+    requestId: command.requestId,
+    fencedAt: now
+  })
+
+  const activeTokenSet = new Set(
+    state.tokens
+      .filter((token) => token.status === "active")
+      .map((token) => token.tokenId)
+  )
+  for (
+    const token of state.tokens
+      .filter((candidate) => activeTokenSet.has(candidate.tokenId))
+      .sort((left, right) => stableIdentifierOrder(left.tokenId, right.tokenId))
+  ) {
+    withdrawToken(token, journal, "execution-cancelled", now)
+  }
+
+  for (
+    const frame of state.gatewayFrames
+      .filter((candidate) =>
+        candidate.status === "waiting" ||
+        candidate.status === "satisfied"
+      )
+      .sort((left, right) => stableIdentifierOrder(left.frameId, right.frameId))
+  ) {
+    frame.status = "cancelled"
+    recordEvent(journal, {
+      _tag: "OperationalWithdrawalGatewayFrameClosed",
+      frameId: frame.frameId,
+      requestId: command.requestId,
+      closedAt: now
+    })
+  }
+
+  for (
+    const frame of state.loopFrames
+      .filter((candidate) => candidate.status === "active")
+      .sort((left, right) => stableIdentifierOrder(left.frameId, right.frameId))
+  ) {
+    frame.status = "cancelled"
+    delete frame.activeIteration
+    frame.closedAt = now
+    recordEvent(journal, {
+      _tag: "OperationalWithdrawalLoopFrameClosed",
+      frameId: frame.frameId,
+      activityId: frame.activityId,
+      activation: frame.activation,
+      requestId: command.requestId,
+      closedAt: now
+    })
+  }
+
+  for (
+    const group of state.multiInstanceGroups
+      .filter((candidate) => candidate.status === "active")
+      .sort((left, right) => stableIdentifierOrder(left.groupId, right.groupId))
+  ) {
+    for (const member of group.members) {
+      closeMultiInstanceMember(
+        state,
+        group,
+        member,
+        "execution-cancelled",
+        journal,
+        now
+      )
+    }
+    group.status = "cancelled"
+    group.completionReason = "execution-cancelled"
+    group.closedAt = now
+    delete group.output
+    recordEvent(journal, {
+      _tag: "OperationalWithdrawalMultiInstanceGroupClosed",
+      groupId: group.groupId,
+      activityId: group.activityId,
+      activation: group.activation,
+      requestId: command.requestId,
+      counters: multiInstanceCounters(group),
+      closedAt: now
+    })
+  }
+
+  for (
+    const group of state.catchWaitGroups
+      .filter((candidate) => candidate.status === "waiting")
+      .sort((left, right) => stableIdentifierOrder(left.waitGroupId, right.waitGroupId))
+  ) {
+    cancelCatchWait(
+      state,
+      group,
+      "execution-cancelled",
+      journal,
+      now
+    )
+  }
+
+  const scopeById = new Map(
+    state.scopeInstances.map((scope) => [scope.scopeInstanceId, scope] as const)
+  )
+  for (
+    const scope of state.scopeInstances
+      .filter((candidate) => candidate.status === "active")
+      .sort((left, right) => {
+        const depth = scopeDepth(right, scopeById) - scopeDepth(left, scopeById)
+        return depth !== 0
+          ? depth
+          : stableIdentifierOrder(
+            left.scopeInstanceId,
+            right.scopeInstanceId
+          )
+      })
+  ) {
+    scope.status = "cancelled"
+    scope.exitedAt = now
+    recordEvent(journal, {
+      _tag: "OperationalWithdrawalScopeClosed",
+      scopeInstanceId: scope.scopeInstanceId,
+      definitionId: scope.definitionId,
+      requestId: command.requestId,
+      closedAt: now
+    })
+  }
+
+  state.status = "cancelled"
+  state.completedAt = now
+  recordEvent(journal, {
+    _tag: "OperationalWithdrawalCompleted",
+    rootScopeInstanceId: rootScope.scopeInstanceId,
+    requestId: command.requestId,
+    command,
+    completedAt: now
+  })
+  const checked = validateKernelState(authority, state)
+  if (Result.isFailure(checked)) {
+    return Result.fail(checked.failure)
+  }
+  return Result.succeed({
+    state: checked.success,
+    events: immutableEvents(journal)
+  })
+}
+
 /**
  * Validates an execution snapshot against one prepared kernel authority
  * without advancing it or consulting runtime services.
@@ -12335,6 +13351,13 @@ export const replay = (
 /**
  * Completes one waiting task token and advances the execution to stability.
  *
+ * **Details**
+ *
+ * Exact coordinates for a task token withdrawn by
+ * `OperationalInstanceWithdrawal/1` are authenticated but fenced: state
+ * remains unchanged and `TaskCompletionFenced` is emitted instead of replay
+ * or semantic progress.
+ *
  * @category constructors
  * @since 4.0.0
  */
@@ -12396,12 +13419,41 @@ export const completeTask = (
       ["tokens"]
     )))
   }
+  const node = authority.nodeById.get(command.taskNodeId)
+  if (node === undefined || node._tag !== "Task") {
+    return Result.fail(compilationError(error(
+      Codes.InvalidCommand,
+      `Task completion command targets non-Task node '${command.taskNodeId}'`,
+      ["command", "taskNodeId"]
+    )))
+  }
   if (authority.taskBindingByTaskNodeId.has(command.taskNodeId)) {
     return Result.fail(compilationError(error(
       Codes.InvalidCommand,
       `Protocol-v3-bound task '${command.taskNodeId}' requires resolveTask`,
       ["command", "taskNodeId"]
     )))
+  }
+  if (
+    token.status === "withdrawn" &&
+    validated.success.status === "cancelled" &&
+    validated.success.operationalWithdrawal !== undefined &&
+    token.consumedAt ===
+      validated.success.operationalWithdrawal.requestedAt
+  ) {
+    recordEvent(journal, {
+      _tag: "TaskCompletionFenced",
+      scopeInstanceId: command.scopeInstanceId,
+      taskNodeId: command.taskNodeId,
+      tokenId: command.tokenId,
+      withdrawalRequestId: validated.success.operationalWithdrawal.command.requestId,
+      reason: "operational-withdrawal",
+      observedAt: runtimeServices.now
+    })
+    return Result.succeed({
+      state: validated.success,
+      events: immutableEvents(journal)
+    })
   }
   if (token.status !== "active") {
     recordEvent(journal, {
@@ -12415,8 +13467,7 @@ export const completeTask = (
     })
   }
   const scope = findScope(state, token.scopeInstanceId)
-  const node = authority.nodeById.get(command.taskNodeId)
-  if (scope === undefined || node === undefined || node._tag !== "Task") {
+  if (scope === undefined) {
     return Result.fail(compilationError(error(
       Codes.InvalidCommand,
       `Task completion command targets an invalid task wait state`,
@@ -12481,6 +13532,11 @@ export const completeTask = (
  * native Effect Workflow result remains the responsibility of a trusted
  * adapter. Only an exactly mapped application-failure identity may be
  * promoted to a BPMN Error.
+ *
+ * A binding-valid outcome for a task token withdrawn by
+ * `OperationalInstanceWithdrawal/1` is retained only as a
+ * `TaskOutcomeFenced` audit fact. It neither creates an activity resolution
+ * nor reopens BPMN flow.
  *
  * @category constructors
  * @since 4.0.0
@@ -12573,6 +13629,25 @@ export const resolveTask = (
       _tag: "TaskOutcomeReplayed",
       tokenId: command.tokenId,
       occurrenceDigest: command.outcome.occurrenceDigest,
+      observedAt: runtimeServices.now
+    })
+    return Result.succeed({
+      state: validated.success,
+      events: immutableEvents(journal)
+    })
+  }
+  if (
+    token.status === "withdrawn" &&
+    validated.success.status === "cancelled" &&
+    validated.success.operationalWithdrawal !== undefined &&
+    token.consumedAt ===
+      validated.success.operationalWithdrawal.requestedAt
+  ) {
+    recordEvent(journal, {
+      _tag: "TaskOutcomeFenced",
+      command,
+      withdrawalRequestId: validated.success.operationalWithdrawal.command.requestId,
+      reason: "operational-withdrawal",
       observedAt: runtimeServices.now
     })
     return Result.succeed({

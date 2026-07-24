@@ -6,7 +6,9 @@
  * This module models one live or terminal BPMN execution snapshot against a
  * validated {@link BpmnModel.BpmnModel}. It records tokens, scope instances,
  * exact protocol-v3 task resolutions, and durable control frames without
- * claiming full BPMN execution conformance.
+ * claiming full BPMN execution conformance. A terminal snapshot may also
+ * retain the exact portable `OperationalInstanceWithdrawal/1` control-plane
+ * record; that record is not a BPMN Cancel, Terminate, or compensation fact.
  *
  * @since 4.0.0
  */
@@ -15,6 +17,7 @@ import * as Schema from "effect/Schema"
 import * as BpmnActivityV3 from "./BpmnActivityV3.ts"
 import * as BpmnEventV3 from "./BpmnEventV3.ts"
 import * as BpmnModel from "./BpmnModel.ts"
+import * as BpmnOperationalV3 from "./BpmnOperationalV3.ts"
 import * as BpmnTime from "./BpmnTime.ts"
 import * as Diagnostic from "./Diagnostic.ts"
 import * as Json from "./internal/json.ts"
@@ -103,7 +106,7 @@ const codeError = (
  * @category constants
  * @since 4.0.0
  */
-export const BpmnExecutionStateVersion = 7 as const
+export const BpmnExecutionStateVersion = 8 as const
 
 /**
  * Version of the executable BPMN fingerprint preimage.
@@ -111,7 +114,7 @@ export const BpmnExecutionStateVersion = 7 as const
  * @category constants
  * @since 4.0.0
  */
-export const BpmnExecutableFingerprintVersion = 5 as const
+export const BpmnExecutableFingerprintVersion = 6 as const
 
 /**
  * Version of the token-kernel semantics committed by an execution.
@@ -119,7 +122,7 @@ export const BpmnExecutableFingerprintVersion = 5 as const
  * @category constants
  * @since 4.0.0
  */
-export const BpmnKernelSemanticVersion = "6" as const
+export const BpmnKernelSemanticVersion = "7" as const
 
 /**
  * Execution snapshot identity pinned to one BPMN semantic model version.
@@ -868,6 +871,9 @@ export const BpmnExecutionState = Schema.Struct({
   startedAt: ProtocolV2Wire.Timestamp,
   input: Schema.Json,
   completedAt: Schema.optionalKey(ProtocolV2Wire.Timestamp),
+  operationalWithdrawal: Schema.optionalKey(
+    BpmnOperationalV3.OperationalInstanceWithdrawalRecord
+  ),
   extensionElements: Schema.Array(BpmnModel.ExtensionElement),
   scopeInstances: Schema.Array(ScopeInstance),
   tokens: Schema.Array(Token),
@@ -1120,6 +1126,34 @@ export const validate = (
       Codes.InvalidState,
       "A failed BPMN execution requires a failed root scope",
       ["scopeInstances"]
+    ))
+  }
+  if (state.status === "cancelled" && rootScope !== undefined && rootScope.status !== "cancelled") {
+    diagnostics.push(codeError(
+      Codes.InvalidState,
+      "An operationally withdrawn BPMN execution requires a cancelled root scope",
+      ["scopeInstances"]
+    ))
+  }
+  if (state.status === "cancelled") {
+    const withdrawal = state.operationalWithdrawal
+    if (
+      withdrawal === undefined ||
+      rootScope === undefined ||
+      withdrawal.command.rootScopeInstanceId !== rootScope.scopeInstanceId ||
+      withdrawal.requestedAt !== state.completedAt
+    ) {
+      diagnostics.push(codeError(
+        Codes.InvalidState,
+        "A cancelled BPMN execution requires exact operational-withdrawal evidence for its root scope and terminal timestamp",
+        ["operationalWithdrawal"]
+      ))
+    }
+  } else if (state.operationalWithdrawal !== undefined) {
+    diagnostics.push(codeError(
+      Codes.InvalidState,
+      "Only an operationally withdrawn BPMN execution may retain operational-withdrawal evidence",
+      ["operationalWithdrawal"]
     ))
   }
 

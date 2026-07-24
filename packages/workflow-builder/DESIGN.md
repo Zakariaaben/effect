@@ -221,6 +221,70 @@ The first adapter must obey these invariants:
   idempotency key deduplicates execution but does not explain a same-run,
   different-request conflict.
 
+### `OperationalInstanceWithdrawal/1`
+
+This profile is a Builder-owned external control-plane operation, not a BPMN
+event. Its command and durable record are
+`RequestInstanceWithdrawalCommand` and
+`OperationalInstanceWithdrawalRecord`, with version
+`OperationalInstanceWithdrawalVersion`. Every request pins an atomic
+`requestId`, the selected root execution, bounded actor/policy attribution in
+`WithdrawalAuditAttribution`, and an optional bounded `reasonCode`. Reusing the
+same `requestId` with the same request replays idempotently; conflicting reuse
+fails closed.
+
+The linearization point is the successful portable state commit/CAS of the
+transition batch containing `OperationalWithdrawalRequested` and
+`OperationalWithdrawalSchedulingFenced`. A losing CAS reloads the committed
+state and redecides; no side effect may precede that commit. Once fenced:
+
+- no Task, loop iteration, Multi-Instance member, catch arm, timer, or other
+  continuation can be newly scheduled;
+- owned embedded scopes, gateway frames, loop frames, fixed/collection
+  Multi-Instance groups, catch wait groups, subscriptions, and timers are
+  closed in deterministic replay order;
+- unrelated roots, sibling executions, and merely message-correlated process
+  instances are never selected by this descendant closure;
+- withdrawn tokens do not traverse outgoing Sequence Flows;
+- late success and failure inputs are retained only as
+  `TaskCompletionFenced` or `TaskOutcomeFenced`; and
+- `OperationalWithdrawalCompleted` closes the portable root unsuccessfully,
+  while duplicate delivery produces `OperationalWithdrawalReplayed`.
+
+The closure facts
+`OperationalWithdrawalGatewayFrameClosed`,
+`OperationalWithdrawalLoopFrameClosed`,
+`OperationalWithdrawalMultiInstanceGroupClosed`, and
+`OperationalWithdrawalScopeClosed` make descendant cleanup auditable. They do
+not assert rollback, compensation, or physical cancellation of an already
+started side effect.
+
+Backend ordering is deliberately one-way:
+
+1. Decide and commit/CAS the complete portable transition.
+2. Call
+   `EffectWorkflowBpmnOperationalV3.prepareCommittedWithdrawal` to authenticate
+   the exact committed snapshot and obtain an opaque capability.
+3. For a locally waiting catch channel, call
+   `prepareCancelledWaitNotification` and then `notifyCancelledWait`. Its
+   first-wins deferred state-change value is only a reload hint.
+4. As a separate whole-host choice, call `interruptCommittedHost` only if the
+   native workflow address denotes exactly the entire portable instance whose
+   execution must end. It delegates to the public safe `Workflow.interrupt`
+   path.
+
+The wake and safe interrupt are operational consequences, never alternate
+authorities. Recovery can reconstruct them from committed state. The adapter
+must not call `interruptUnsafe`, create another scheduler, persistence store,
+journal, cancellation state machine, or replay engine.
+
+Version `1` excludes executable `CallActivity` propagation until call frames
+are supported, work items and human tasks, BPMN Transaction Cancel,
+compensation, Terminate End Event behavior, targeted task or scope withdrawal,
+and any guarantee that remote or physical work stopped. It is bounded partial
+WCP20 Cancel Case behavior only; it does not satisfy WCP19 Cancel Task and
+makes no BPMN Process Execution Conformance claim.
+
 The version `1`/`2` memory stores and authorities remain executable semantic and
 race conformance fixtures while they have callers. They are not a blueprint for
 another persistent replay engine. New version `3` durability work starts at the
@@ -294,7 +358,7 @@ machine failure.
 | `BpmnData.ts`                     | Strict normalized BPMN data, IO specification, data-association, interface, operation, message, error, and local callable-binding slice.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `BpmnDi.ts`                       | Normalized BPMNDI/DI/DC diagrams, shapes, edges, labels, styles, geometry, identities, and semantic reference-kind validation.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `BpmnActivityV3.ts`               | Pure protocol-v3 BPMN task bindings, exact failure-identity-to-Error promotion mappings, portable success/business-failure outcomes, and durable idempotent task-resolution records. It deliberately excludes defects, operational cancellation, BPMN Cancel, and boundary timers.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| `BpmnExecutionState.ts`           | Durable token, scope, invocation, gateway, Standard Loop, multi-instance, call, subscription, timer, work-item, compensation, cancellation, and exact task-resolution state foundation at state version `7`, with a version `5` executable-model fingerprint reference. Catch state records atomic wait groups, exact Message/Timer arms, deterministic winners, loser cancellation, and one execution-global Message-delivery ledger whose dispositions include both `message-winner` and `timer-preempted`. A strict invocation-branch union separates Standard Loop iterations from Multi-Instance items. Closed Multi-Instance groups cross-check activation authority, frozen cardinality or collection source, ordered member identity and lifecycle, optional complete output aggregation, active token ownership, exact counters, completion/cancellation reason, and terminal timestamps.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `BpmnExecutionState.ts`           | Durable token, scope, invocation, gateway, Standard Loop, multi-instance, call, subscription, timer, work-item, compensation, cancellation, and exact task-resolution state foundation at state version `8`, with a version `6` executable-model fingerprint reference. Catch state records atomic wait groups, exact Message/Timer arms, deterministic winners, loser cancellation, and one execution-global Message-delivery ledger whose dispositions include both `message-winner` and `timer-preempted`. A strict invocation-branch union separates Standard Loop iterations from Multi-Instance items. Closed Multi-Instance groups cross-check activation authority, frozen cardinality or collection source, ordered member identity and lifecycle, optional complete output aggregation, active token ownership, exact counters, completion/cancellation reason, and terminal timestamps.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `BpmnEventV3.ts`                  | Strict portable Message bindings, ordered non-empty exact composite correlation keys, authorization-policy pins, kernel-clock-authoritative `acceptedAt` receipts, exact catch-arm targets, durable Timer-arm acknowledgements, and Timer observation commands for `CatchEventChoice/1`. It deliberately contains no broker, inbox, clock, Timer store, or predicate/wildcard correlation.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `BpmnTime.ts`                     | Pure parsing of evaluated string values into a bounded ISO-8601/XML Schema day/time-duration or zoned-date-time subset for `timeDuration` and `timeDate`, materialized from an already persisted scheduling anchor without reading a clock. The BPMN elements contain `tExpression`; this is an executable runtime restriction on the evaluated string, not a direct XSD type constraint on expression text. Calendar-relative duration units, negative or lossy values, and `timeCycle` are rejected.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `BpmnExpression.ts`               | Strict portable evaluator build pins and bounded source/context/step/timeout policies keyed by an exact language and language version.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
@@ -382,9 +446,9 @@ explicit `Crypto` service to bind the normalized semantic model, selected root,
 kernel semantic version, limits, named profile, and exact evaluator-build
 manifest. Optional protocol-v3 task, data, collection, and Message bindings are
 external compile options, passed explicitly into kernel preparation and the
-fingerprint rather than decoded from BPMN XML. State-version `7` markings and
-the journal-version `6` leading header carry the version `5` fingerprint and
-kernel semantic version `6`; condition, collection, Message-correlation, and
+fingerprint rather than decoded from BPMN XML. State-version `8` markings and
+the journal-version `7` leading header carry the version `6` fingerprint and
+kernel semantic version `7`; condition, collection, Message-correlation, and
 Timer-deadline events carry their exact evaluator binding and bounded usage
 evidence, and `BpmnHistory` can seal the complete causal journal under an
 independently anchorable history digest. Profile

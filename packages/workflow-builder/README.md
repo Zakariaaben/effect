@@ -53,7 +53,7 @@ Today the package provides:
 - a durable BPMN execution-state foundation with token positions, scope and
   invocation identity, gateway/loop/multi-instance/call frames, subscriptions,
   timers, work items, compensation registrations, and cancellation regions,
-  whose state version `7` carries a version `5` executable fingerprint
+  whose state version `8` carries a version `6` executable fingerprint
   reference, exact protocol-v3 task-resolution records, atomic catch-wait
   groups, and a global Message-delivery ledger;
 - a normalized BPMN data/IO/interface slice and BPMNDI/DI/DC representation
@@ -131,7 +131,7 @@ Today the package provides:
   loser-arm/Timer cancellation commit in one transition. The execution-global
   `deliveryId` ledger consumes both Message winners and Messages preempted by a
   Timer, so an accepted delivery cannot be reused against another activation.
-  Version `6` causal journals replay the selected winner, evaluated correlation,
+  Version `7` causal journals replay the selected winner, evaluated correlation,
   materialized deadline, cancellations, fences, and ledger without rereading a
   clock, reevaluating an expression, or rerunning the race.
   Fingerprinted kernel budgets bound the evaluated Timer lexical value, the
@@ -174,6 +174,14 @@ Today the package provides:
   yet cover the complete BPMN Activity lifecycle, parent-scope Error
   propagation, Boundary Timers, BPMN Cancel, non-interrupting boundaries, or
   event subprocesses;
+- `OperationalInstanceWithdrawal/1`, an external control-plane extension whose
+  atomic portable transition records idempotent attribution, fences scheduling,
+  closes supported owned descendants, emits no normal continuation, and fences
+  late Task outcomes. Its optional `EffectWorkflowBpmnOperationalV3` adapter
+  authenticates committed state before either notifying a cancelled local wait
+  or safely interrupting an exact whole native host. This is partial logical
+  WCP20 behavior, never BPMN Cancel, Terminate, compensation, rollback, WCP19,
+  or a physical-stop guarantee;
 - a strict BPMN executable facade that imports the named XML profile and
   compiles it directly to the token kernel without DAG lowering. Its
   end-to-end scenarios execute conditional/default parallel/subprocess,
@@ -184,9 +192,9 @@ Today the package provides:
   shape has a separate end-to-end scenario;
 - Effectful BPMN kernel preparation that SHA-256 fingerprints the complete
   normalized semantic model, selected root, kernel semantics, limits, mapping
-  profile, and exact evaluator-build manifest; kernel semantic version `6`,
-  state version `7`, executable fingerprint version `5`, and transition-journal
-  version `6` reject cross-model or cross-profile substitution before
+  profile, and exact evaluator-build manifest; kernel semantic version `7`,
+  state version `8`, executable fingerprint version `6`, and transition-journal
+  version `7` reject cross-model or cross-profile substitution before
   interpreting a marking;
 - strict build-pinned BPMN expression evaluator definitions and an Effect
   registry that permits old and new builds to coexist but performs no
@@ -461,6 +469,43 @@ ISO-8601/XML Schema duration or date-time subset: non-negative fixed
 day/time durations with exact millisecond representation, or zoned date-times
 normalizable to the protocol timestamp. Calendar-relative units, negative or
 lossy values, and `timeCycle` remain outside this profile.
+
+`OperationalInstanceWithdrawal/1` is a separate external control-plane
+extension implemented by `BpmnKernel.withdrawExecution`. A
+`RequestInstanceWithdrawalCommand` carries one idempotent `requestId` plus
+bounded `rootScopeInstanceId`, `WithdrawalAuditAttribution`, and optional
+`reasonCode`. The successful portable state commit/CAS that records
+`OperationalWithdrawalRequested` together with
+`OperationalWithdrawalSchedulingFenced` is the linearization point. From that
+point the kernel admits no new scheduling, closes owned embedded scopes,
+gateway and loop frames, fixed/collection Multi-Instance groups, catch wait
+groups, subscriptions, and timers, emits no outgoing Sequence Flow, and fences
+late task success or failure as `TaskCompletionFenced` or
+`TaskOutcomeFenced`. Exact replay records
+`OperationalWithdrawalReplayed` rather than applying the withdrawal twice.
+
+The terminal `OperationalWithdrawalCompleted` fact means that the portable
+execution is logically closed. It does not mean that an already-started
+external effect, remote service, or human action physically stopped, and it
+does not undo a committed effect. This profile is only bounded partial WCP20
+Cancel Case evidence. It is not BPMN `CancelEventDefinition`, a Transaction
+Cancel, a Terminate End Event, compensation, rollback, or WCP19 targeted task
+cancellation. `CallActivity` propagation remains excluded while executable
+call frames are unsupported, as do work-item/human-task withdrawal, targeted
+scope withdrawal, unrelated or merely message-correlated process instances,
+and any physical-stop guarantee. Consequently:
+
+`BPMN Process Execution Conformance: not claimed`.
+
+For an Effect Workflow host, the portable commit is authoritative.
+`EffectWorkflowBpmnOperationalV3.prepareCommittedWithdrawal` authenticates that
+committed snapshot and returns an opaque post-commit capability. Local catch
+waits use `prepareCancelledWaitNotification` followed by
+`notifyCancelledWait`; the deferred state-change value is only a reload hint.
+`interruptCommittedHost` is the separate safe choice when the addressed native
+workflow execution is exactly the whole portable instance that must terminate.
+Neither path is the semantic decision itself. The adapter must not use
+`interruptUnsafe` or add a second scheduler, store, journal, or replay engine.
 
 The closed profiles follow durable-engine lessons shared by Temporal, AWS Step
 Functions, Argo, and similar systems: freeze the logical member set at
