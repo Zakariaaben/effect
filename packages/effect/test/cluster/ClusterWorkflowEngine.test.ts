@@ -493,7 +493,7 @@ describe.concurrent("ClusterWorkflowEngine", () => {
       ], { concurrency: "unbounded" })
 
       const values = results.map((result) => {
-        assert(result._tag === "Complete")
+        assert(result._tag === "Completed")
         assert(Exit.isSuccess(result.exit))
         return result.exit.value
       }).sort()
@@ -501,6 +501,18 @@ describe.concurrent("ClusterWorkflowEngine", () => {
         "closure-1/context-1",
         "closure-2/context-2"
       ])
+
+      yield* TestClock.adjust("1 second")
+      const replayed = yield* executeAttempt(1, "replay", "replay")
+      assert(replayed._tag === "Completed")
+      assert(Exit.isSuccess(replayed.exit))
+      assert.strictEqual(replayed.exit.value, "closure-1/context-1")
+      assert.strictEqual(startedCount, 2)
+      assert(results[0]._tag === "Completed")
+      assert.strictEqual(
+        DateTime.toEpochMillis(replayed.completedAt),
+        DateTime.toEpochMillis(results[0].completedAt)
+      )
     }).pipe(Effect.scoped, Effect.provide(TestWorkflowEngine)))
 
   it.effect("an activity resolves and reads its execution's canonical deferred", () =>

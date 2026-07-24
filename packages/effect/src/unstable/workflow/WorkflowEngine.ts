@@ -22,7 +22,7 @@ import * as Option from "../../Option.ts"
 import * as Schedule from "../../Schedule.ts"
 import * as Schema from "../../Schema.ts"
 import * as Scope from "../../Scope.ts"
-import type * as Activity from "./Activity.ts"
+import * as Activity from "./Activity.ts"
 import type { DurableClock } from "./DurableClock.ts"
 import type * as DurableDeferred from "./DurableDeferred.ts"
 import * as Workflow from "./Workflow.ts"
@@ -152,7 +152,7 @@ export class WorkflowEngine extends Context.Service<
       activity: Activity.Activity<Success, Error, R>,
       attempt: number
     ) => Effect.Effect<
-      Workflow.Result<Success["Type"], Error["Type"]>,
+      Activity.Result<Success["Type"], Error["Type"]>,
       never,
       | Success["DecodingServices"]
       | Error["DecodingServices"]
@@ -394,7 +394,7 @@ export interface Encoded {
     activity: Activity.Any,
     attempt: number
   ) => Effect.Effect<
-    Workflow.Result<unknown, unknown>,
+    Activity.Result<unknown, unknown>,
     never,
     WorkflowInstance
   >
@@ -570,7 +570,10 @@ export const makeUnsafe = (options: Encoded): WorkflowEngine["Service"] =>
       const exit = yield* Effect.orDie(
         Schema.decodeEffect(activity.exitSchemaPartial)(toJsonExit(result.exit))
       )
-      return new Workflow.Complete({ exit })
+      return new Activity.Completed({
+        exit,
+        completedAt: result.completedAt
+      })
     }),
     deferredResult: Effect.fnUntraced(
       function*<Success extends Schema.Constraint, Error extends Schema.Constraint>(
@@ -785,7 +788,7 @@ export const layerMemory: Layer.Layer<WorkflowEngine> = Layer.effect(WorkflowEng
     const executions = new Map<string, ExecutionState>()
 
     type ActivityState = {
-      exit: Exit.Exit<Workflow.Result<unknown, unknown>> | undefined
+      exit: Exit.Exit<Activity.Result<unknown, unknown>> | undefined
     }
     const activities = new Map<string, ActivityState>()
 
@@ -919,7 +922,7 @@ export const layerMemory: Layer.Layer<WorkflowEngine> = Layer.effect(WorkflowEng
         const activityInstance = WorkflowInstance.initial(instance.workflow, instance.executionId)
         activityInstance.interrupted = instance.interrupted
         return yield* activity.executeEncoded.pipe(
-          Workflow.intoResult,
+          Activity.intoResult,
           Effect.provideService(WorkflowInstance, activityInstance),
           Effect.onExit((exit) => {
             state.exit = exit

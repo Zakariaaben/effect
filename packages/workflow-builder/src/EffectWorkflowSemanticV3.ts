@@ -455,6 +455,24 @@ export interface ActivityExecutionOptions {
 export type ActivityOptions = ActivityExecutionOptions
 
 /**
+ * Durable native receipt for one managed node-attempt completion.
+ *
+ * **Details**
+ *
+ * The receipt retains the native terminal `Exit` and its durable completion
+ * time. A successful `Exit` contains the closed node-attempt business
+ * vocabulary; a failed `Exit` retains its native `Cause` without converting a
+ * defect into an application failure.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type NodeAttemptCompletion = NativeActivity.Completed<
+  SemanticOperationV3.NodeAttemptOutcome,
+  never
+>
+
+/**
  * Explicit worker-side start gate for one managed node attempt.
  *
  * **Details**
@@ -633,15 +651,15 @@ export const bind = (
  * @category execution
  * @since 4.0.0
  */
-const nativeResolvedActivity = <A, E, R>(
+const nativeResolvedActivityCompletion = <A, E, R>(
   resolution: SemanticExecutableRegistryV3.ResolvedActivity,
   operationName: string,
   attempt: Wire.PositiveSafeInt,
   execute: Effect.Effect<A, E, R>,
   options: ActivityExecutionOptions
 ): Effect.Effect<
-  A,
-  E,
+  NativeActivity.Completed<A, E>,
+  never,
   | Requirements
   | Exclude<
     R,
@@ -657,13 +675,14 @@ const nativeResolvedActivity = <A, E, R>(
       ) as Context.Context<any>
     )
   )
-  return NativeActivity.make({
+  const activity = NativeActivity.make({
     name: operationName,
     success: resolution.successSchema,
     error: resolution.errorSchema,
     execute: executeWithContext,
     interruptRetryPolicy: options.interruptRetryPolicy
-  }).pipe(
+  })
+  return NativeActivity.completion(activity).pipe(
     Effect.provideService(
       NativeActivity.CurrentAttempt,
       attempt
@@ -675,8 +694,8 @@ const nativeResolvedActivity = <A, E, R>(
       ) as Context.Context<any>
     )
   ) as Effect.Effect<
-    A,
-    E,
+    NativeActivity.Completed<A, E>,
+    never,
     | Requirements
     | Exclude<
       R,
@@ -686,13 +705,40 @@ const nativeResolvedActivity = <A, E, R>(
   >
 }
 
-const executeResolvedActivity = <A, E, R>(
+const nativeResolvedActivity = <A, E, R>(
   resolution: SemanticExecutableRegistryV3.ResolvedActivity,
+  operationName: string,
+  attempt: Wire.PositiveSafeInt,
   execute: Effect.Effect<A, E, R>,
   options: ActivityExecutionOptions
 ): Effect.Effect<
   A,
-  E | EffectWorkflowSemanticError,
+  E,
+  | Requirements
+  | Exclude<
+    R,
+    | NativeWorkflowEngine.WorkflowEngine
+    | NativeWorkflowEngine.WorkflowInstance
+  >
+> =>
+  Effect.flatMap(
+    nativeResolvedActivityCompletion(
+      resolution,
+      operationName,
+      attempt,
+      execute,
+      options
+    ),
+    (completion) => completion.exit
+  )
+
+const executeResolvedActivityCompletion = <A, E, R>(
+  resolution: SemanticExecutableRegistryV3.ResolvedActivity,
+  execute: Effect.Effect<A, E, R>,
+  options: ActivityExecutionOptions
+): Effect.Effect<
+  NativeActivity.Completed<A, E>,
+  EffectWorkflowSemanticError,
   | Requirements
   | Exclude<
     R,
@@ -721,7 +767,7 @@ const executeResolvedActivity = <A, E, R>(
       }
     ))
   }
-  const native = nativeResolvedActivity(
+  const native = nativeResolvedActivityCompletion(
     resolution,
     resolved.success.operationName,
     operation.document.attempt,
@@ -729,8 +775,8 @@ const executeResolvedActivity = <A, E, R>(
     options
   )
   return Effect.andThen(bind(operation), native) as Effect.Effect<
-    A,
-    E | EffectWorkflowSemanticError,
+    NativeActivity.Completed<A, E>,
+    EffectWorkflowSemanticError,
     | Requirements
     | Exclude<
       R,
@@ -739,6 +785,29 @@ const executeResolvedActivity = <A, E, R>(
     >
   >
 }
+
+const executeResolvedActivity = <A, E, R>(
+  resolution: SemanticExecutableRegistryV3.ResolvedActivity,
+  execute: Effect.Effect<A, E, R>,
+  options: ActivityExecutionOptions
+): Effect.Effect<
+  A,
+  E | EffectWorkflowSemanticError,
+  | Requirements
+  | Exclude<
+    R,
+    | NativeWorkflowEngine.WorkflowEngine
+    | NativeWorkflowEngine.WorkflowInstance
+  >
+> =>
+  Effect.flatMap(
+    executeResolvedActivityCompletion(
+      resolution,
+      execute,
+      options
+    ),
+    (completion) => completion.exit
+  )
 
 type ResolvedNodeExecutionActivity =
   | SemanticExecutableRegistryV3.ResolvedNodeHandlerActivity
@@ -1297,7 +1366,7 @@ const verifyManagedOutcomeCoordinates = (
   return Effect.succeed(outcome)
 }
 
-const executeNodeAttempt = <R>(
+const executeNodeAttemptCompletion = <R>(
   resolution: SemanticExecutableRegistryV3.ResolvedNodeAttemptActivity,
   options: ActivityExecutionOptions,
   startGate?: Effect.Effect<
@@ -1311,7 +1380,7 @@ const executeNodeAttempt = <R>(
     R
   >
 ): Effect.Effect<
-  SemanticOperationV3.NodeAttemptOutcome,
+  NodeAttemptCompletion,
   EffectWorkflowSemanticError,
   | Requirements
   | Exclude<
@@ -1366,14 +1435,23 @@ const executeNodeAttempt = <R>(
       )
     })
   return Effect.flatMap(
-    executeResolvedActivity(
+    executeResolvedActivityCompletion(
       resolution,
       execute,
       options
     ),
-    (outcome) => verifyManagedOutcomeCoordinates(resolution, outcome)
+    (completion) =>
+      Exit.isFailure(completion.exit)
+        ? Effect.succeed(completion)
+        : Effect.as(
+          verifyManagedOutcomeCoordinates(
+            resolution,
+            completion.exit.value
+          ),
+          completion
+        )
   ) as Effect.Effect<
-    SemanticOperationV3.NodeAttemptOutcome,
+    NodeAttemptCompletion,
     EffectWorkflowSemanticError,
     | Requirements
     | Exclude<
@@ -1383,6 +1461,36 @@ const executeNodeAttempt = <R>(
     >
   >
 }
+
+/**
+ * Executes one managed node attempt and returns its durable native completion
+ * receipt without re-emitting the recorded `Exit`.
+ *
+ * **Details**
+ *
+ * Descriptor binding precedes native execution. Successful exits are checked
+ * against the exact activity digest and semantic attempt before the receipt is
+ * returned. Failure exits retain their native `Cause` unchanged.
+ *
+ * @category execution
+ * @since 4.0.0
+ */
+export const nodeAttemptCompletion = (
+  resolution: SemanticExecutableRegistryV3.ResolvedNodeAttemptActivity,
+  options: ActivityOptions
+): Effect.Effect<
+  NodeAttemptCompletion,
+  EffectWorkflowSemanticError,
+  Requirements
+> =>
+  executeNodeAttemptCompletion<never>(
+    resolution,
+    options
+  ) as Effect.Effect<
+    NodeAttemptCompletion,
+    EffectWorkflowSemanticError,
+    Requirements
+  >
 
 /**
  * Executes one managed node attempt whose complete business outcome is
@@ -1408,14 +1516,46 @@ export const nodeAttempt = (
   EffectWorkflowSemanticError,
   Requirements
 > =>
-  executeNodeAttempt<never>(
-    resolution,
-    options
-  ) as Effect.Effect<
-    SemanticOperationV3.NodeAttemptOutcome,
-    EffectWorkflowSemanticError,
-    Requirements
+  Effect.gen(function*() {
+    const completion = yield* nodeAttemptCompletion(
+      resolution,
+      options
+    )
+    return yield* completion.exit
+  })
+
+/**
+ * Executes one managed node attempt behind an explicit worker-side start gate
+ * and returns its durable native completion receipt.
+ *
+ * **Details**
+ *
+ * Gate authorization is identical to {@link nodeAttemptWithStartGate}.
+ * Successful exits are coordinate-checked; failure exits retain their native
+ * `Cause` for the caller to inspect or re-emit.
+ *
+ * @category execution
+ * @since 4.0.0
+ */
+export const nodeAttemptCompletionWithStartGate = <R>(
+  resolution: SemanticExecutableRegistryV3.ResolvedNodeAttemptActivity,
+  options: NodeAttemptStartGateOptions<R>
+): Effect.Effect<
+  NodeAttemptCompletion,
+  EffectWorkflowSemanticError,
+  | Requirements
+  | Exclude<
+    R,
+    | NativeWorkflowEngine.WorkflowEngine
+    | NativeWorkflowEngine.WorkflowInstance
   >
+> =>
+  executeNodeAttemptCompletion(
+    resolution,
+    options,
+    options.startGate,
+    options.expectedTimeout
+  )
 
 /**
  * Executes one managed node attempt behind an explicit worker-side start
@@ -1452,12 +1592,13 @@ export const nodeAttemptWithStartGate = <R>(
     | NativeWorkflowEngine.WorkflowInstance
   >
 > =>
-  executeNodeAttempt(
-    resolution,
-    options,
-    options.startGate,
-    options.expectedTimeout
-  )
+  Effect.gen(function*() {
+    const completion = yield* nodeAttemptCompletionWithStartGate(
+      resolution,
+      options
+    )
+    return yield* completion.exit
+  })
 
 const decodeInlineActivityInput = <A>(
   resolution: SemanticExecutableRegistryV3.ResolvedActivity,

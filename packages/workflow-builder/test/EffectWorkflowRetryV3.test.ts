@@ -1,5 +1,5 @@
 import { assert, describe, it } from "@effect/vitest"
-import type * as Cause from "effect/Cause"
+import * as Cause from "effect/Cause"
 import * as Crypto from "effect/Crypto"
 import * as Deferred from "effect/Deferred"
 import * as Effect from "effect/Effect"
@@ -13,6 +13,7 @@ import * as Schema from "effect/Schema"
 import * as SchemaTransformation from "effect/SchemaTransformation"
 import { TestClock } from "effect/testing"
 import { WorkflowEngine } from "effect/unstable/workflow"
+import * as NativeActivity from "effect/unstable/workflow/Activity"
 import * as NativeDeferred from "effect/unstable/workflow/DurableDeferred"
 import * as NativeWorkflow from "effect/unstable/workflow/Workflow"
 import { createHash } from "node:crypto"
@@ -708,6 +709,66 @@ const withoutAttemptTimerDelivery = (
               options
             )
           }) as typeof delegate.scheduleDeferred
+        }
+        return wrapped
+      }
+    )
+  ).pipe(
+    Layer.provide(WorkflowEngine.layerMemory)
+  )
+
+const replaceFirstActivityDelivery = (
+  activityName: string,
+  exit: Exit.Exit<never, never>,
+  onReplacement: Effect.Effect<void>
+) =>
+  Layer.effect(
+    WorkflowEngine.WorkflowEngine
+  )(
+    Effect.map(
+      WorkflowEngine.WorkflowEngine,
+      (delegate) => {
+        let wrapped: typeof delegate
+        let replaced = false
+        wrapped = {
+          ...delegate,
+          register: ((workflow, execute) =>
+            delegate.register(
+              workflow,
+              (payload, executionId) =>
+                execute(payload, executionId).pipe(
+                  Effect.provideService(
+                    WorkflowEngine.WorkflowEngine,
+                    wrapped
+                  )
+                )
+            )) as typeof delegate.register,
+          activityExecute: ((activity, attempt) => {
+            if (
+              activity.name !== activityName ||
+              replaced
+            ) {
+              return delegate.activityExecute(
+                activity,
+                attempt
+              )
+            }
+            replaced = true
+            return Effect.gen(function*() {
+              const result = yield* delegate.activityExecute(
+                activity,
+                attempt
+              )
+              if (result._tag === "Suspended") {
+                return result
+              }
+              yield* onReplacement
+              return new NativeActivity.Completed({
+                exit,
+                completedAt: result.completedAt
+              })
+            })
+          }) as typeof delegate.activityExecute
         }
         return wrapped
       }
@@ -3782,6 +3843,425 @@ describe("EffectWorkflowRetryV3 managed runtime", () => {
         Effect.provide(
           registration.pipe(
             Layer.provideMerge(delayedEngine)
+          )
+        )
+      )
+    }).pipe(provideCrypto))
+
+  it.effect("keeps and replays a defect completed before a late start-to-close timer", () =>
+    Effect.gen(function*() {
+      const started = yield* Deferred.make<void>()
+      const releaseHandler = yield* Deferred.make<void>()
+      let handlerRuns = 0
+      let classifierRuns = 0
+      let scheduleAcknowledgements = 0
+      const fixture = yield* makeFixture({
+        handler: (() =>
+          Effect.gen(function*() {
+            handlerRuns++
+            yield* Deferred.succeed(started, undefined)
+            yield* Deferred.await(releaseHandler)
+            return yield* Effect.die(
+              new Error("early start-to-close defect")
+            )
+          })) as Node.Handler<typeof retryNode>,
+        classifier: () =>
+          Effect.sync(() => {
+            classifierRuns++
+            return {
+              _tag: "Retryable" as const,
+              classificationVersion: 1 as const
+            }
+          }),
+        maximumAttempts: 1,
+        startToClose: {
+          _tag: "After",
+          durationMillis: 100
+        }
+      })
+      const preparedOccurrence = yield* occurrence(
+        fixture,
+        "start-to-close-early-defect-late-timer"
+      )
+      const invocation = yield* Retry.prepare({
+        artifact: fixture.resolved,
+        occurrence: preparedOccurrence,
+        input: { _tag: "Inline", value: {} }
+      })
+      const registration = DetailedWorkflow.toLayer(() => detailedRetryExecution(invocation))
+      const delayedTimerEngine = withoutAttemptTimerDelivery(
+        "StartToClose",
+        () => {
+          scheduleAcknowledgements++
+        }
+      )
+
+      yield* Effect.gen(function*() {
+        yield* TestClock.setTime(
+          Date.parse("2026-01-02T03:04:05.006Z")
+        )
+        const payload = {
+          id: "start-to-close-early-defect-late-timer"
+        }
+        const executionId = yield* DetailedWorkflow.execute(
+          payload,
+          { discard: true }
+        )
+        yield* Deferred.await(started)
+        assert.strictEqual(scheduleAcknowledgements, 1)
+
+        yield* TestClock.adjust(99)
+        yield* Deferred.succeed(releaseHandler, undefined)
+        const completed = yield* pollUntilComplete(
+          DetailedWorkflow,
+          executionId
+        )
+        assert(Exit.isFailure(completed.exit))
+        if (Exit.isFailure(completed.exit)) {
+          assert.isFalse(
+            completed.exit.cause.reasons.some(
+              (reason) => reason._tag === "Fail"
+            )
+          )
+          const died = completed.exit.cause.reasons.find(
+            (reason) => reason._tag === "Die"
+          )
+          assert.isDefined(died)
+          if (died?._tag === "Die") {
+            assert.instanceOf(died.defect, Error)
+            assert.strictEqual(
+              (died.defect as Error).message,
+              "early start-to-close defect"
+            )
+          }
+        }
+        assert.strictEqual(handlerRuns, 1)
+        assert.strictEqual(classifierRuns, 0)
+
+        yield* DetailedWorkflow.execute(payload, {
+          discard: true
+        })
+        const replayed = yield* pollUntilComplete(
+          DetailedWorkflow,
+          executionId
+        )
+        assert.deepStrictEqual(replayed, completed)
+        assert.strictEqual(handlerRuns, 1)
+        assert.strictEqual(classifierRuns, 0)
+        assert.strictEqual(scheduleAcknowledgements, 1)
+      }).pipe(
+        Effect.provide(
+          registration.pipe(
+            Layer.provideMerge(delayedTimerEngine)
+          )
+        )
+      )
+    }).pipe(provideCrypto))
+
+  it.effect("turns a defect completed after the start-to-close deadline into timeout when timer delivery is late", () =>
+    Effect.gen(function*() {
+      const started = yield* Deferred.make<void>()
+      const releaseHandler = yield* Deferred.make<void>()
+      const classified: Array<ActivityPolicyV3.RetryFailureCause> = []
+      let handlerRuns = 0
+      let scheduleAcknowledgements = 0
+      const fixture = yield* makeFixture({
+        handler: (() =>
+          Effect.gen(function*() {
+            handlerRuns++
+            yield* Deferred.succeed(started, undefined)
+            yield* Deferred.await(releaseHandler)
+            return yield* Effect.die(
+              new Error("late start-to-close defect")
+            )
+          })) as Node.Handler<typeof retryNode>,
+        classifier: (failure) =>
+          Effect.sync(() => {
+            classified.push(failure)
+            return {
+              _tag: "Retryable" as const,
+              classificationVersion: 1 as const
+            }
+          }),
+        maximumAttempts: 1,
+        startToClose: {
+          _tag: "After",
+          durationMillis: 100
+        }
+      })
+      const preparedOccurrence = yield* occurrence(
+        fixture,
+        "start-to-close-late-defect-late-timer"
+      )
+      const invocation = yield* Retry.prepare({
+        artifact: fixture.resolved,
+        occurrence: preparedOccurrence,
+        input: { _tag: "Inline", value: {} }
+      })
+      const registration = DetailedWorkflow.toLayer(() => detailedRetryExecution(invocation))
+      const delayedTimerEngine = withoutAttemptTimerDelivery(
+        "StartToClose",
+        () => {
+          scheduleAcknowledgements++
+        }
+      )
+
+      yield* Effect.gen(function*() {
+        yield* TestClock.setTime(
+          Date.parse("2026-01-02T03:04:05.006Z")
+        )
+        const executionId = yield* DetailedWorkflow.execute(
+          {
+            id: "start-to-close-late-defect-late-timer"
+          },
+          { discard: true }
+        )
+        yield* Deferred.await(started)
+        assert.strictEqual(scheduleAcknowledgements, 1)
+
+        yield* TestClock.adjust(101)
+        yield* Deferred.succeed(releaseHandler, undefined)
+        const terminal = yield* pollUntilComplete(
+          DetailedWorkflow,
+          executionId
+        )
+        assert(Exit.isSuccess(terminal.exit))
+        if (Exit.isSuccess(terminal.exit)) {
+          assert.strictEqual(
+            terminal.exit.value._tag,
+            "AttemptTimedOut"
+          )
+          if (terminal.exit.value._tag === "AttemptTimedOut") {
+            assert.strictEqual(
+              terminal.exit.value.timeout.timeout.timeoutKind,
+              "StartToClose"
+            )
+            assert.strictEqual(
+              terminal.exit.value.timeout.activityDigest,
+              invocation.firstActivityDigest
+            )
+            assert.strictEqual(
+              terminal.exit.value.timeout.timerOperationDigest,
+              invocation.firstStartToCloseTimerDigest
+            )
+          }
+        }
+        assert.strictEqual(handlerRuns, 1)
+        assert.strictEqual(classified.length, 1)
+        assert.strictEqual(classified[0]?._tag, "AttemptTimeout")
+        if (classified[0]?._tag === "AttemptTimeout") {
+          assert.strictEqual(
+            classified[0].timeoutKind,
+            "StartToClose"
+          )
+          assert.strictEqual(classified[0].attempt, 1)
+          assert.strictEqual(
+            classified[0].activityDigest,
+            invocation.firstActivityDigest
+          )
+        }
+      }).pipe(
+        Effect.provide(
+          registration.pipe(
+            Layer.provideMerge(delayedTimerEngine)
+          )
+        )
+      )
+    }).pipe(provideCrypto))
+
+  it.effect("does not publish a false terminal for a pure activity-delivery interruption", () =>
+    Effect.gen(function*() {
+      const replacementDelivered = yield* Deferred.make<void>()
+      const classified: Array<ActivityPolicyV3.RetryFailureCause> = []
+      let handlerRuns = 0
+      const fixture = yield* makeFixture({
+        handler: (() =>
+          Effect.sync(() => {
+            handlerRuns++
+            return { value: 97 }
+          })) as Node.Handler<typeof retryNode>,
+        classifier: (failure) =>
+          Effect.sync(() => {
+            classified.push(failure)
+            return {
+              _tag: "Retryable" as const,
+              classificationVersion: 1 as const
+            }
+          }),
+        maximumAttempts: 1,
+        startToClose: {
+          _tag: "After",
+          durationMillis: 100
+        }
+      })
+      const preparedOccurrence = yield* occurrence(
+        fixture,
+        "start-to-close-pure-delivery-interruption"
+      )
+      const nodeAttemptName = expectSuccess(NativeName.name({
+        _tag: "Activity",
+        coordinateVersion: NativeName.CoordinateVersion,
+        occurrenceDigest: preparedOccurrence.occurrenceDigest,
+        operationId: "workflow-builder.retry.node-attempt"
+      }))
+      const invocation = yield* Retry.prepare({
+        artifact: fixture.resolved,
+        occurrence: preparedOccurrence,
+        input: { _tag: "Inline", value: {} }
+      })
+      const registration = DetailedWorkflow.toLayer(() => detailedRetryExecution(invocation))
+      const interruptedDeliveryEngine = replaceFirstActivityDelivery(
+        nodeAttemptName,
+        Exit.failCause(Cause.interrupt(101)),
+        Deferred.succeed(
+          replacementDelivered,
+          undefined
+        ).pipe(Effect.asVoid)
+      )
+
+      yield* Effect.gen(function*() {
+        yield* TestClock.setTime(
+          Date.parse("2026-01-02T03:04:05.006Z")
+        )
+        const executionId = yield* DetailedWorkflow.execute(
+          {
+            id: "start-to-close-pure-delivery-interruption"
+          },
+          { discard: true }
+        )
+        yield* Deferred.await(replacementDelivered)
+
+        // The native Activity result was persisted, but this delivery was a
+        // pure infrastructure interruption. It must not become a terminal.
+        assert(Option.isNone(
+          yield* DetailedWorkflow.poll(executionId)
+        ))
+
+        yield* TestClock.adjust(100)
+        const terminal = yield* pollUntilComplete(
+          DetailedWorkflow,
+          executionId
+        )
+        assert(Exit.isSuccess(terminal.exit))
+        if (Exit.isSuccess(terminal.exit)) {
+          assert.strictEqual(
+            terminal.exit.value._tag,
+            "AttemptTimedOut"
+          )
+          if (terminal.exit.value._tag === "AttemptTimedOut") {
+            assert.strictEqual(
+              terminal.exit.value.timeout.timeout.timeoutKind,
+              "StartToClose"
+            )
+          }
+        }
+        assert.strictEqual(handlerRuns, 1)
+        assert.strictEqual(classified.length, 1)
+        assert.strictEqual(classified[0]?._tag, "AttemptTimeout")
+      }).pipe(
+        Effect.provide(
+          registration.pipe(
+            Layer.provideMerge(interruptedDeliveryEngine)
+          )
+        )
+      )
+    }).pipe(provideCrypto))
+
+  it.effect("filters interruption from a mixed activity-delivery cause before persistence", () =>
+    Effect.gen(function*() {
+      const replacementDelivered = yield* Deferred.make<void>()
+      let handlerRuns = 0
+      let classifierRuns = 0
+      const fixture = yield* makeFixture({
+        handler: (() =>
+          Effect.sync(() => {
+            handlerRuns++
+            return { value: 103 }
+          })) as Node.Handler<typeof retryNode>,
+        classifier: () =>
+          Effect.sync(() => {
+            classifierRuns++
+            return {
+              _tag: "Retryable" as const,
+              classificationVersion: 1 as const
+            }
+          }),
+        maximumAttempts: 1,
+        startToClose: {
+          _tag: "After",
+          durationMillis: 100
+        }
+      })
+      const preparedOccurrence = yield* occurrence(
+        fixture,
+        "start-to-close-mixed-delivery-cause"
+      )
+      const nodeAttemptName = expectSuccess(NativeName.name({
+        _tag: "Activity",
+        coordinateVersion: NativeName.CoordinateVersion,
+        occurrenceDigest: preparedOccurrence.occurrenceDigest,
+        operationId: "workflow-builder.retry.node-attempt"
+      }))
+      const invocation = yield* Retry.prepare({
+        artifact: fixture.resolved,
+        occurrence: preparedOccurrence,
+        input: { _tag: "Inline", value: {} }
+      })
+      const registration = DetailedWorkflow.toLayer(() => detailedRetryExecution(invocation))
+      const mixedDeliveryEngine = replaceFirstActivityDelivery(
+        nodeAttemptName,
+        Exit.failCause(Cause.combine(
+          Cause.interrupt(102),
+          Cause.die(new Error("mixed delivery defect"))
+        )),
+        Deferred.succeed(
+          replacementDelivered,
+          undefined
+        ).pipe(Effect.asVoid)
+      )
+
+      yield* Effect.gen(function*() {
+        const executionId = yield* DetailedWorkflow.execute(
+          {
+            id: "start-to-close-mixed-delivery-cause"
+          },
+          { discard: true }
+        )
+        yield* Deferred.await(replacementDelivered)
+        const terminal = yield* pollUntilComplete(
+          DetailedWorkflow,
+          executionId
+        )
+        assert(Exit.isFailure(terminal.exit))
+        if (Exit.isFailure(terminal.exit)) {
+          assert.isFalse(
+            terminal.exit.cause.reasons.some(
+              (reason) => reason._tag === "Interrupt"
+            )
+          )
+          assert.isFalse(
+            terminal.exit.cause.reasons.some(
+              (reason) => reason._tag === "Fail"
+            )
+          )
+          const died = terminal.exit.cause.reasons.find(
+            (reason) => reason._tag === "Die"
+          )
+          assert.isDefined(died)
+          if (died?._tag === "Die") {
+            assert.instanceOf(died.defect, Error)
+            assert.strictEqual(
+              (died.defect as Error).message,
+              "mixed delivery defect"
+            )
+          }
+        }
+        assert.strictEqual(handlerRuns, 1)
+        assert.strictEqual(classifierRuns, 0)
+      }).pipe(
+        Effect.provide(
+          registration.pipe(
+            Layer.provideMerge(mixedDeliveryEngine)
           )
         )
       )

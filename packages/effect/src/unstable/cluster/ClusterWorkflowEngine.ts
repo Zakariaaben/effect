@@ -90,7 +90,7 @@ export const make = Effect.gen(function*() {
         Schema.Struct<
           { name: typeof Schema.String; attempt: typeof Schema.Number; withTransaction: typeof Schema.Boolean }
         >,
-        Schema.declare<Workflow.Result<any, any>>
+        Schema.declare<Activity.Result<any, any>>
       >
       | Rpc.Rpc<"resume", Schema.Struct<{}>>
     >
@@ -107,7 +107,7 @@ export const make = Effect.gen(function*() {
       | Rpc.Rpc<
         "activity",
         Schema.Struct<{ name: typeof Schema.String; attempt: typeof Schema.Number }>,
-        Schema.declare<Workflow.Result<any, any>>
+        Schema.declare<Activity.Result<any, any>>
       >
       | Rpc.Rpc<"resume">
     >
@@ -474,7 +474,7 @@ export const make = Effect.gen(function*() {
                     Effect.provideContext(Context.makeUnsafe(contextMap))
                   )
                 }).pipe(
-                  Workflow.intoResult,
+                  Activity.intoResult,
                   Effect.catchCause((cause) => {
                     // we only want to store interrupts as suspends when the
                     // client requested it
@@ -784,7 +784,7 @@ const ActivityRpc = Rpc.make("activity", {
     )
   },
   primaryKey: ({ attempt, name }) => activityPrimaryKey(name, attempt),
-  success: Workflow.Result({
+  success: Activity.Result({
     success: AnyOrVoid,
     error: AnyOrVoid
   })

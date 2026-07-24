@@ -140,10 +140,18 @@ Implemented foundations:
   contenders publish success-only envelopes to one native first-wins deferred,
   attempts and publication are clock-fenced, and the recorded
   typed completion/timeout winner is coordinate-, timestamp-, and
-  policy-checked. Native defects retain their full `Cause`, while deterministic
-  ordering of a late defect against a late-delivered timer remains an open
-  conformance obligation. Loser interruption is never joined; timeout fences
-  semantic completion without claiming rollback of an external side effect.
+  policy-checked. Native Activity persistence records the complete Exit and an
+  authoritative completion timestamp after activity finalization. This closes
+  start-to-close ordering for success, typed error, and defect even when timer
+  delivery is late: pre-deadline defects retain their non-interrupt Cause
+  semantics and at-or-after-deadline defects become the exact attempt timeout.
+  Pure interruption does not publish a terminal, and interruption reasons are
+  removed from a mixed terminal Cause. `Schema.Defect` may normalize a defect
+  payload across a wire backend, so exact JavaScript object identity is not
+  claimed. Absolute ordering of a defect escaping the complete retry loop
+  against a late-delivered outer schedule-to-close timer remains open. Loser
+  interruption is never joined; timeout fences semantic completion without
+  claiming rollback of an external side effect.
   The same closed typed result is available through `executeDetailed` without
   another execution or successful output decoding. Schedule-to-start first
   persists a canonical `ScheduleToStartArmed` acknowledgement with its activity
@@ -160,10 +168,10 @@ Implemented foundations:
   handler preparation, not acquisition of a future distributed worker queue or
   lease. The canonical `Started` acknowledgement pins the start-to-close
   duration and absolute deadline, so redelivery cannot extend it. Persisted
-  version `2` `Succeeded` and `ApplicationFailed` outcomes carry `completedAt`;
-  arbitration compares it with the canonical deadline and selects timeout for
-  an at-or-after-deadline completion even when native timer delivery is late. An
-  attempt timeout remains a distinct `AttemptTimedOut`
+  version `2` `Succeeded` and `ApplicationFailed` outcomes carry `completedAt`
+  as a portable observability fact that is validated against the native
+  Activity receipt; that native receipt is the arbitration clock. An attempt
+  timeout remains a distinct `AttemptTimedOut`
   terminal rather than an application failure and cannot enter BPMN Boundary
   Error routing. Losing scheduled resolutions are not cancelled and can consume
   backend timer capacity until their deadline even though first-wins makes them

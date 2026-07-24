@@ -11,13 +11,21 @@
 import type { NonEmptyReadonlyArray } from "../../Array.ts"
 import * as Cause from "../../Cause.ts"
 import * as Context from "../../Context.ts"
+import * as Data from "../../Data.ts"
+import * as DateTime from "../../DateTime.ts"
 import * as Effect from "../../Effect.ts"
 import * as Effectable from "../../Effectable.ts"
+import type * as Exit from "../../Exit.ts"
 import { dual } from "../../Function.ts"
+import * as Option from "../../Option.ts"
 import * as Schedule from "../../Schedule.ts"
 import * as Schema from "../../Schema.ts"
+import * as SchemaIssue from "../../SchemaIssue.ts"
+import * as SchemaParser from "../../SchemaParser.ts"
+import * as Transformation from "../../SchemaTransformation.ts"
 import type { Scope } from "../../Scope.ts"
 import type * as Types from "../../Types.ts"
+import type { ExitEncoded } from "../rpc/RpcMessage.ts"
 import * as DurableDeferred from "./DurableDeferred.ts"
 import { makeHashDigest } from "./internal/crypto.ts"
 import * as Workflow from "./Workflow.ts"
@@ -112,6 +120,178 @@ export interface AnyWithProps {
   readonly errorSchema: Schema.Top
   readonly executeEncoded: Effect.Effect<any, any, any>
 }
+
+/**
+ * Result of an activity execution. A completed activity includes the exact
+ * `Exit` persisted by the workflow engine and the time at which the terminal
+ * result was observed.
+ *
+ * @category results
+ * @since 4.0.0
+ */
+export type Result<A, E> = Completed<A, E> | Workflow.Suspended
+
+/**
+ * Encoded representation of a completed activity result.
+ *
+ * @category results
+ * @since 4.0.0
+ */
+export interface CompletedEncoded<A, E> {
+  readonly _tag: "Completed"
+  readonly exit: ExitEncoded<A, E>
+  readonly completedAt: number
+}
+
+/**
+ * Schema constructor for completed activity results.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export interface CompletedSchema<
+  Success extends Schema.Constraint,
+  Error extends Schema.Constraint
+> extends
+  Schema.declareConstructor<
+    Completed<Success["Type"], Error["Type"]>,
+    Completed<Success["Encoded"], Error["Encoded"]>,
+    readonly [Schema.Exit<Success, Error, Schema.Defect>, Schema.DateTimeUtc]
+  >
+{
+  readonly success: Success
+  readonly error: Error
+}
+
+/**
+ * A terminal activity result together with the durable completion timestamp.
+ *
+ * @category results
+ * @since 4.0.0
+ */
+export class Completed<A, E> extends Data.TaggedClass("Completed")<{
+  readonly exit: Exit.Exit<A, E>
+  readonly completedAt: DateTime.Utc
+}> {
+  /**
+   * Builds a schema for completed activity results, encoding `completedAt` as
+   * epoch milliseconds in its JSON representation.
+   *
+   * @since 4.0.0
+   */
+  static Schema<Success extends Schema.Constraint, Error extends Schema.Constraint>(options: {
+    readonly success: Success
+    readonly error: Error
+  }): CompletedSchema<Success, Error> {
+    const schema = Schema.declareConstructor<
+      Completed<Success["Type"], Error["Type"]>,
+      Completed<Success["Encoded"], Error["Encoded"]>
+    >()(
+      [
+        Schema.Exit(options.success, options.error, Schema.Defect()),
+        Schema.DateTimeUtc
+      ],
+      ([exit, completedAt]) => (input, ast, parseOptions) => {
+        if (!(input instanceof Completed)) {
+          return Effect.fail(new SchemaIssue.InvalidType(ast, Option.some(input)))
+        }
+        return Effect.flatMap(
+          SchemaParser.decodeEffect(exit)(input.exit, parseOptions).pipe(
+            Effect.mapError((issue) =>
+              new SchemaIssue.Composite(ast, Option.some(input), [
+                new SchemaIssue.Pointer(["exit"], issue)
+              ])
+            )
+          ),
+          (exit) =>
+            SchemaParser.decodeEffect(completedAt)(input.completedAt, parseOptions).pipe(
+              Effect.map(
+                (completedAt) => new Completed({ exit, completedAt })
+              ),
+              Effect.mapError((issue) =>
+                new SchemaIssue.Composite(ast, Option.some(input), [
+                  new SchemaIssue.Pointer(["completedAt"], issue)
+                ])
+              )
+            )
+        )
+      },
+      {
+        expected: "Activity.Completed",
+        toCodecJson: ([exit]) =>
+          Schema.link<Completed<Success["Encoded"], Error["Encoded"]>>()(
+            Schema.Struct({
+              _tag: Schema.tag("Completed"),
+              exit,
+              completedAt: Schema.toCodecJson(Schema.DateTimeUtcFromMillis)
+            }),
+            Transformation.transform({
+              decode: (encoded) =>
+                new Completed({
+                  exit: encoded.exit,
+                  completedAt: encoded.completedAt
+                }),
+              encode: (result) =>
+                ({
+                  _tag: "Completed",
+                  exit: result.exit,
+                  completedAt: result.completedAt
+                }) as const
+            })
+          )
+      }
+    )
+    return Schema.make(schema.ast, {
+      success: options.success,
+      error: options.error
+    })
+  }
+}
+
+/**
+ * Creates a schema for activity results using the supplied success and error
+ * schemas.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const Result = <
+  Success extends Schema.Constraint,
+  Error extends Schema.Constraint
+>(options: {
+  readonly success: Success
+  readonly error: Error
+}) => Schema.Union([Completed.Schema(options), Workflow.Suspended])
+
+/**
+ * Converts an activity effect into its durable result representation, reading
+ * the completion time only after workflow finalization has completed.
+ *
+ * @category results
+ * @since 4.0.0
+ */
+export const intoResult = <A, E, R>(
+  effect: Effect.Effect<A, E, R>
+): Effect.Effect<
+  Result<A, E>,
+  never,
+  Exclude<R, Scope> | WorkflowInstance
+> =>
+  Workflow.intoResult(effect).pipe(
+    Effect.flatMap((result): Effect.Effect<Result<A, E>> => {
+      if (result._tag === "Suspended") {
+        return Effect.succeed(result)
+      }
+      return Effect.map(
+        DateTime.now,
+        (completedAt): Result<A, E> => new Completed({ exit: result.exit, completedAt })
+      )
+    }),
+    // Keep finalization, timestamp capture, and receipt construction inside one
+    // interrupt mask. Otherwise the activity could finish and be interrupted
+    // in the small gap before its durable receipt exists.
+    Effect.uninterruptible
+  )
 
 /**
  * Creates a workflow activity from an effect, using the provided schemas to
@@ -291,6 +471,35 @@ export const raceAll = <const Activities extends NonEmptyReadonlyArray<Any>>(
     effects: activities.map((activity) => (activity as any)) as any
   }) as any
 
+/**
+ * Executes or replays an activity and returns its durable completion receipt
+ * without re-emitting the activity `Exit`.
+ *
+ * @category execution
+ * @since 4.0.0
+ */
+export const completion = Effect.fnUntraced(function*<
+  R,
+  Success extends Schema.Constraint = typeof Schema.Void,
+  Error extends Schema.Constraint = typeof Schema.Never
+>(activity: Activity<Success, Error, R>) {
+  const engine = yield* EngineTag
+  const instance = yield* InstanceTag
+  const attempt = yield* CurrentAttempt
+  yield* Effect.annotateCurrentSpan({ executionId: instance.executionId })
+  const result = yield* Workflow.wrapActivityResult(
+    engine.activityExecute(activity, attempt),
+    (_) => _._tag === "Suspended"
+  )
+  if (result._tag === "Suspended") {
+    return yield* Workflow.suspend(instance)
+  }
+  return result
+}, (effect, activity) =>
+  Effect.withSpan(effect, activity.name, {
+    captureStackTrace: false
+  }))
+
 // -----------------------------------------------------------------------------
 // internal
 // -----------------------------------------------------------------------------
@@ -307,19 +516,6 @@ const makeExecute = Effect.fnUntraced(function*<
   Success extends Schema.Constraint = typeof Schema.Void,
   Error extends Schema.Constraint = typeof Schema.Never
 >(activity: Activity<Success, Error, R>) {
-  const engine = yield* EngineTag
-  const instance = yield* InstanceTag
-  const attempt = yield* CurrentAttempt
-  yield* Effect.annotateCurrentSpan({ executionId: instance.executionId })
-  const result = yield* Workflow.wrapActivityResult(
-    engine.activityExecute(activity, attempt),
-    (_) => _._tag === "Suspended"
-  )
-  if (result._tag === "Suspended") {
-    return yield* Workflow.suspend(instance)
-  }
+  const result = yield* completion(activity)
   return yield* result.exit
-}, (effect, activity) =>
-  Effect.withSpan(effect, activity.name, {
-    captureStackTrace: false
-  }))
+})

@@ -2391,22 +2391,15 @@ const executeAttempt = (
       return undefined
     })
 
-    const terminalOutcomeFor = (
-      outcome: NodeAttemptOutcome
+    const terminalTimeoutAt = (
+      receiptCompletedAt: number,
+      declaredCompletedAt?: number | undefined
     ): Effect.Effect<
-      NodeAttemptOutcome,
+      NodeAttemptTimedOut | undefined,
       EffectWorkflowRetryError,
       NativeWorkflowEngine.WorkflowEngine
     > =>
       Effect.gen(function*() {
-        const expectedTimeoutDeadline = yield* expectedTimeoutDeadlineFor(outcome)
-        yield* validateAttemptOutcome(
-          state,
-          attempt,
-          outcome,
-          expectedTimeoutDeadline
-        )
-        if (outcome._tag === "TimedOut") return outcome
         const recorded = yield* NativeDeferred.poll(
           startGate,
           { token: startToken }
@@ -2428,34 +2421,48 @@ const executeAttempt = (
           attempt,
           started
         )
+        const startedAt = Date.parse(started.startedAt)
+        if (
+          !Number.isSafeInteger(receiptCompletedAt) ||
+          !Number.isSafeInteger(startedAt) ||
+          (declaredCompletedAt !== undefined &&
+            !Number.isSafeInteger(declaredCompletedAt))
+        ) {
+          return yield* Effect.fail(attemptProtocolError(
+            state,
+            attempt,
+            "Managed activity start or completion is not a safe canonical timestamp"
+          ))
+        }
+        if (
+          receiptCompletedAt < startedAt ||
+          (declaredCompletedAt !== undefined &&
+            (
+              declaredCompletedAt < startedAt ||
+              declaredCompletedAt > receiptCompletedAt
+            ))
+        ) {
+          return yield* Effect.fail(attemptProtocolError(
+            state,
+            attempt,
+            "Managed activity completion precedes its canonical start or follows its native completion receipt"
+          ))
+        }
         if (
           started.startToClose._tag === "Scheduled" &&
           attempt.startToClose !== undefined
         ) {
-          const completedAt = Date.parse(outcome.completedAt)
-          const startedAt = Date.parse(started.startedAt)
           const deadline = Date.parse(
             started.startToClose.deadline
           )
-          if (
-            !Number.isSafeInteger(completedAt) ||
-            !Number.isSafeInteger(startedAt) ||
-            !Number.isSafeInteger(deadline)
-          ) {
+          if (!Number.isSafeInteger(deadline)) {
             return yield* Effect.fail(attemptProtocolError(
               state,
               attempt,
-              "Managed activity start, completion, or start-to-close deadline is not a safe canonical timestamp"
+              "Managed activity start-to-close deadline is not a safe canonical timestamp"
             ))
           }
-          if (completedAt < startedAt) {
-            return yield* Effect.fail(attemptProtocolError(
-              state,
-              attempt,
-              "Managed activity completion precedes its canonical start acknowledgement"
-            ))
-          }
-          if (completedAt >= deadline) {
+          if (receiptCompletedAt >= deadline) {
             return timeoutFor(
               attempt,
               attempt.startToClose,
@@ -2463,11 +2470,72 @@ const executeAttempt = (
             )
           }
         }
-        return outcome
+        return undefined
+      })
+
+    const terminalOutcomeFor = (
+      outcome: NodeAttemptOutcome,
+      receiptCompletedAt: number
+    ): Effect.Effect<
+      NodeAttemptOutcome,
+      EffectWorkflowRetryError,
+      NativeWorkflowEngine.WorkflowEngine
+    > =>
+      Effect.gen(function*() {
+        const expectedTimeoutDeadline = yield* expectedTimeoutDeadlineFor(outcome)
+        yield* validateAttemptOutcome(
+          state,
+          attempt,
+          outcome,
+          expectedTimeoutDeadline
+        )
+        if (outcome._tag === "TimedOut") return outcome
+        const timeout = yield* terminalTimeoutAt(
+          receiptCompletedAt,
+          Date.parse(outcome.completedAt)
+        )
+        return timeout ?? outcome
+      })
+
+    const terminalExitFor = (
+      completion: EffectWorkflowSemanticV3.NodeAttemptCompletion
+    ): Effect.Effect<
+      Exit.Exit<NodeAttemptOutcome, never>,
+      EffectWorkflowRetryError,
+      NativeWorkflowEngine.WorkflowEngine
+    > =>
+      Effect.gen(function*() {
+        const receiptCompletedAt = DateTime.toEpochMillis(
+          completion.completedAt
+        )
+        if (Exit.isSuccess(completion.exit)) {
+          return Exit.succeed(
+            yield* terminalOutcomeFor(
+              completion.exit.value,
+              receiptCompletedAt
+            )
+          )
+        }
+        const cause = completion.exit.cause
+        if (Cause.hasInterruptsOnly(cause)) {
+          return yield* Effect.failCause(cause)
+        }
+        const reasons = cause.reasons.filter(
+          (reason) => !Cause.isInterruptReason(reason)
+        )
+        if (reasons.length === 0) {
+          return yield* Effect.failCause(cause)
+        }
+        const timeout = yield* terminalTimeoutAt(
+          receiptCompletedAt
+        )
+        return timeout === undefined
+          ? Exit.failCause(Cause.fromReasons(reasons))
+          : Exit.succeed(timeout)
       })
 
     const activity = EffectWorkflowSemanticV3
-      .nodeAttemptWithStartGate(
+      .nodeAttemptCompletionWithStartGate(
         attempt.resolution,
         {
           interruptRetryPolicy: options.interruptRetryPolicy,
@@ -2480,7 +2548,7 @@ const executeAttempt = (
 
     const publishActivity = Effect.flatMap(
       activity,
-      (outcome) => terminalOutcomeFor(outcome).pipe(Effect.orDie)
+      (completion) => terminalExitFor(completion).pipe(Effect.orDie)
     ).pipe(
       Effect.matchCauseEffect({
         onFailure: (cause) => {
@@ -2498,10 +2566,10 @@ const executeAttempt = (
             exit: Exit.failCause(Cause.fromReasons(reasons))
           }).pipe(Effect.asVoid)
         },
-        onSuccess: (outcome) =>
+        onSuccess: (exit) =>
           NativeDeferred.resolve(terminalGate, {
             token: terminalToken,
-            exit: Exit.succeed(outcome)
+            exit
           }).pipe(Effect.asVoid)
       })
     )

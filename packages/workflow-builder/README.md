@@ -210,15 +210,25 @@ Today the package provides:
   gate when schedule-to-start is configured.
   Start-to-close commits `startedAt` and its exact absolute deadline in the
   canonical `Started` acknowledgement, then idempotently schedules the terminal
-  deferred; redelivery cannot reset that deadline. Persisted version `2`
-  `Succeeded` and `ApplicationFailed` outcomes carry `completedAt`, and the
-  terminal protocol compares it with the canonical start-to-close deadline even
-  when clock delivery is late. Their `AttemptTimedOut` outcome is classified as
-  an attempt-timeout cause but remains distinct from application failure and is
-  never projected through BPMN Boundary Error as a business error. Native
-  defects have no corresponding persisted completion timestamp yet, so the
-  race between a late defect and a late-delivered start-to-close timer remains a
-  known conformance gap rather than a claimed deterministic ordering. A losing
+  deferred; redelivery cannot reset that deadline. Native Effect Activity
+  persistence records one `Completed` receipt containing the complete encoded
+  `Exit` and a backend completion time observed after activity finalization.
+  Replay returns that same receipt rather than reading the clock again. The
+  terminal protocol uses its native `completedAt` for success, typed error, and
+  defect alike, and validates the secondary timestamp carried by version `2`
+  `Succeeded` and `ApplicationFailed` outcomes. A terminal recorded at or after
+  the canonical deadline therefore becomes `AttemptTimedOut` even when timer
+  delivery is late; a pre-deadline defect retains its non-interrupt native
+  `Cause`. Pure interruption does not publish a terminal and interruption
+  reasons are removed from a mixed terminal cause. Defect payloads may be
+  normalized by the native `Schema.Defect` wire codec, so cross-process replay
+  preserves the Cause model rather than JavaScript object identity.
+  `AttemptTimedOut` is classified as an attempt-timeout cause but remains
+  distinct from application failure and is never projected through BPMN
+  Boundary Error as a business error. The outer schedule-to-close controller
+  still has no equivalent absolute completion receipt for the whole retry loop;
+  deterministic ordering of a post-budget defect against a late-delivered
+  schedule-to-close timer remains a separate conformance obligation. A losing
   native scheduled resolution is not cancelled: first-wins makes its eventual
   delivery semantically inert, but it still consumes timer/backend capacity
   until its deadline. These handshakes do not provide an authenticated worker

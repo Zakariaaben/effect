@@ -1,6 +1,7 @@
 import { assert, describe, it } from "@effect/vitest"
-import { Effect, Exit, Layer, Option, Schema } from "effect"
-import { DurableDeferred, Workflow, WorkflowEngine } from "effect/unstable/workflow"
+import { Cause, DateTime, Effect, Exit, Layer, Option, Schema } from "effect"
+import { TestClock } from "effect/testing"
+import { Activity, DurableDeferred, Workflow, WorkflowEngine } from "effect/unstable/workflow"
 
 describe("WorkflowEngine", () => {
   const IncrementWorkflow = Workflow.make("WorkflowEngine/IncrementWorkflow", {
@@ -18,6 +19,12 @@ describe("WorkflowEngine", () => {
   }) {}
 
   const ClassWorkflowLayer = ClassWorkflow.toLayer(({ value }) => Effect.succeed(value + 1))
+
+  const ActivityWorkflow = Workflow.make("WorkflowEngine/ActivityWorkflow", {
+    payload: {},
+    success: Schema.Void,
+    idempotencyKey: () => "activity"
+  })
 
   it.effect("layer executes and polls workflows", () =>
     Effect.gen(function*() {
@@ -185,4 +192,104 @@ describe("WorkflowEngine", () => {
       assert(Option.isSome(polledA) && Exit.isSuccess(polledA.value))
       assert.strictEqual(polledA.value.value, 1)
     }).pipe(Effect.provide(WorkflowEngine.layerMemory)))
+
+  it.effect("returns and replays a stable activity completion receipt", () =>
+    Effect.gen(function*() {
+      let executions = 0
+      const activity = Activity.make({
+        name: "WorkflowEngine/ActivityCompletion",
+        success: Schema.Number,
+        execute: Effect.sync(() => ++executions)
+      })
+      const instance = WorkflowEngine.WorkflowInstance.initial(
+        ActivityWorkflow,
+        "activity-completion"
+      )
+      const execute = Activity.completion(activity).pipe(
+        Effect.provideService(WorkflowEngine.WorkflowInstance, instance)
+      )
+
+      const first = yield* execute
+      yield* TestClock.adjust("1 second")
+      const replayed = yield* execute
+
+      assert(Exit.isSuccess(first.exit))
+      assert.strictEqual(first.exit.value, 1)
+      assert(Exit.isSuccess(replayed.exit))
+      assert.strictEqual(replayed.exit.value, 1)
+      assert.strictEqual(executions, 1)
+      assert.strictEqual(
+        DateTime.toEpochMillis(replayed.completedAt),
+        DateTime.toEpochMillis(first.completedAt)
+      )
+    }).pipe(Effect.provide(WorkflowEngine.layerMemory)))
+
+  it.effect("captures defects in activity completion receipts", () =>
+    Effect.gen(function*() {
+      const activity = Activity.make({
+        name: "WorkflowEngine/ActivityDefect",
+        success: Schema.Number,
+        execute: Effect.die("boom")
+      })
+      const instance = WorkflowEngine.WorkflowInstance.initial(
+        ActivityWorkflow,
+        "activity-defect"
+      )
+
+      const result = yield* Activity.completion(activity).pipe(
+        Effect.provideService(WorkflowEngine.WorkflowInstance, instance)
+      )
+
+      assert(Exit.isFailure(result.exit))
+      assert.isTrue(Cause.hasDies(result.exit.cause))
+    }).pipe(Effect.provide(WorkflowEngine.layerMemory)))
+
+  it.effect("captures typed failures in activity completion receipts", () =>
+    Effect.gen(function*() {
+      const activity = Activity.make({
+        name: "WorkflowEngine/ActivityFailure",
+        error: Schema.String,
+        execute: Effect.fail("expected")
+      })
+      const instance = WorkflowEngine.WorkflowInstance.initial(
+        ActivityWorkflow,
+        "activity-failure"
+      )
+
+      const result = yield* Activity.completion(activity).pipe(
+        Effect.provideService(WorkflowEngine.WorkflowInstance, instance)
+      )
+
+      assert(Exit.isFailure(result.exit))
+      assert.deepEqual(result.exit.cause, Cause.fail("expected"))
+    }).pipe(Effect.provide(WorkflowEngine.layerMemory)))
+
+  it.effect("encodes activity completion timestamps as epoch milliseconds", () =>
+    Effect.gen(function*() {
+      const completedAt = DateTime.makeUnsafe(123)
+      const schema = Schema.toCodecJson(Activity.Result({
+        success: Schema.Number,
+        error: Schema.String
+      }))
+      const receipt = new Activity.Completed({
+        exit: Exit.succeed(1),
+        completedAt
+      })
+
+      const encoded = yield* Schema.encodeEffect(schema)(receipt)
+      assert.deepEqual(encoded, {
+        _tag: "Completed",
+        exit: {
+          _tag: "Success",
+          value: 1
+        },
+        completedAt: 123
+      })
+
+      const decoded = yield* Schema.decodeEffect(schema)(encoded)
+      assert(decoded._tag === "Completed")
+      assert(Exit.isSuccess(decoded.exit))
+      assert.strictEqual(decoded.exit.value, 1)
+      assert.strictEqual(DateTime.toEpochMillis(decoded.completedAt), 123)
+    }))
 })

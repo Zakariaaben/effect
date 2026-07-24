@@ -1022,6 +1022,167 @@ describe("EffectWorkflowSemanticV3 node activity boundary", () => {
       assert.strictEqual(fixture.telemetry.getterReads, 0)
     }).pipe(provideCrypto))
 
+  it.effect("returns and replays the durable successful node-attempt completion receipt", () =>
+    Effect.gen(function*() {
+      const fixture = yield* makeFixture()
+      const prepared = yield* prepareNodeAttempt(fixture, {
+        runId: "run-node-attempt-completion-success",
+        input: { value: "once" }
+      })
+
+      const terminal = yield* runInWorkflow(
+        "managed-node-attempt-completion-success",
+        Effect.gen(function*() {
+          const first = yield* NativeSemantic.nodeAttemptCompletion(
+            prepared.resolution,
+            {
+              interruptRetryPolicy: noInterruptRetry
+            }
+          )
+          const replay = yield* NativeSemantic.nodeAttemptCompletion(
+            prepared.resolution,
+            {
+              interruptRetryPolicy: noInterruptRetry
+            }
+          )
+
+          assert(Exit.isSuccess(first.exit))
+          assert(Exit.isSuccess(replay.exit))
+          if (
+            Exit.isFailure(first.exit) ||
+            Exit.isFailure(replay.exit)
+          ) {
+            return "unreachable"
+          }
+          assert.strictEqual(first.exit.value._tag, "Succeeded")
+          assert.deepStrictEqual(replay.exit.value, first.exit.value)
+          assert.isTrue(
+            Number.isSafeInteger(first.completedAt.epochMilliseconds)
+          )
+          assert.strictEqual(
+            replay.completedAt.epochMilliseconds,
+            first.completedAt.epochMilliseconds
+          )
+          return `${first.exit.value._tag}/${replay.exit.value._tag}`
+        })
+      )
+
+      assert(Exit.isSuccess(terminal.exit))
+      if (Exit.isFailure(terminal.exit)) return
+      assert.strictEqual(terminal.exit.value, "Succeeded/Succeeded")
+      assert.strictEqual(fixture.telemetry.requests.length, 1)
+    }).pipe(provideCrypto))
+
+  it.effect("returns a timestamped node-attempt completion receipt containing a native Die", () =>
+    Effect.gen(function*() {
+      const fixture = yield* makeFixture()
+      const prepared = yield* prepareNodeAttempt(fixture, {
+        runId: "run-node-attempt-completion-defect",
+        input: { value: HandlerModes.ThrowSync }
+      })
+
+      const terminal = yield* runInWorkflow(
+        "managed-node-attempt-completion-defect",
+        Effect.gen(function*() {
+          const completion = yield* NativeSemantic.nodeAttemptCompletion(
+            prepared.resolution,
+            {
+              interruptRetryPolicy: noInterruptRetry
+            }
+          )
+          assert(Exit.isFailure(completion.exit))
+          if (Exit.isSuccess(completion.exit)) return "unreachable"
+          assert.isFalse(
+            completion.exit.cause.reasons.some(
+              (reason) => reason._tag === "Fail"
+            )
+          )
+          assert.isTrue(
+            completion.exit.cause.reasons.some(
+              (reason) => reason._tag === "Die"
+            )
+          )
+          assert.isTrue(
+            Number.isSafeInteger(
+              completion.completedAt.epochMilliseconds
+            )
+          )
+          return "captured"
+        })
+      )
+
+      assert(Exit.isSuccess(terminal.exit))
+      if (Exit.isFailure(terminal.exit)) return
+      assert.strictEqual(terminal.exit.value, "captured")
+      assert.strictEqual(fixture.telemetry.requests.length, 1)
+    }).pipe(provideCrypto))
+
+  it.effect("re-emits the captured native Cause through the normal node-attempt API", () =>
+    Effect.gen(function*() {
+      const fixture = yield* makeFixture()
+      const prepared = yield* prepareNodeAttempt(fixture, {
+        runId: "run-node-attempt-public-defect",
+        input: { value: HandlerModes.ThrowSync }
+      })
+
+      const terminal = yield* runInWorkflow(
+        "managed-node-attempt-public-defect",
+        Effect.gen(function*() {
+          const completion = yield* NativeSemantic.nodeAttemptCompletion(
+            prepared.resolution,
+            {
+              interruptRetryPolicy: noInterruptRetry
+            }
+          )
+          const publicExit = yield* Effect.exit(
+            NativeSemantic.nodeAttempt(
+              prepared.resolution,
+              {
+                interruptRetryPolicy: noInterruptRetry
+              }
+            )
+          )
+
+          assert(Exit.isFailure(completion.exit))
+          assert(Exit.isFailure(publicExit))
+          if (
+            Exit.isSuccess(completion.exit) ||
+            Exit.isSuccess(publicExit)
+          ) {
+            return "unreachable"
+          }
+          assert.deepStrictEqual(
+            publicExit.cause.reasons.map((reason) => reason._tag),
+            completion.exit.cause.reasons.map((reason) => reason._tag)
+          )
+          const capturedDie = completion.exit.cause.reasons.find(
+            (reason) => reason._tag === "Die"
+          )
+          const publicDie = publicExit.cause.reasons.find(
+            (reason) => reason._tag === "Die"
+          )
+          assert.isDefined(capturedDie)
+          assert.isDefined(publicDie)
+          if (
+            capturedDie?._tag !== "Die" ||
+            publicDie?._tag !== "Die"
+          ) {
+            return "unreachable"
+          }
+          assert.strictEqual(
+            String(publicDie.defect),
+            String(capturedDie.defect)
+          )
+          return "re-emitted"
+        })
+      )
+
+      assert(Exit.isSuccess(terminal.exit))
+      if (Exit.isFailure(terminal.exit)) return
+      assert.strictEqual(terminal.exit.value, "re-emitted")
+      assert.strictEqual(fixture.telemetry.requests.length, 1)
+    }).pipe(provideCrypto))
+
   it.effect("does not construct or execute the handler when the native start gate times out", () =>
     Effect.gen(function*() {
       const fixture = yield* makeFixture()
@@ -1033,14 +1194,24 @@ describe("EffectWorkflowSemanticV3 node activity boundary", () => {
 
       const terminal = yield* runInWorkflow(
         "managed-start-gate-timeout",
-        NativeSemantic.nodeAttemptWithStartGate(
-          prepared.resolution,
-          {
-            interruptRetryPolicy: noInterruptRetry,
-            expectedTimeout: Effect.succeed(timeout),
-            startGate: Effect.succeed(timeout)
-          }
-        ).pipe(Effect.map((outcome) => outcome._tag))
+        Effect.gen(function*() {
+          const completion = yield* NativeSemantic.nodeAttemptCompletionWithStartGate(
+            prepared.resolution,
+            {
+              interruptRetryPolicy: noInterruptRetry,
+              expectedTimeout: Effect.succeed(timeout),
+              startGate: Effect.succeed(timeout)
+            }
+          )
+          assert(Exit.isSuccess(completion.exit))
+          if (Exit.isFailure(completion.exit)) return "unreachable"
+          assert.isTrue(
+            Number.isSafeInteger(
+              completion.completedAt.epochMilliseconds
+            )
+          )
+          return completion.exit.value._tag
+        })
       )
 
       assert(Exit.isSuccess(terminal.exit))
