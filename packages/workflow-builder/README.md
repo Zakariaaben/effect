@@ -53,43 +53,60 @@ Today the package provides:
 - a durable BPMN execution-state foundation with token positions, scope and
   invocation identity, gateway/loop/multi-instance/call frames, subscriptions,
   timers, work items, compensation registrations, and cancellation regions,
-  whose state version `5` carries a version `3` executable fingerprint
+  whose state version `6` carries a version `4` executable fingerprint
   reference and exact protocol-v3 task-resolution records;
 - a normalized BPMN data/IO/interface slice and BPMNDI/DI/DC representation
   with aggregate reference, geometry, and semantic-kind validation;
 - a resource-bounded namespace-aware XML infoset plus strict named profile
-  `bpmn-2.0.2-core-process-di-v4` for fail-closed import, canonical export, and
+  `bpmn-2.0.2-core-process-di-v5` for fail-closed import, canonical export, and
   normalized round-trip of its explicitly bounded process/control-flow and DI
   surface, including source-level `callActivity` references as
   namespace-expanded QNames, Standard Loop characteristics, and represented
   Multi-Instance fields on generic Tasks. Multi-Instance cardinality,
   collection input/output references, sequential/parallel mode,
-  `completionCondition`, behavior, and One/None event references round-trip;
-  this interchange capability is wider than executable admission. The Standard
-  Loop condition must be a formal expression with an exact language-version
-  binding, `testBefore` selects pre-test or post-test behavior, and a positive
+  scalar `inputDataItem`/`outputDataItem` declarations with namespace-expanded
+  `itemSubjectRef` QNames and xsd:string names (including `name=""`),
+  `completionCondition`, behavior, and One/None event references round-trip in
+  BPMN XSD order; unsupported child content still fails closed. This
+  interchange capability is wider than executable admission. The Standard Loop
+  condition must be a formal expression with an exact language-version binding,
+  `testBefore` selects pre-test or post-test behavior, and a positive
   `loopMaximum` is mandatory in this named profile;
 - a bounded replayable BPMN token kernel for none start/end events, generic
   tasks, bounded Standard Loop Tasks, ordinary subprocesses,
   conditional/default flows, exclusive/parallel gateways, and
-  `FixedMultiInstance/1`. That fixed Multi-Instance profile is Task-only: it
-  evaluates one version-bound cardinality expression once at activation,
-  freezes a closed member set under `maxMultiInstanceCardinality`, assigns
-  stable `item:<index>` identities, and runs members sequentially or in
-  parallel with BPMN behavior All. Ordered durable member state is independent
-  of parallel completion order. At each decision boundary, generated instances
+  two generic-Task-only closed-group profiles. `FixedMultiInstance/1` evaluates
+  one version-bound cardinality expression once at activation.
+  `CollectionMultiInstance/1` instead evaluates one exact, externally compiled
+  `loopDataInputRef` binding once at activation and freezes its bounded
+  canonical JSON array. Array indices define stable `item:<index>` identities;
+  source order and duplicate values are preserved, and later source mutation
+  cannot add or replace a member. Both profiles run sequentially or in parallel
+  with BPMN behavior All. Ordered durable member state is independent of
+  parallel completion order. At each decision boundary, generated instances
   equal active plus completed plus terminated instances; members not yet
-  generated remain in the sequential pending suffix. These exact counters are
-  supplied to an optional `completionCondition` after each committed member
-  completion; its first `true` result terminates the remainder before emitting
-  one continuation. Cardinality zero completes immediately. Boundary Error and
-  terminal failure paths cancel remaining members, stale `completeTask`
-  commands are fenced and idempotent, every boundary is journaled and replayed,
-  and the native Effect Workflow task bridge derives a distinct exact
-  occurrence from group activation and member index. Collection sources,
-  behavior One/None/Complex, output aggregation, Multi-Instance SubProcesses
-  and CallActivities, and open or draining groups are rejected by executable
-  admission. Machine-readable coverage gates still declare no formal BPMN
+  generated remain in the sequential pending suffix. A scalar
+  `inputDataItem` explicitly opts a collection Task into per-member item
+  mapping; when it is absent, the engine does not implicitly inject the item
+  into the handler input. Complete output aggregation is separately opt-in:
+  `loopDataOutputRef` plus one scalar `outputDataItem`, a collection-valued Task
+  DataOutput declaration, and a protocol-v3 Task binding collect every
+  codec-validated member output in original input-index order. An empty input
+  creates no work and, when aggregation is configured, produces `[]`.
+  Aggregation with `completionCondition` is rejected until an explicit partial
+  result policy exists. Without aggregation, exact counters may be supplied to
+  an optional `completionCondition` after each committed member completion; its
+  first `true` result terminates any already generated active remainder and
+  prevents a sequential planned suffix from being generated before emitting
+  one continuation. That suffix is not counted as generated or terminated.
+  Boundary Error and terminal failure paths cancel remaining generated
+  members, stale `completeTask` commands are fenced and idempotent, and every
+  boundary is journaled and replayed. The optional native Effect Workflow task
+  bridge derives a distinct occurrence from group activation and member index;
+  it is a selectable backend integration, not part of the portable collection
+  semantics. Behavior One/None/Complex, Multi-Instance SubProcesses and
+  CallActivities, open WCP15 groups, and draining WCP34/WCP36 groups remain
+  rejected. Machine-readable coverage gates still declare no formal BPMN
   conformance claim;
 - an explicitly bounded protocol-v3 Task/Boundary Error execution slice.
   Immutable task bindings and exact failure-identity-to-Error mappings are part
@@ -339,7 +356,7 @@ future authenticated distributed queue.
 
 The BPMN model, named XML/DI mapping slice, durable marking, and bounded token
 kernel are likewise not a BPMN conformance claim. Mapping outside
-`bpmn-2.0.2-core-process-di-v4`, normative XSD validation, complete Common
+`bpmn-2.0.2-core-process-di-v5`, normative XSD validation, complete Common
 Executable and Activity lifecycle semantics, a complete atomic normative
 catalogue, persistent storage, authenticated history anchoring, official
 fixtures, and published conformance evidence remain required. The package
@@ -347,32 +364,34 @@ provides no built-in FEEL, XPath, or other expression implementation; an
 application must install an exact build-pinned evaluator, and strong CPU/heap
 isolation requires a worker, process, or sandbox adapter. BPMN 2.0.2 itself
 allows `loopMaximum` to be omitted and `loopCondition` to use the more
-permissive `tExpression` form. Profile `v4` deliberately fails closed unless a
+permissive `tExpression` form. Profile `v5` deliberately fails closed unless a
 generic Task has a positive maximum and a version-bound formal condition; it
 does not claim general Standard Loop support. Its separate
 `FixedMultiInstance/1` execution intersection is deliberately limited to a
 cardinality-based generic Task with behavior All and an optional formal
-completion condition. XML v4 may round-trip collection and One/None/Complex
-metadata that the kernel rejects. Collection data mapping and externalized
-item manifests, output collection and input-order aggregation, Multi-Instance
-SubProcesses and CallActivities, progressive One/None/Complex behavior events,
-open/dynamic fan-out (WCP15), draining static or dynamic partial joins
-(WCP34/WCP36), native collective cancellation/audit, normative XSD evidence,
-and any formal BPMN conformance claim remain unimplemented. Open creation and
-draining require a distinct `OpenForEachGroup/1` semantic profile rather than a
-silent widening of the frozen group.
+completion condition. `CollectionMultiInstance/1` is a separate closed-group
+intersection: its collection expression and declarations are exact external
+compile inputs committed to the executable fingerprint, not inferred from XML
+alone. It supports bounded input scatter and complete-success output gather,
+but not an externalized or streaming item manifest, partial output policy,
+One/None/Complex progressive behavior, Multi-Instance SubProcesses or
+CallActivities, open/dynamic fan-out (WCP15), draining static or dynamic
+partial joins (WCP34/WCP36), native collective cancellation/audit, normative
+XSD evidence, or any formal BPMN conformance claim. Open creation and draining
+require a distinct `OpenForEachGroup/1` semantic profile rather than a silent
+widening of either frozen group.
 
-The fixed profile follows durable-engine lessons shared by Temporal, AWS Step
+The closed profiles follow durable-engine lessons shared by Temporal, AWS Step
 Functions, Argo, and similar systems: freeze the logical member set at
 activation; keep logical member identity distinct from retry or delivery
 attempts; bound semantic cardinality separately from operational worker
-concurrency; require future aggregation to preserve input order even when
-parallel completions arrive out of order; and segment or roll over histories
-before large fan-outs become unbounded. Native Effect Workflow already supplies
-persistence, replay, child execution, activities, deferreds, clocks, and
-backend interruption. Workflow Builder records portable BPMN group semantics
-and exact native occurrences; it does not reimplement those backend
-capabilities.
+concurrency; aggregate complete results in input-index order even when parallel
+completions arrive out of order; and segment or roll over histories before
+large fan-outs become unbounded. Native Effect Workflow can supply persistence,
+replay, child execution, activities, deferreds, clocks, and backend
+interruption when selected. Workflow Builder records portable BPMN group
+semantics and exact native occurrences; it does not reimplement or require
+those backend capabilities.
 
 A BPMN `callActivity` can be represented and round-tripped. Its protocol-v3
 relation and replay semantics are modeled, but executable admission still

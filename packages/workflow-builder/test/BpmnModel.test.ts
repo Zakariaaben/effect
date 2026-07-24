@@ -537,6 +537,30 @@ describe("BpmnModel", () => {
         mode: "sequential",
         loopDataInputRef: "orders",
         loopDataOutputRef: "processed-orders",
+        inputDataItem: {
+          id: "order-item",
+          name: "Order",
+          itemSubjectRef: {
+            namespaceUri: "urn:example:order",
+            localName: "Order"
+          },
+          isCollection: false,
+          extensionElements: [{
+            namespaceUri: "urn:effect:test",
+            localName: "input-hint",
+            content: { source: "orders" }
+          }]
+        },
+        outputDataItem: {
+          id: "processed-order-item",
+          name: "Processed Order",
+          itemSubjectRef: {
+            namespaceUri: "",
+            localName: "ProcessedOrder"
+          },
+          isCollection: false,
+          extensionElements: emptyExtensions()
+        },
         behavior: "none"
       },
       {
@@ -561,6 +585,51 @@ describe("BpmnModel", () => {
         throw result.failure
       }
     }
+  })
+
+  it("represents collection-valued Multi-Instance data items structurally but rejects them semantically", () => {
+    const item = Schema.decodeUnknownSync(BpmnModel.MultiInstanceDataItem)({
+      id: "input-item",
+      name: "Current item",
+      itemSubjectRef: {
+        namespaceUri: "urn:example:item",
+        localName: "Item"
+      },
+      isCollection: true,
+      extensionElements: []
+    })
+    assert.isTrue(item.isCollection)
+
+    const model = validModel()
+    const call = model.flowNodes.find((node) => node.id === "call-fulfillment")
+    if (call === undefined || call._tag !== "CallActivity") {
+      throw new Error("expected seeded call activity")
+    }
+    call.loopCharacteristics = {
+      _tag: "MultiInstanceCharacteristics",
+      mode: "parallel",
+      loopDataInputRef: "orders",
+      inputDataItem: item
+    }
+
+    const result = BpmnModel.validate(model)
+    assert.isTrue(Result.isFailure(result))
+    if (Result.isSuccess(result)) {
+      throw new Error("expected scalarity validation failure")
+    }
+    assert.deepStrictEqual(
+      result.failure.diagnostics.map(({ code, path }) => ({ code, path })),
+      [{
+        code: BpmnModel.Codes.InvalidLoopCharacteristics,
+        path: [
+          "flowNodes",
+          12,
+          "loopCharacteristics",
+          "inputDataItem",
+          "isCollection"
+        ]
+      }]
+    )
   })
 
   it("rejects missing, competing, and inconsistent multi-instance characteristics", () => {
@@ -633,6 +702,91 @@ describe("BpmnModel", () => {
         {
           code: BpmnModel.Codes.InvalidLoopCharacteristics,
           path: ["flowNodes", 12, "loopCharacteristics", "oneBehaviorEventRef"]
+        }
+      ]
+    )
+
+    const invalidItems = diagnosticsFor({
+      _tag: "MultiInstanceCharacteristics",
+      mode: "parallel",
+      cardinality: expression("3"),
+      inputDataItem: {
+        id: "call-fulfillment",
+        itemSubjectRef: {
+          namespaceUri: " urn:example:item ",
+          localName: "bad:item"
+        },
+        isCollection: true,
+        extensionElements: emptyExtensions()
+      },
+      outputDataItem: {
+        id: "output-item",
+        isCollection: false,
+        extensionElements: emptyExtensions()
+      }
+    })
+    assert.deepStrictEqual(
+      invalidItems.map(({ code, path }) => ({ code, path })),
+      [
+        {
+          code: BpmnModel.Codes.InvalidLoopCharacteristics,
+          path: [
+            "flowNodes",
+            12,
+            "loopCharacteristics",
+            "inputDataItem"
+          ]
+        },
+        {
+          code: BpmnModel.Codes.DuplicateId,
+          path: [
+            "flowNodes",
+            12,
+            "loopCharacteristics",
+            "inputDataItem",
+            "id"
+          ]
+        },
+        {
+          code: BpmnModel.Codes.InvalidLoopCharacteristics,
+          path: [
+            "flowNodes",
+            12,
+            "loopCharacteristics",
+            "inputDataItem",
+            "isCollection"
+          ]
+        },
+        {
+          code: BpmnModel.Codes.InvalidLoopCharacteristics,
+          path: [
+            "flowNodes",
+            12,
+            "loopCharacteristics",
+            "inputDataItem",
+            "itemSubjectRef",
+            "localName"
+          ]
+        },
+        {
+          code: BpmnModel.Codes.InvalidLoopCharacteristics,
+          path: [
+            "flowNodes",
+            12,
+            "loopCharacteristics",
+            "inputDataItem",
+            "itemSubjectRef",
+            "namespaceUri"
+          ]
+        },
+        {
+          code: BpmnModel.Codes.InvalidLoopCharacteristics,
+          path: [
+            "flowNodes",
+            12,
+            "loopCharacteristics",
+            "outputDataItem"
+          ]
         }
       ]
     )

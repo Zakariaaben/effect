@@ -5,6 +5,7 @@ import * as Result from "effect/Result"
 import * as Schema from "effect/Schema"
 import { createHash } from "node:crypto"
 import * as BpmnActivityV3 from "../src/BpmnActivityV3.ts"
+import * as BpmnData from "../src/BpmnData.ts"
 import * as BpmnExecutable from "../src/BpmnExecutable.ts"
 import type * as BpmnExecutionState from "../src/BpmnExecutionState.ts"
 import * as BpmnExpressionEvaluator from "../src/BpmnExpressionEvaluator.ts"
@@ -24,6 +25,10 @@ const expressionLanguage = "urn:workflow:conditions"
 const expressionVersion = "1.0.0"
 const rootProcessId = "process_main"
 const now = "2026-07-23T10:00:00.000Z" as const
+const startCommand: BpmnKernel.InitializeCommand = {
+  commandVersion: BpmnKernel.InitializeCommandVersion,
+  input: null
+}
 
 const evaluatorBuildDigest = Schema.decodeUnknownSync(
   ProtocolV2Wire.BuildDigest
@@ -31,6 +36,9 @@ const evaluatorBuildDigest = Schema.decodeUnknownSync(
 const loopArtifactDigest = Schema.decodeUnknownSync(
   ProtocolV3Wire.ArtifactDigest
 )(`sha256:${"3".repeat(64)}`)
+const collectionArtifactDigest = Schema.decodeUnknownSync(
+  ProtocolV3Wire.ArtifactDigest
+)(`sha256:${"a".repeat(64)}`)
 
 const occurrenceDigest = (
   character: string
@@ -63,7 +71,12 @@ const options: BpmnExecutable.CompileXmlOptions = {
   rootProcessId,
   limits: {
     maxAutomaticTransitions: 1_000,
-    maxMultiInstanceCardinality: 128
+    maxExecutionInputCanonicalBytes: 1_048_576,
+    maxMultiInstanceCardinality: 128,
+    maxMultiInstanceCollectionCanonicalBytes: 1_048_576,
+    maxMultiInstanceItemCanonicalBytes: 262_144,
+    maxMultiInstanceOutputCanonicalBytes: 1_048_576,
+    maxMultiInstanceItemOutputCanonicalBytes: 262_144
   },
   evaluatorBindings: [{
     language: expressionLanguage,
@@ -187,6 +200,28 @@ const multiInstanceXml = (
   </bpmn:process>
 </bpmn:definitions>`
 
+const collectionMultiInstanceXml = `<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions
+  xmlns:bpmn="${modelNamespace}"
+  xmlns:tns="urn:workflow:executable-collection-multi-instance"
+  targetNamespace="urn:workflow:executable-collection-multi-instance"
+  expressionLanguage="${expressionLanguage}">
+  <bpmn:process id="${rootProcessId}" isExecutable="true">
+    <bpmn:startEvent id="mi_start"/>
+    <bpmn:task id="mi_task">
+      <bpmn:multiInstanceLoopCharacteristics isSequential="false">
+        <bpmn:loopDataInputRef>tns:items</bpmn:loopDataInputRef>
+        <bpmn:loopDataOutputRef>tns:results</bpmn:loopDataOutputRef>
+        <bpmn:inputDataItem id="current_item" isCollection="false"/>
+        <bpmn:outputDataItem id="current_result" isCollection="false"/>
+      </bpmn:multiInstanceLoopCharacteristics>
+    </bpmn:task>
+    <bpmn:endEvent id="mi_end"/>
+    <bpmn:sequenceFlow id="flow_mi_start" sourceRef="mi_start" targetRef="mi_task"/>
+    <bpmn:sequenceFlow id="flow_mi_end" sourceRef="mi_task" targetRef="mi_end"/>
+  </bpmn:process>
+</bpmn:definitions>`
+
 const nonExecutableMultiInstanceXml = `<?xml version="1.0" encoding="UTF-8"?>
 <bpmn:definitions
   xmlns:bpmn="${modelNamespace}"
@@ -219,6 +254,75 @@ const loopTaskBinding: BpmnActivityV3.TaskBinding = {
   errorMappings: []
 }
 
+const collectionTaskBinding: BpmnActivityV3.TaskBinding = {
+  bindingVersion: BpmnActivityV3.BindingVersion,
+  executionProtocolVersion: 3,
+  taskNodeId: "mi_task",
+  artifactDigest: collectionArtifactDigest,
+  semanticNodeId: "semantic_mi_task",
+  errorMappings: []
+}
+
+const collectionDataDocument: BpmnData.BpmnDataDocument = {
+  documentKind: "BpmnDataDocument",
+  documentVersion: BpmnData.BpmnDataDocumentVersion,
+  bpmnSpecVersion: "2.0.2",
+  extensionElements: [],
+  itemDefinitions: [],
+  dataStores: [],
+  messages: [],
+  errors: [],
+  interfaces: [],
+  dataObjects: [],
+  dataObjectReferences: [],
+  dataStoreReferences: [],
+  properties: [],
+  inputOutputSpecifications: [{
+    id: "mi_task_io",
+    ownerId: "mi_task",
+    dataInputs: [{
+      id: "items",
+      isCollection: true,
+      extensionElements: []
+    }],
+    dataOutputs: [{
+      id: "results",
+      isCollection: true,
+      extensionElements: []
+    }],
+    inputSets: [{
+      id: "mi_task_input_set",
+      dataInputRefs: ["items"],
+      optionalInputRefs: [],
+      whileExecutingInputRefs: [],
+      outputSetRefs: [],
+      extensionElements: []
+    }],
+    outputSets: [{
+      id: "mi_task_output_set",
+      dataOutputRefs: ["results"],
+      optionalOutputRefs: [],
+      whileExecutingOutputRefs: [],
+      inputSetRefs: [],
+      extensionElements: []
+    }],
+    extensionElements: []
+  }],
+  dataAssociations: [],
+  inputOutputBindings: []
+}
+
+const collectionBinding: BpmnKernel.MultiInstanceCollectionBinding = {
+  bindingVersion: BpmnKernel.MultiInstanceCollectionBindingVersion,
+  taskNodeId: "mi_task",
+  dataInputRef: "items",
+  collectionExpression: {
+    language: expressionLanguage,
+    version: expressionVersion,
+    source: "execution.items"
+  }
+}
+
 const loopOutcome = (
   iteration: 0 | 1
 ): BpmnActivityV3.TaskSucceeded => ({
@@ -229,7 +333,26 @@ const loopOutcome = (
   occurrenceDigest: occurrenceDigest(iteration === 0 ? "4" : "5"),
   firstActivityDigest: operationDigest(iteration === 0 ? "6" : "7"),
   attempt: 1,
-  completedActivityDigest: operationDigest(iteration === 0 ? "8" : "9")
+  completedActivityDigest: operationDigest(iteration === 0 ? "8" : "9"),
+  output: { _tag: "Inline", value: { iteration } }
+})
+
+const collectionOutcome = (
+  itemIndex: 0 | 1 | 2,
+  output: Schema.Json
+): BpmnActivityV3.TaskSucceeded => ({
+  _tag: "Succeeded",
+  outcomeVersion: BpmnActivityV3.OutcomeVersion,
+  artifactDigest: collectionArtifactDigest,
+  semanticNodeId: collectionTaskBinding.semanticNodeId,
+  occurrenceDigest: occurrenceDigest(["a", "b", "c"][itemIndex]!),
+  firstActivityDigest: operationDigest(["d", "e", "f"][itemIndex]!),
+  attempt: 1,
+  completedActivityDigest: operationDigest(["7", "8", "9"][itemIndex]!),
+  output: {
+    _tag: "Inline",
+    value: output
+  }
 })
 
 const success = <A>(
@@ -408,7 +531,7 @@ const assertMultiInstanceCanonicalReplay = (
 
   assert.strictEqual(
     recompiled.interchange.profileId,
-    "bpmn-2.0.2-core-process-di-v4"
+    "bpmn-2.0.2-core-process-di-v5"
   )
   assert.deepStrictEqual(
     recompiled.interchange.model,
@@ -442,7 +565,11 @@ describe("BpmnExecutable", () => {
         .every((node) => node.taskKind === "generic")
     )
 
-    const initialized = success(BpmnKernel.initialize(compiled.kernel, services(true)))
+    const initialized = success(BpmnKernel.initialize(
+      compiled.kernel,
+      startCommand,
+      services(true)
+    ))
     assert.deepStrictEqual(activeNodeIds(initialized.state), ["intake"])
 
     const afterIntake = complete(compiled.kernel, initialized.state, "intake", true)
@@ -547,6 +674,7 @@ describe("BpmnExecutable", () => {
       )
       const initialized = yield* BpmnExpressionRuntime.initialize(
         compiled.kernel,
+        startCommand,
         { now }
       ).pipe(provideRegistry)
       assert.deepStrictEqual(requests, [])
@@ -705,11 +833,11 @@ describe("BpmnExecutable", () => {
     ))
     assert.strictEqual(
       BpmnXml.CoreProcessDiProfileId,
-      "bpmn-2.0.2-core-process-di-v4"
+      "bpmn-2.0.2-core-process-di-v5"
     )
     assert.strictEqual(
       compiled.interchange.profileId,
-      "bpmn-2.0.2-core-process-di-v4"
+      "bpmn-2.0.2-core-process-di-v5"
     )
     assert.deepStrictEqual(
       compiled.interchange.mappingReport.semanticLosses,
@@ -720,6 +848,7 @@ describe("BpmnExecutable", () => {
     const runtime = multiInstanceServices(2, observations, false)
     const initialized = success(BpmnKernel.initialize(
       compiled.kernel,
+      startCommand,
       runtime
     ))
     const firstToken = activeMultiInstanceTokens(initialized.state)[0]
@@ -857,12 +986,13 @@ describe("BpmnExecutable", () => {
     ))
     assert.strictEqual(
       compiled.interchange.profileId,
-      "bpmn-2.0.2-core-process-di-v4"
+      "bpmn-2.0.2-core-process-di-v5"
     )
     const observations: Array<MultiInstanceEvaluationObservation> = []
     const runtime = multiInstanceServices(3, observations)
     const initialized = success(BpmnKernel.initialize(
       compiled.kernel,
+      startCommand,
       runtime
     ))
     assert.deepStrictEqual(observations, [{
@@ -961,6 +1091,249 @@ describe("BpmnExecutable", () => {
     assertMultiInstanceCanonicalReplay(compiled, journal, state)
   })
 
+  it.effect("executes CollectionMultiInstance/1 from XML through ordered output aggregation and exact replay", () =>
+    Effect.gen(function*() {
+      const compileOptions: BpmnExecutable.CompileXmlOptions = {
+        ...options,
+        taskBindings: [collectionTaskBinding],
+        dataDocument: collectionDataDocument,
+        collectionBindings: [collectionBinding]
+      }
+      const compiled = success(compileXml(
+        collectionMultiInstanceXml,
+        compileOptions
+      ))
+      const task = compiled.interchange.model.flowNodes.find(
+        (candidate) => candidate.id === "mi_task"
+      )
+      if (
+        task?._tag !== "Task" ||
+        task.loopCharacteristics?._tag !==
+          "MultiInstanceCharacteristics"
+      ) {
+        return yield* Effect.die(
+          "Expected compiled collection Multi-Instance Task"
+        )
+      }
+      assert.deepStrictEqual(task.loopCharacteristics, {
+        _tag: "MultiInstanceCharacteristics",
+        mode: "parallel",
+        loopDataInputRef: "items",
+        loopDataOutputRef: "results",
+        inputDataItem: {
+          id: "current_item",
+          isCollection: false,
+          extensionElements: []
+        },
+        outputDataItem: {
+          id: "current_result",
+          isCollection: false,
+          extensionElements: []
+        }
+      })
+      assert.deepStrictEqual(
+        compiled.kernel.taskBindings,
+        [collectionTaskBinding]
+      )
+      assert.deepStrictEqual(
+        compiled.kernel.collectionBindings,
+        [collectionBinding]
+      )
+      assert.deepStrictEqual(
+        compiled.kernel.dataDocument,
+        collectionDataDocument
+      )
+
+      const inputItems: ReadonlyArray<Schema.Json> = [
+        { id: "first", rank: 1 },
+        { id: "duplicate", rank: 2 },
+        { id: "duplicate", rank: 2 }
+      ]
+      const startInput: Schema.Json = {
+        requestId: "collection-request",
+        items: inputItems
+      }
+      const requests: Array<
+        BpmnExpressionEvaluator.EvaluationRequest
+      > = []
+      const evaluatorBinding = options.evaluatorBindings[0]!
+      const registry = yield* BpmnExpressionEvaluator.makeMemory([
+        BpmnExpressionEvaluator.makeDefinition({
+          binding: evaluatorBinding,
+          evaluate: (request) =>
+            Effect.gen(function*() {
+              requests.push(request)
+              yield* Effect.yieldNow
+              return {
+                result: inputItems,
+                steps: 7
+              }
+            })
+        })
+      ])
+      const provideRegistry = Effect.provideService(
+        BpmnExpressionEvaluator.EvaluatorRegistry,
+        registry
+      )
+      const initialized = yield* BpmnExpressionRuntime.initialize(
+        compiled.kernel,
+        {
+          commandVersion: BpmnKernel.InitializeCommandVersion,
+          input: startInput
+        },
+        { now }
+      ).pipe(provideRegistry)
+
+      assert.strictEqual(requests.length, 1)
+      assert.strictEqual(requests[0]?.source, "execution.items")
+      assert.strictEqual(
+        requests[0]?.expectedResult,
+        "json-array"
+      )
+      assert.include(
+        JSON.stringify(requests[0]?.context),
+        "\"requestId\":\"collection-request\""
+      )
+      assert.deepStrictEqual(initialized.state.input, startInput)
+      assert.deepStrictEqual(
+        initialized.state.multiInstanceGroups[0]?.source,
+        {
+          _tag: "Collection",
+          dataInputRef: "items",
+          items: inputItems
+        }
+      )
+      const initialTokens = activeMultiInstanceTokens(
+        initialized.state
+      )
+      assert.strictEqual(initialTokens.length, 3)
+      assert.deepStrictEqual(
+        initialTokens.map((token) =>
+          success(BpmnKernel.taskCollectionItem(
+            compiled.kernel,
+            initialized.state,
+            {
+              scopeInstanceId: token.scopeInstanceId,
+              taskNodeId: "mi_task",
+              tokenId: token.tokenId
+            }
+          ))
+        ),
+        inputItems.map((item, itemIndex) => ({
+          dataInputRef: "items",
+          itemIndex,
+          itemKey: `item:${itemIndex}`,
+          item
+        }))
+      )
+
+      const outputs: ReadonlyArray<Schema.Json> = [
+        { accepted: "first" },
+        { accepted: "duplicate-1" },
+        { accepted: "duplicate-2" }
+      ]
+      const journal: Array<BpmnKernel.TransitionEvent> = [
+        ...initialized.events
+      ]
+      let state = initialized.state
+      for (const itemIndex of [2, 0, 1] as const) {
+        const token = activeMultiInstanceTokens(state).find(
+          (candidate) =>
+            candidate.invocation.branch?._tag ===
+              "MultiInstanceItem" &&
+            candidate.invocation.branch.itemIndex === itemIndex
+        )
+        if (token === undefined) {
+          return yield* Effect.die(
+            `Expected active collection member '${itemIndex}'`
+          )
+        }
+        const resolved = yield* BpmnExpressionRuntime.resolveTask(
+          compiled.kernel,
+          state,
+          {
+            commandVersion: BpmnActivityV3.CommandVersion,
+            scopeInstanceId: token.scopeInstanceId,
+            taskNodeId: "mi_task",
+            tokenId: token.tokenId,
+            outcome: collectionOutcome(
+              itemIndex,
+              outputs[itemIndex]!
+            )
+          },
+          { now }
+        ).pipe(provideRegistry)
+        journal.push(...resolved.events)
+        state = resolved.state
+      }
+
+      assert.strictEqual(requests.length, 1)
+      assert.strictEqual(state.status, "completed")
+      assert.deepStrictEqual(
+        state.multiInstanceGroups[0]?.members.map((member) => ({
+          index: member.index,
+          itemKey: member.itemKey,
+          status: member.status,
+          output: member.output
+        })),
+        outputs.map((output, index) => ({
+          index,
+          itemKey: `item:${index}`,
+          status: "completed",
+          output
+        }))
+      )
+      assert.deepStrictEqual(
+        state.multiInstanceGroups[0]?.output,
+        {
+          dataOutputRef: "results",
+          items: outputs
+        }
+      )
+      assert.deepStrictEqual(
+        journal.flatMap((event) =>
+          event._tag === "MultiInstanceItemCompleted"
+            ? [event.itemIndex]
+            : []
+        ),
+        [2, 0, 1]
+      )
+      assert.deepStrictEqual(
+        journal.flatMap((event) =>
+          event._tag === "MultiInstanceGroupCompleted"
+            ? [event.output]
+            : []
+        ),
+        [{
+          dataOutputRef: "results",
+          items: outputs
+        }]
+      )
+      assert.deepStrictEqual(
+        success(BpmnKernel.replay(compiled.kernel, journal)),
+        state
+      )
+
+      const canonical = success(BpmnXml.exportXml(
+        compiled.interchange,
+        { format: "compact" }
+      ))
+      assert.include(canonical, "<bpmn:inputDataItem")
+      assert.include(canonical, "<bpmn:outputDataItem")
+      const recompiled = success(compileXml(
+        canonical,
+        compileOptions
+      ))
+      assert.strictEqual(
+        recompiled.kernel.modelReference.executableFingerprint,
+        compiled.kernel.modelReference.executableFingerprint
+      )
+      assert.deepStrictEqual(
+        success(BpmnKernel.replay(recompiled.kernel, journal)),
+        state
+      )
+    }))
+
   it("round-trips collection and progressive Multi-Instance mapping while executable admission fails closed", () => {
     const imported = success(BpmnXml.importXml(
       nonExecutableMultiInstanceXml,
@@ -968,7 +1341,7 @@ describe("BpmnExecutable", () => {
     ))
     assert.strictEqual(
       imported.profileId,
-      "bpmn-2.0.2-core-process-di-v4"
+      "bpmn-2.0.2-core-process-di-v5"
     )
     const task = imported.model.flowNodes.find((node) => node.id === "mi_task")
     if (
@@ -1011,7 +1384,11 @@ describe("BpmnExecutable", () => {
 
   it("uses the exclusive gateway's explicit default when its condition is false", () => {
     const compiled = success(compileXml(xml))
-    const initialized = success(BpmnKernel.initialize(compiled.kernel, services(false)))
+    const initialized = success(BpmnKernel.initialize(
+      compiled.kernel,
+      startCommand,
+      services(false)
+    ))
     const completed = complete(compiled.kernel, initialized.state, "intake", false)
     const journal: ReadonlyArray<BpmnKernel.TransitionEvent> = [
       ...initialized.events,

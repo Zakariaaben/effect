@@ -84,6 +84,7 @@ const RuntimeErrorFields = Schema.Struct({
   multiInstanceActivityId: Schema.optionalKey(Schema.NonEmptyString),
   multiInstanceGroupId: Schema.optionalKey(Schema.NonEmptyString),
   multiInstanceGroupActivation: Schema.optionalKey(ProtocolV2Wire.NonNegativeSafeInt),
+  multiInstanceDataInputRef: Schema.optionalKey(Schema.NonEmptyString),
   multiInstanceCompletedItemIndex: Schema.optionalKey(ProtocolV2Wire.NonNegativeSafeInt),
   multiInstanceCompletedItemKey: Schema.optionalKey(Schema.NonEmptyString),
   multiInstanceLoopCounter: Schema.optionalKey(ProtocolV2Wire.NonNegativeSafeInt),
@@ -123,10 +124,15 @@ const RuntimeErrorFields = Schema.Struct({
     const multiInstanceCompletionCount = multiInstanceCompletionCoordinates.filter(
       (coordinate) => coordinate !== undefined
     ).length
+    const hasMultiInstanceDataInputRef = fields.multiInstanceDataInputRef !== undefined
     const hasSequenceFlow = fields.sequenceFlowId !== undefined
     const decisionKinds = Number(hasSequenceFlow) +
       Number(loopCoordinateCount > 0) +
-      Number(multiInstanceBaseCount > 0 || multiInstanceCompletionCount > 0)
+      Number(
+        multiInstanceBaseCount > 0 ||
+          hasMultiInstanceDataInputRef ||
+          multiInstanceCompletionCount > 0
+      )
     if (decisionKinds > 1) {
       return false
     }
@@ -136,17 +142,25 @@ const RuntimeErrorFields = Schema.Struct({
     if (loopCoordinateCount > 0) {
       return loopCoordinateCount === loopCoordinates.length
     }
-    if (multiInstanceBaseCount > 0 || multiInstanceCompletionCount > 0) {
+    if (
+      multiInstanceBaseCount > 0 ||
+      hasMultiInstanceDataInputRef ||
+      multiInstanceCompletionCount > 0
+    ) {
       return multiInstanceBaseCount === multiInstanceBaseCoordinates.length &&
         (
           multiInstanceCompletionCount === 0 ||
-          multiInstanceCompletionCount === multiInstanceCompletionCoordinates.length
+          (
+            fields.multiInstanceDataInputRef === undefined &&
+            multiInstanceCompletionCount ===
+              multiInstanceCompletionCoordinates.length
+          )
         )
     }
     return true
   }, {
     expected:
-      "no decision coordinates, one sequenceFlowId, one complete standard-loop tuple, one complete multi-instance cardinality tuple, or one complete multi-instance completion tuple"
+      "no decision coordinates, one sequenceFlowId, one complete standard-loop tuple, one complete multi-instance cardinality tuple, one complete multi-instance collection tuple, or one complete multi-instance completion tuple"
   })
 )
 
@@ -181,7 +195,7 @@ export const Requirements = Object.freeze(
     evaluatorRegistry: "trusted-exact-registry",
     evaluatorBindingResolution: "complete-tuple",
     operationReplay: "same-input-and-time",
-    decisionIdentityVersion: 2,
+    decisionIdentityVersion: 3,
     evaluatorTimeout: "binding-timeout-millis",
     evaluatorOutput: "strict-json-result",
     commitVisibility: "final-batch-only"
@@ -222,6 +236,13 @@ type DecisionCoordinates =
     readonly activityId: string
     readonly groupId: string
     readonly groupActivation: number
+  }
+  | {
+    readonly _tag: "MultiInstanceCollection"
+    readonly activityId: string
+    readonly groupId: string
+    readonly groupActivation: number
+    readonly dataInputRef: string
   }
   | {
     readonly _tag: "MultiInstanceCompletionCondition"
@@ -281,6 +302,13 @@ const runtimeError = (
         multiInstanceGroupId: coordinates.groupId,
         multiInstanceGroupActivation: coordinates.groupActivation
       }
+      : coordinates._tag === "MultiInstanceCollection"
+      ? {
+        multiInstanceActivityId: coordinates.activityId,
+        multiInstanceGroupId: coordinates.groupId,
+        multiInstanceGroupActivation: coordinates.groupActivation,
+        multiInstanceDataInputRef: coordinates.dataInputRef
+      }
       : {
         multiInstanceActivityId: coordinates.activityId,
         multiInstanceGroupId: coordinates.groupId,
@@ -321,6 +349,14 @@ const decisionCoordinates = (
         groupId: context.groupId,
         groupActivation: context.groupActivation
       }
+    case "MultiInstanceCollection":
+      return {
+        _tag: context._tag,
+        activityId: context.activity.id,
+        groupId: context.groupId,
+        groupActivation: context.groupActivation,
+        dataInputRef: context.dataInputRef
+      }
     case "MultiInstanceCompletionCondition":
       return {
         _tag: context._tag,
@@ -357,6 +393,13 @@ const evaluationFailure = (
       multiInstanceGroupId: coordinates.groupId,
       multiInstanceGroupActivation: coordinates.groupActivation
     }
+    : coordinates._tag === "MultiInstanceCollection"
+    ? {
+      multiInstanceActivityId: coordinates.activityId,
+      multiInstanceGroupId: coordinates.groupId,
+      multiInstanceGroupActivation: coordinates.groupActivation,
+      multiInstanceDataInputRef: coordinates.dataInputRef
+    }
     : {
       multiInstanceActivityId: coordinates.activityId,
       multiInstanceGroupId: coordinates.groupId,
@@ -375,6 +418,8 @@ const evaluationFailure = (
     ? `Effectful evaluation is required for standard loop on activity '${coordinates.loopActivityId}'`
     : coordinates._tag === "MultiInstanceCardinality"
     ? `Effectful evaluation is required for multi-instance cardinality on activity '${coordinates.activityId}'`
+    : coordinates._tag === "MultiInstanceCollection"
+    ? `Effectful evaluation is required for multi-instance collection on activity '${coordinates.activityId}'`
     : `Effectful evaluation is required for multi-instance completion condition on activity '${coordinates.activityId}'`
   return new Diagnostic.CompilationError({
     diagnostics: [
@@ -635,6 +680,7 @@ const snapshotInput = (input: unknown): unknown => {
  */
 export const initialize = (
   kernel: BpmnKernel.CompiledKernel,
+  commandInput: unknown,
   services: BpmnKernel.Services
 ): Effect.Effect<
   BpmnKernel.TransitionBatch,
@@ -643,12 +689,14 @@ export const initialize = (
 > =>
   Effect.suspend(() => {
     const now = captureNow(services)
+    const command = snapshotInput(commandInput)
     return drive(
       "initialize",
       kernel,
       (evaluateExpression) =>
         BpmnKernel.initialize(
           kernel,
+          command,
           runtimeServices(now, evaluateExpression)
         )
     )

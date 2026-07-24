@@ -989,7 +989,12 @@ const prepareBridgeKernel = (
         rootProcessId: bpmnProcessId,
         limits: {
           maxAutomaticTransitions: 100,
-          maxMultiInstanceCardinality: 128
+          maxExecutionInputCanonicalBytes: 1_048_576,
+          maxMultiInstanceCardinality: 128,
+          maxMultiInstanceCollectionCanonicalBytes: 1_048_576,
+          maxMultiInstanceItemCanonicalBytes: 262_144,
+          maxMultiInstanceOutputCanonicalBytes: 1_048_576,
+          maxMultiInstanceItemOutputCanonicalBytes: 262_144
         },
         evaluatorBindings: bindingOverrides.standardLoop === true
           ? [{
@@ -1014,6 +1019,10 @@ const prepareBridgeKernel = (
     ).pipe(Effect.orDie)
     const initialized = BpmnKernel.initialize(
       kernel,
+      {
+        commandVersion: BpmnKernel.InitializeCommandVersion,
+        input: null
+      },
       bpmnServices()
     )
     if (Result.isFailure(initialized)) {
@@ -1264,6 +1273,61 @@ describe("EffectWorkflowRetryV3 contracts", () => {
       assert.strictEqual(recovered.success, retainedOccurrence)
     }).pipe(provideCrypto))
 
+  it.effect("recovers only the detached frozen input retained by preparation", () =>
+    Effect.gen(function*() {
+      const fixture = yield* makeFixture()
+      const retainedOccurrence = yield* occurrence(
+        fixture,
+        "prepared-input-access"
+      )
+      const sourceInput = {
+        _tag: "Inline" as const,
+        value: {
+          request: {
+            id: 1
+          },
+          items: [1, 2]
+        }
+      }
+      const invocation = yield* Retry.prepare({
+        artifact: fixture.resolved,
+        occurrence: retainedOccurrence,
+        input: sourceInput
+      })
+
+      sourceInput.value.request.id = 2
+      sourceInput.value.items.push(3)
+
+      const recovered = Retry.preparedInput(invocation)
+      assert(Result.isSuccess(recovered))
+      assert.deepStrictEqual(recovered.success, {
+        _tag: "Inline",
+        value: {
+          request: {
+            id: 1
+          },
+          items: [1, 2]
+        }
+      })
+      assert.notStrictEqual(recovered.success, sourceInput)
+      assert.isTrue(Object.isFrozen(recovered.success))
+      assert.isTrue(Object.isFrozen(recovered.success.value))
+      assert.isTrue(
+        Object.isFrozen(
+          (recovered.success.value as {
+            readonly request: object
+          }).request
+        )
+      )
+      assert.isTrue(
+        Object.isFrozen(
+          (recovered.success.value as {
+            readonly items: ReadonlyArray<number>
+          }).items
+        )
+      )
+    }).pipe(provideCrypto))
+
   it.effect("rejects copied and proxied prepared invocations without reading them", () =>
     Effect.gen(function*() {
       const fixture = yield* makeFixture()
@@ -1286,6 +1350,12 @@ describe("EffectWorkflowRetryV3 contracts", () => {
         copied.failure.code,
         Retry.ErrorCodes.InvalidInvocation
       )
+      const copiedInput = Retry.preparedInput({ ...invocation })
+      assert(Result.isFailure(copiedInput))
+      assert.strictEqual(
+        copiedInput.failure.code,
+        Retry.ErrorCodes.InvalidInvocation
+      )
 
       let proxyReads = 0
       const proxied = new Proxy(invocation, {
@@ -1301,11 +1371,24 @@ describe("EffectWorkflowRetryV3 contracts", () => {
         Retry.ErrorCodes.InvalidInvocation
       )
       assert.strictEqual(proxyReads, 0)
+      const proxyInputFailure = Retry.preparedInput(proxied)
+      assert(Result.isFailure(proxyInputFailure))
+      assert.strictEqual(
+        proxyInputFailure.failure.code,
+        Retry.ErrorCodes.InvalidInvocation
+      )
+      assert.strictEqual(proxyReads, 0)
 
       const unknown = Retry.preparedOccurrence("not-an-invocation")
       assert(Result.isFailure(unknown))
       assert.strictEqual(
         unknown.failure.code,
+        Retry.ErrorCodes.InvalidInvocation
+      )
+      const unknownInput = Retry.preparedInput("not-an-invocation")
+      assert(Result.isFailure(unknownInput))
+      assert.strictEqual(
+        unknownInput.failure.code,
         Retry.ErrorCodes.InvalidInvocation
       )
     }).pipe(provideCrypto))
@@ -1338,6 +1421,12 @@ describe("EffectWorkflowRetryV3 contracts", () => {
     assert(Result.isFailure(failure))
     assert.strictEqual(
       failure.failure.code,
+      Retry.ErrorCodes.InvalidInvocation
+    )
+    const inputFailure = Retry.preparedInput(accessorInvocation)
+    assert(Result.isFailure(inputFailure))
+    assert.strictEqual(
+      inputFailure.failure.code,
       Retry.ErrorCodes.InvalidInvocation
     )
     assert.strictEqual(getterReads, 0)
@@ -1537,7 +1626,11 @@ describe("EffectWorkflowRetryV3 BPMN bridge integration", () => {
           occurrenceDigest: invocation.occurrenceDigest,
           firstActivityDigest: invocation.firstActivityDigest,
           attempt: 1,
-          completedActivityDigest: receipt.retryOutcome.activityDigest
+          completedActivityDigest: receipt.retryOutcome.activityDigest,
+          output: {
+            _tag: "Inline",
+            value: { value: 41 }
+          }
         }
       })
       assert.strictEqual(

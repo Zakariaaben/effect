@@ -117,6 +117,73 @@ describe("BPMN coverage manifest", () => {
     }
   })
 
+  it("uses the official Workflow Patterns identifiers for closed Multi-Instance support", () => {
+    const coverage = validated()
+    const requirements = new Map(
+      coverage.catalog.requirements.map((requirement) => [requirement.id, requirement])
+    )
+    const entries = new Map(
+      coverage.manifest.entries.map((entry) => [entry.requirementId, entry])
+    )
+
+    assert.strictEqual(
+      requirements.get("WFP-WCP13-MULTI-INSTANCE-DESIGN-TIME")?.source.pages,
+      "155-157"
+    )
+    assert.strictEqual(
+      requirements.get("WFP-WCP14-MULTI-INSTANCE-RUNTIME")?.source.pages,
+      "158-159"
+    )
+    assert.strictEqual(
+      entries.get("WFP-WCP13-MULTI-INSTANCE-DESIGN-TIME")?.supportLevel,
+      "executable"
+    )
+    assert.strictEqual(
+      entries.get("WFP-WCP14-MULTI-INSTANCE-RUNTIME")?.supportLevel,
+      "executable"
+    )
+    assert.isFalse(requirements.has("WFP-WCP14-MULTI-INSTANCE-DESIGN-TIME"))
+    assert.isFalse(requirements.has("WFP-WCP15-MULTI-INSTANCE-RUNTIME"))
+  })
+
+  it("records bounded CollectionMultiInstance evidence without widening a BPMN claim", () => {
+    const coverage = validated()
+    const requirements = new Map(
+      coverage.catalog.requirements.map((requirement) => [requirement.id, requirement])
+    )
+    const entries = new Map(
+      coverage.manifest.entries.map((entry) => [entry.requirementId, entry])
+    )
+    const requirement = requirements.get(
+      "BPMN-EXECUTION-COLLECTION-MULTI-INSTANCE-TASK"
+    )
+    const entry = entries.get(
+      "BPMN-EXECUTION-COLLECTION-MULTI-INSTANCE-TASK"
+    )
+
+    assert.strictEqual(requirement?.facet, "execution")
+    assert.deepStrictEqual(requirement?.dependsOn, [
+      "BPMN-FOUNDATION-DURABLE-MARKING",
+      "BPMN-EXECUTION-BASIC-TOKEN-KERNEL",
+      "BPMN-DATA-IO-INTERFACE-SLICE"
+    ])
+    assert.strictEqual(entry?.supportLevel, "executable")
+    assert(
+      entry?.evidence.some(
+        (evidence) =>
+          evidence.kind === "replay-test" &&
+          evidence.path === "test/BpmnExecutable.test.ts" &&
+          evidence.testName ===
+            "executes CollectionMultiInstance/1 from XML through ordered output aggregation and exact replay"
+      )
+    )
+    assert.strictEqual(
+      entries.get("BPMN-PROFILE-PROCESS-EXECUTION-COMPLETE")?.supportLevel,
+      "unsupported"
+    )
+    assert.deepStrictEqual(coverage.manifest.claims, [])
+  })
+
   it("ships strict JSON Schemas for requirement and coverage tooling", () => {
     const coverageSchema = readJson("conformance/bpmn-coverage.schema.json") as {
       readonly $schema?: unknown

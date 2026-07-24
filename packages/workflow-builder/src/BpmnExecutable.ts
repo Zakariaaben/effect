@@ -17,6 +17,7 @@ import type * as PlatformError from "effect/PlatformError"
 import * as Result from "effect/Result"
 import * as Schema from "effect/Schema"
 import * as BpmnActivityV3 from "./BpmnActivityV3.ts"
+import * as BpmnData from "./BpmnData.ts"
 import * as BpmnExpression from "./BpmnExpression.ts"
 import * as BpmnKernel from "./BpmnKernel.ts"
 import * as BpmnXml from "./BpmnXml.ts"
@@ -59,6 +60,10 @@ export const CompileXmlOptions = Schema.Struct({
   evaluatorBindings: Schema.Array(BpmnExpression.EvaluatorBinding),
   taskBindings: Schema.optionalKey(
     Schema.Array(BpmnActivityV3.TaskBinding)
+  ),
+  dataDocument: Schema.optionalKey(BpmnData.BpmnDataDocument),
+  collectionBindings: Schema.optionalKey(
+    Schema.Array(BpmnKernel.MultiInstanceCollectionBinding)
   )
 }).annotate({
   identifier: "WorkflowBpmnExecutableCompileXmlOptions",
@@ -107,11 +112,13 @@ const invalidOptions = (
  *
  * Options are snapshotted and decoded with excess-property rejection before
  * XML parsing begins. Import and kernel diagnostics are returned unchanged.
- * Evaluator and optional protocol-v3 Task bindings are supplied as explicit
- * deployment authority outside the BPMN document and become part of the
- * executable fingerprint. The function does not infer an unspecified gateway
- * direction, choose among multiple populated processes, or claim BPMN
- * conformance.
+ * Evaluator bindings, optional protocol-v3 Task bindings, the normalized BPMN
+ * data document, and collection-value bindings are supplied as explicit
+ * deployment authority outside the XML interchange slice and become part of
+ * the executable fingerprint. A `loopDataInputRef` remains an IDREF: this
+ * facade never misinterprets it as expression source. The function does not
+ * infer an unspecified gateway direction, choose among multiple populated
+ * processes, or claim BPMN conformance.
  *
  * @category constructors
  * @since 4.0.0
@@ -152,7 +159,15 @@ export const compileXml = Effect.fnUntraced(function*(
       evaluatorBindings: options.success.evaluatorBindings,
       ...(options.success.taskBindings === undefined
         ? undefined
-        : { taskBindings: options.success.taskBindings })
+        : { taskBindings: options.success.taskBindings }),
+      ...(options.success.dataDocument === undefined
+        ? undefined
+        : { dataDocument: options.success.dataDocument }),
+      ...(options.success.collectionBindings === undefined
+        ? undefined
+        : {
+          collectionBindings: options.success.collectionBindings
+        })
     }
   )
   return Object.freeze({

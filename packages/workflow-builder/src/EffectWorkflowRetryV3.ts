@@ -847,6 +847,40 @@ export const preparedOccurrence = (
     : Result.succeed(state.occurrence)
 }
 
+/**
+ * Recovers the frozen inline input retained for a prepared retry invocation.
+ *
+ * **Details**
+ *
+ * This is a process-local admission accessor for semantic bridges, not a
+ * caller-supplied durable pin. Only the exact object returned by
+ * {@link prepare} is admitted; structural copies, proxies, and unknown values
+ * fail without inspecting any invocation fields.
+ *
+ * @category accessors
+ * @since 4.0.0
+ */
+export const preparedInput = (
+  invocation: unknown
+): Result.Result<
+  Wire.InlineEncodedPayload,
+  EffectWorkflowRetryError
+> => {
+  if (typeof invocation !== "object" || invocation === null) {
+    return Result.fail(retryError(
+      ErrorCodes.InvalidInvocation,
+      "Prepared input access requires the exact PreparedRetryInvocation returned by prepare"
+    ))
+  }
+  const state = invocationStates.get(invocation)
+  return state === undefined
+    ? Result.fail(retryError(
+      ErrorCodes.InvalidInvocation,
+      "Prepared input access requires the exact PreparedRetryInvocation returned by prepare"
+    ))
+    : Result.succeed(state.input)
+}
+
 const capturePrepareOptions = (
   input: unknown
 ): Result.Result<CapturedPrepareOptions, EffectWorkflowRetryError> => {
@@ -1490,7 +1524,7 @@ export const prepare = (
       { nodeId: node.binding.nodeId }
     ))
   }
-  const inlinePayload = payload.success
+  const inlinePayload = snapshot.success as unknown as Wire.InlineEncodedPayload
 
   return Effect.gen(function*() {
     const base = {

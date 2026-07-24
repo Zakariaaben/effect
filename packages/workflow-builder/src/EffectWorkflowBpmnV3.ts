@@ -38,7 +38,7 @@ const strictParseOptions = {
  * @category constants
  * @since 4.0.0
  */
-export const BridgeVersion = 1 as const
+export const BridgeVersion = 2 as const
 
 /**
  * Exact BPMN wait-state coordinates selected by a durable coordinator.
@@ -139,9 +139,11 @@ export const ErrorCodes = {
   InvalidKernelAuthority: "InvalidKernelAuthority",
   TaskBindingUnavailable: "TaskBindingUnavailable",
   TaskOccurrenceUnavailable: "TaskOccurrenceUnavailable",
+  TaskCollectionItemUnavailable: "TaskCollectionItemUnavailable",
   InvalidInvocation: "InvalidInvocation",
   InvocationBindingMismatch: "InvocationBindingMismatch",
   InvocationOccurrenceMismatch: "InvocationOccurrenceMismatch",
+  InvocationInputMismatch: "InvocationInputMismatch",
   InvalidResolutionReceipt: "InvalidResolutionReceipt"
 } as const
 
@@ -158,9 +160,11 @@ const ErrorCode = Schema.Literals([
   ErrorCodes.InvalidKernelAuthority,
   ErrorCodes.TaskBindingUnavailable,
   ErrorCodes.TaskOccurrenceUnavailable,
+  ErrorCodes.TaskCollectionItemUnavailable,
   ErrorCodes.InvalidInvocation,
   ErrorCodes.InvocationBindingMismatch,
   ErrorCodes.InvocationOccurrenceMismatch,
+  ErrorCodes.InvocationInputMismatch,
   ErrorCodes.InvalidResolutionReceipt
 ])
 
@@ -277,6 +281,32 @@ const lookupOccurrence = (
   ))
 }
 
+const lookupCollectionItem = (
+  kernel: BpmnKernel.CompiledKernel,
+  stateInput: unknown,
+  target: TaskResolutionTarget
+): Result.Result<
+  BpmnKernel.TaskCollectionItem | undefined,
+  EffectWorkflowBpmnError
+> => {
+  const item = BpmnKernel.taskCollectionItem(
+    kernel,
+    stateInput,
+    target
+  )
+  if (Result.isSuccess(item)) {
+    return Result.succeed(item.success)
+  }
+  const diagnostic = item.failure.diagnostics[0]
+  return Result.fail(bridgeError(
+    diagnostic.code === BpmnKernel.Codes.InvalidKernel
+      ? ErrorCodes.InvalidKernelAuthority
+      : ErrorCodes.TaskCollectionItemUnavailable,
+    diagnostic.message,
+    target
+  ))
+}
+
 const sameOccurrenceCoordinates = (
   expected: BpmnKernel.TaskOccurrenceCoordinates,
   actual: EffectWorkflowRetryV3.PreparedRetryInvocation,
@@ -295,6 +325,15 @@ const sameOccurrenceCoordinates = (
       activation.activation === candidate.activation
   })
 
+const sameJson = (left: unknown, right: unknown): boolean => {
+  const leftSnapshot = Json.snapshot(left)
+  const rightSnapshot = Json.snapshot(right)
+  return Result.isSuccess(leftSnapshot) &&
+    Result.isSuccess(rightSnapshot) &&
+    Json.canonicalizeSnapshot(leftSnapshot.success) ===
+      Json.canonicalizeSnapshot(rightSnapshot.success)
+}
+
 const succeededOutcome = (
   invocation: EffectWorkflowRetryV3.PreparedRetryInvocation,
   outcome: EffectWorkflowRetryV3.NodeAttemptSucceeded
@@ -306,7 +345,8 @@ const succeededOutcome = (
   occurrenceDigest: invocation.occurrenceDigest,
   firstActivityDigest: invocation.firstActivityDigest,
   attempt: outcome.attempt,
-  completedActivityDigest: outcome.activityDigest
+  completedActivityDigest: outcome.activityDigest,
+  output: outcome.output
 })
 
 const businessFailureOutcome = (
@@ -433,8 +473,18 @@ export const executeTask = (
     const occurrence = yield* Effect.fromResult(
       EffectWorkflowRetryV3.preparedOccurrence(invocation)
     )
+    const preparedInput = yield* Effect.fromResult(
+      EffectWorkflowRetryV3.preparedInput(invocation)
+    )
     const expectedOccurrence = yield* Effect.fromResult(
       lookupOccurrence(kernel, stateInput, target)
+    )
+    const expectedCollectionItem = yield* Effect.fromResult(
+      lookupCollectionItem(
+        kernel,
+        stateInput,
+        target
+      )
     )
     if (
       binding.artifactDigest !== invocation.artifactDigest ||
@@ -458,6 +508,19 @@ export const executeTask = (
       return yield* Effect.fail(bridgeError(
         ErrorCodes.InvocationOccurrenceMismatch,
         `Prepared retry invocation does not match replay-derived BPMN Task occurrence '${target.tokenId}'`,
+        target
+      ))
+    }
+    if (
+      expectedCollectionItem !== undefined &&
+      !sameJson(
+        preparedInput.value,
+        expectedCollectionItem.item
+      )
+    ) {
+      return yield* Effect.fail(bridgeError(
+        ErrorCodes.InvocationInputMismatch,
+        `Prepared retry invocation input does not match frozen collection item '${expectedCollectionItem.itemKey}'`,
         target
       ))
     }

@@ -6,7 +6,8 @@
  * This module intentionally supports only one coherent executable subset of
  * BPMN 2.0.2: root and embedded subprocess scopes, none start and end events,
  * generic tasks (including immutable protocol-v3 bindings, bounded standard
- * loops, and fixed-cardinality multi-instance execution), at most one
+ * loops, and fixed cardinality- or collection-based multi-instance execution),
+ * at most one
  * interrupting Boundary Error per bound task, normal / conditional / default
  * sequence flows, exclusive gateways, and parallel gateways. Unsupported BPMN
  * constructs are rejected at compile time with aggregate diagnostics.
@@ -19,6 +20,7 @@ import type * as PlatformError from "effect/PlatformError"
 import * as Result from "effect/Result"
 import * as Schema from "effect/Schema"
 import * as BpmnActivityV3 from "./BpmnActivityV3.ts"
+import * as BpmnData from "./BpmnData.ts"
 import * as BpmnExecutionState from "./BpmnExecutionState.ts"
 import * as BpmnExpression from "./BpmnExpression.ts"
 import * as BpmnExpressionEvaluator from "./BpmnExpressionEvaluator.ts"
@@ -148,7 +150,80 @@ export const KernelSemanticVersion = BpmnExecutionState.BpmnKernelSemanticVersio
  * @category constants
  * @since 4.0.0
  */
-export const TransitionJournalVersion = 4 as const
+export const TransitionJournalVersion = 5 as const
+
+/**
+ * Version of the durable execution-start command.
+ *
+ * @category constants
+ * @since 4.0.0
+ */
+export const InitializeCommandVersion = 1 as const
+
+/**
+ * Version of the external value binding used by the fixed collection
+ * multi-instance profile.
+ *
+ * @category constants
+ * @since 4.0.0
+ */
+export const MultiInstanceCollectionBindingVersion = 1 as const
+
+/**
+ * One explicit, build-pinned value binding for a BPMN collection DataInput.
+ *
+ * **Details**
+ *
+ * `loopDataInputRef` is an IDREF, not an expression. This binding therefore
+ * remains separate from the BPMN model: it describes how the selected
+ * deployment derives that DataInput value from the durable execution and
+ * scope context. The expression and its exact evaluator build become part of
+ * the executable fingerprint.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const MultiInstanceCollectionBinding = Schema.Struct({
+  bindingVersion: Schema.Literal(MultiInstanceCollectionBindingVersion),
+  taskNodeId: Identifier,
+  dataInputRef: Identifier,
+  collectionExpression: BpmnModel.Expression
+}).annotate({
+  identifier: "WorkflowBpmnMultiInstanceCollectionBinding",
+  parseOptions: strictParseOptions
+})
+
+/**
+ * The decoded type of {@link MultiInstanceCollectionBinding}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type MultiInstanceCollectionBinding = Schema.Schema.Type<
+  typeof MultiInstanceCollectionBinding
+>
+
+/**
+ * Versioned input used to start one BPMN execution.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const InitializeCommand = Schema.Struct({
+  commandVersion: Schema.Literal(InitializeCommandVersion),
+  input: Schema.Json
+}).annotate({
+  identifier: "WorkflowBpmnInitializeCommand",
+  parseOptions: strictParseOptions
+})
+
+/**
+ * The decoded type of {@link InitializeCommand}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type InitializeCommand = Schema.Schema.Type<typeof InitializeCommand>
 
 /**
  * BPMN multi-instance runtime counters captured at one decision boundary.
@@ -205,6 +280,8 @@ export const TransitionEvent = Schema.Union([
   Schema.TaggedStruct("JournalStarted", {
     journalVersion: Schema.Literal(TransitionJournalVersion),
     model: BpmnExecutionState.ModelReference,
+    input: Schema.Json,
+    inputCanonicalBytes: ProtocolV2Wire.NonNegativeSafeInt,
     startedAt: ProtocolV2Wire.Timestamp
   }),
   Schema.TaggedStruct("ScopeEntered", {
@@ -322,6 +399,24 @@ export const TransitionEvent = Schema.Union([
     }),
     cardinality: NonNegativeInt
   }),
+  Schema.TaggedStruct("MultiInstanceCollectionEvaluated", {
+    groupId: Identifier,
+    activityId: Identifier,
+    activation: NonNegativeInt,
+    dataInputRef: Identifier,
+    expression: BpmnModel.Expression,
+    evaluatorBinding: BpmnExpression.EvaluatorBinding,
+    usage: Schema.Struct({
+      sourceUtf8Bytes: ProtocolV2Wire.NonNegativeSafeInt,
+      contextCanonicalBytes: ProtocolV2Wire.NonNegativeSafeInt,
+      steps: ProtocolV2Wire.NonNegativeSafeInt
+    }),
+    collectionCanonicalBytes: ProtocolV2Wire.NonNegativeSafeInt,
+    itemCanonicalBytes: Schema.Array(
+      ProtocolV2Wire.NonNegativeSafeInt
+    ),
+    items: Schema.Array(Schema.Json)
+  }),
   Schema.TaggedStruct("MultiInstanceGroupOpened", {
     groupId: Identifier,
     activityId: Identifier,
@@ -347,6 +442,7 @@ export const TransitionEvent = Schema.Union([
     activation: NonNegativeInt,
     itemIndex: NonNegativeInt,
     itemKey: Identifier,
+    output: Schema.optionalKey(Schema.Json),
     counters: MultiInstanceRuntimeCounters,
     completedAt: ProtocolV2Wire.Timestamp
   }),
@@ -372,20 +468,24 @@ export const TransitionEvent = Schema.Union([
     activation: NonNegativeInt,
     itemIndex: NonNegativeInt,
     itemKey: Identifier,
-    reason: Schema.Literals([
-      "completion-condition",
-      "boundary-error-caught",
-      "uncaught-bpmn-error",
-      "unmapped-business-failure",
-      "execution-cancelled"
-    ]),
+    reason: BpmnExecutionState.MultiInstanceClosureReason,
     terminatedAt: ProtocolV2Wire.Timestamp
+  }),
+  Schema.TaggedStruct("MultiInstanceItemNotGenerated", {
+    groupId: Identifier,
+    activityId: Identifier,
+    activation: NonNegativeInt,
+    itemIndex: NonNegativeInt,
+    itemKey: Identifier,
+    reason: BpmnExecutionState.MultiInstanceClosureReason,
+    notGeneratedAt: ProtocolV2Wire.Timestamp
   }),
   Schema.TaggedStruct("MultiInstanceGroupCompleted", {
     groupId: Identifier,
     activityId: Identifier,
     activation: NonNegativeInt,
     counters: MultiInstanceRuntimeCounters,
+    output: Schema.optionalKey(BpmnExecutionState.MultiInstanceOutput),
     reason: Schema.Literals([
       "all-completed",
       "completion-condition",
@@ -597,6 +697,20 @@ export interface MultiInstanceCardinalityEvaluationContext extends EvaluationCon
 }
 
 /**
+ * Resolution of one fixed collection DataInput before any member is generated.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export interface MultiInstanceCollectionEvaluationContext extends EvaluationContextBase {
+  readonly _tag: "MultiInstanceCollection"
+  readonly activity: BpmnModel.Task
+  readonly groupId: string
+  readonly groupActivation: number
+  readonly dataInputRef: string
+}
+
+/**
  * Evaluation of a multi-instance completion condition after one logical
  * member completion has committed.
  *
@@ -627,6 +741,7 @@ export type EvaluationContext =
   | SequenceFlowEvaluationContext
   | StandardLoopEvaluationContext
   | MultiInstanceCardinalityEvaluationContext
+  | MultiInstanceCollectionEvaluationContext
   | MultiInstanceCompletionEvaluationContext
 
 /**
@@ -653,7 +768,12 @@ export interface Services {
  */
 export const KernelLimits = Schema.Struct({
   maxAutomaticTransitions: PositiveInt,
-  maxMultiInstanceCardinality: PositiveInt
+  maxExecutionInputCanonicalBytes: PositiveInt,
+  maxMultiInstanceCardinality: PositiveInt,
+  maxMultiInstanceCollectionCanonicalBytes: PositiveInt,
+  maxMultiInstanceItemCanonicalBytes: PositiveInt,
+  maxMultiInstanceOutputCanonicalBytes: PositiveInt,
+  maxMultiInstanceItemOutputCanonicalBytes: PositiveInt
 }).annotate({
   identifier: "WorkflowBpmnKernelLimits",
   parseOptions: strictParseOptions
@@ -678,7 +798,11 @@ export const CompileOptions = Schema.Struct({
   rootProcessId: Identifier,
   limits: KernelLimits,
   evaluatorBindings: Schema.Array(BpmnExpression.EvaluatorBinding),
-  taskBindings: Schema.optionalKey(Schema.Array(BpmnActivityV3.TaskBinding))
+  taskBindings: Schema.optionalKey(Schema.Array(BpmnActivityV3.TaskBinding)),
+  dataDocument: Schema.optionalKey(BpmnData.BpmnDataDocument),
+  collectionBindings: Schema.optionalKey(
+    Schema.Array(MultiInstanceCollectionBinding)
+  )
 }).annotate({
   identifier: "WorkflowBpmnKernelCompileOptions",
   parseOptions: strictParseOptions
@@ -709,6 +833,8 @@ export const ExecutableFingerprintDocument = Schema.Struct({
   limits: KernelLimits,
   evaluatorBindings: Schema.Array(BpmnExpression.EvaluatorBinding),
   taskBindings: Schema.Array(BpmnActivityV3.TaskBinding),
+  dataDocument: Schema.NullOr(BpmnData.BpmnDataDocument),
+  collectionBindings: Schema.Array(MultiInstanceCollectionBinding),
   model: BpmnModel.BpmnModel
 }).annotate({
   identifier: "WorkflowBpmnExecutableFingerprintDocument",
@@ -737,6 +863,8 @@ export interface CompiledKernel {
   readonly profileId: string
   readonly evaluatorBindings: ReadonlyArray<BpmnExpression.EvaluatorBinding>
   readonly taskBindings: ReadonlyArray<BpmnActivityV3.TaskBinding>
+  readonly dataDocument: BpmnData.BpmnDataDocument | null
+  readonly collectionBindings: ReadonlyArray<MultiInstanceCollectionBinding>
   readonly rootProcessId: string
   readonly rootStartEventId: string
   readonly limits: KernelLimits
@@ -745,6 +873,10 @@ export interface CompiledKernel {
   readonly flowById: ReadonlyMap<string, BpmnModel.SequenceFlow>
   readonly orderedOutgoingByNodeId: ReadonlyMap<string, ReadonlyArray<string>>
   readonly taskBindingByTaskNodeId: ReadonlyMap<string, BpmnActivityV3.TaskBinding>
+  readonly collectionBindingByTaskNodeId: ReadonlyMap<
+    string,
+    MultiInstanceCollectionBinding
+  >
   readonly boundaryErrorByTaskNodeId: ReadonlyMap<string, BpmnModel.BoundaryEvent>
 }
 
@@ -753,6 +885,8 @@ interface CompiledStructure {
   readonly profileId: string
   readonly evaluatorBindings: ReadonlyArray<BpmnExpression.EvaluatorBinding>
   readonly taskBindings: ReadonlyArray<BpmnActivityV3.TaskBinding>
+  readonly dataDocument: BpmnData.BpmnDataDocument | null
+  readonly collectionBindings: ReadonlyArray<MultiInstanceCollectionBinding>
   readonly rootProcessId: string
   readonly rootStartEventId: string
   readonly limits: KernelLimits
@@ -764,6 +898,10 @@ interface CompiledStructure {
     ReadonlyArray<string>
   >
   readonly taskBindingByTaskNodeId: ReadonlyMap<string, BpmnActivityV3.TaskBinding>
+  readonly collectionBindingByTaskNodeId: ReadonlyMap<
+    string,
+    MultiInstanceCollectionBinding
+  >
   readonly boundaryErrorByTaskNodeId: ReadonlyMap<string, BpmnModel.BoundaryEvent>
 }
 
@@ -849,6 +987,32 @@ export type TaskOccurrenceCoordinates = Schema.Schema.Type<
   typeof TaskOccurrenceCoordinates
 >
 
+/**
+ * Frozen collection member value selected by one exact active Task wait.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const TaskCollectionItem = Schema.Struct({
+  dataInputRef: Identifier,
+  itemIndex: NonNegativeInt,
+  itemKey: Identifier,
+  item: Schema.Json
+}).annotate({
+  identifier: "WorkflowBpmnTaskCollectionItem",
+  parseOptions: strictParseOptions
+})
+
+/**
+ * The decoded type of {@link TaskCollectionItem}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type TaskCollectionItem = Schema.Schema.Type<
+  typeof TaskCollectionItem
+>
+
 const supportedScopeNode = (
   node: BpmnModel.FlowNode
 ): node is BpmnModel.SubProcess => node._tag === "SubProcess"
@@ -870,6 +1034,10 @@ const directClone = <A>(value: A): Mutable<A> => structuredClone(value) as Mutab
 const trustedKernels = new WeakMap<object, CompiledKernel>()
 const decodeCompileOptions = Schema.decodeUnknownResult(
   CompileOptions,
+  strictParseOptions
+)
+const decodeInitializeCommand = Schema.decodeUnknownResult(
+  InitializeCommand,
   strictParseOptions
 )
 const decodeCompleteTaskCommand = Schema.decodeUnknownResult(CompleteTaskCommand, strictParseOptions)
@@ -1265,6 +1433,112 @@ export const taskOccurrence = (
   )
 }
 
+/**
+ * Resolves the immutable collection item for one active multi-instance Task
+ * wait, or `undefined` when the wait is not collection-backed or does not
+ * declare a BPMN `inputDataItem`.
+ *
+ * **Details**
+ *
+ * The item is recovered only from validated durable state and exposed only
+ * when the BPMN model explicitly maps one scalar `inputDataItem`. Execution
+ * adapters use this accessor to compare a prepared native invocation's
+ * encoded input before the first activity dispatch.
+ *
+ * @category accessors
+ * @since 4.0.0
+ */
+export const taskCollectionItem = (
+  kernel: CompiledKernel,
+  stateInput: unknown,
+  targetInput: unknown
+): Result.Result<
+  TaskCollectionItem | undefined,
+  Diagnostic.CompilationError
+> => {
+  const resolvedKernel = resolveKernel(kernel)
+  if (Result.isFailure(resolvedKernel)) {
+    return Result.fail(resolvedKernel.failure)
+  }
+  const authority = resolvedKernel.success
+  const targetSnapshot = Json.snapshot(targetInput)
+  if (Result.isFailure(targetSnapshot)) {
+    return Result.fail(compilationError(error(
+      Codes.InvalidCommand,
+      targetSnapshot.failure.message,
+      ["target", ...targetSnapshot.failure.path]
+    )))
+  }
+  const decodedTarget = decodeCompleteTaskCommand(targetSnapshot.success)
+  if (Result.isFailure(decodedTarget)) {
+    return Result.fail(compilationError(error(
+      Codes.InvalidCommand,
+      "Invalid BPMN Task wait target",
+      ["target"],
+      { issue: String(decodedTarget.failure) }
+    )))
+  }
+  const target = targetSnapshot.success as unknown as CompleteTaskCommand
+  const validated = validateKernelState(authority, stateInput)
+  if (Result.isFailure(validated)) {
+    return Result.fail(validated.failure)
+  }
+  const state = validated.success
+  const token = state.tokens.find((candidate) => candidate.tokenId === target.tokenId)
+  if (
+    token === undefined ||
+    token.status !== "active" ||
+    token.scopeInstanceId !== target.scopeInstanceId ||
+    token.position._tag !== "AtNode" ||
+    token.position.nodeId !== target.taskNodeId
+  ) {
+    return Result.fail(compilationError(error(
+      Codes.InvalidCommand,
+      `Task wait '${target.tokenId}' is not active`,
+      ["target"]
+    )))
+  }
+  const activity = authority.nodeById.get(target.taskNodeId)
+  if (
+    activity?._tag !== "Task" ||
+    activity.loopCharacteristics?._tag !==
+      "MultiInstanceCharacteristics" ||
+    activity.loopCharacteristics.inputDataItem === undefined
+  ) {
+    return Result.succeed(undefined)
+  }
+  const branch = multiInstanceBranch(token.invocation)
+  if (branch === undefined) {
+    return Result.succeed(undefined)
+  }
+  const group = state.multiInstanceGroups.find((candidate) => candidate.groupId === branch.groupId)
+  if (group?.source._tag !== "Collection") {
+    return Result.succeed(undefined)
+  }
+  const member = group.members[branch.itemIndex]
+  const item = group.source.items[branch.itemIndex]
+  if (
+    group.status !== "active" ||
+    member === undefined ||
+    member.status !== "active" ||
+    member.itemKey !== branch.itemKey ||
+    member.tokenId !== token.tokenId ||
+    item === undefined
+  ) {
+    return Result.fail(compilationError(error(
+      Codes.InvalidCommand,
+      `Task wait '${target.tokenId}' has no exact active collection item`,
+      ["target", "tokenId"]
+    )))
+  }
+  return Result.succeed({
+    dataInputRef: group.source.dataInputRef,
+    itemIndex: member.index,
+    itemKey: member.itemKey,
+    item
+  })
+}
+
 const sameInvocation = (
   left: BpmnExecutionState.InvocationIdentity,
   right: BpmnExecutionState.InvocationIdentity
@@ -1285,6 +1559,22 @@ const sameJson = (left: unknown, right: unknown): boolean => {
     Result.isSuccess(rightSnapshot) &&
     Json.canonicalizeSnapshot(leftSnapshot.success) ===
       Json.canonicalizeSnapshot(rightSnapshot.success)
+}
+
+const canonicalUtf8Bytes = (
+  value: Schema.Json
+): Result.Result<number, Diagnostic.CompilationError> => {
+  try {
+    return Result.succeed(
+      new TextEncoder().encode(Json.canonicalizeSnapshot(value)).byteLength
+    )
+  } catch {
+    return Result.fail(compilationError(error(
+      Codes.InvalidKernelState,
+      "A durable JSON value could not be canonicalized",
+      []
+    )))
+  }
 }
 
 const standardLoopBranch = (
@@ -1373,6 +1663,24 @@ const validateKernelState = (
         actualExecutableFingerprint: state.model.executableFingerprint
       }
     ))
+  }
+  const inputBytes = canonicalUtf8Bytes(state.input)
+  if (Result.isFailure(inputBytes)) {
+    stateError(
+      "Execution input is not canonical strict JSON",
+      ["input"]
+    )
+  } else if (
+    inputBytes.success > kernel.limits.maxExecutionInputCanonicalBytes
+  ) {
+    stateError(
+      "Execution input exceeds the compiled canonical-byte limit",
+      ["input"],
+      {
+        actual: inputBytes.success,
+        maximum: kernel.limits.maxExecutionInputCanonicalBytes
+      }
+    )
   }
   if (
     state.status !== "active" &&
@@ -1687,11 +1995,10 @@ const validateKernelState = (
     const activity = kernel.nodeById.get(group.activityId)
     if (
       activity?._tag !== "Task" ||
-      activity.loopCharacteristics?._tag !== "MultiInstanceCharacteristics" ||
-      group.source._tag !== "Cardinality"
+      activity.loopCharacteristics?._tag !== "MultiInstanceCharacteristics"
     ) {
       stateError(
-        `Multi-instance group '${group.groupId}' is outside the executable fixed-cardinality Task profile`,
+        `Multi-instance group '${group.groupId}' is outside the executable fixed Task profile`,
         ["multiInstanceGroups", index]
       )
     }
@@ -1704,6 +2011,122 @@ const validateKernelState = (
           maximum: kernel.limits.maxMultiInstanceCardinality
         }
       )
+    }
+    for (
+      let memberIndex = 0;
+      memberIndex < group.members.length;
+      memberIndex++
+    ) {
+      const output = group.members[memberIndex]!.output
+      if (output === undefined) {
+        continue
+      }
+      const outputBytes = canonicalUtf8Bytes(output)
+      if (
+        Result.isFailure(outputBytes) ||
+        outputBytes.success >
+          kernel.limits.maxMultiInstanceItemOutputCanonicalBytes
+      ) {
+        stateError(
+          `Multi-instance member output '${group.groupId}:${memberIndex}' exceeds its compiled canonical-byte limit`,
+          [
+            "multiInstanceGroups",
+            index,
+            "members",
+            memberIndex,
+            "output"
+          ],
+          Result.isFailure(outputBytes)
+            ? undefined
+            : {
+              actual: outputBytes.success,
+              maximum: kernel.limits.maxMultiInstanceItemOutputCanonicalBytes
+            }
+        )
+      }
+    }
+    if (group.output !== undefined) {
+      const outputBytes = canonicalUtf8Bytes(
+        group.output.items as Schema.Json
+      )
+      if (
+        Result.isFailure(outputBytes) ||
+        outputBytes.success >
+          kernel.limits.maxMultiInstanceOutputCanonicalBytes
+      ) {
+        stateError(
+          `Multi-instance aggregate output '${group.groupId}' exceeds its compiled canonical-byte limit`,
+          ["multiInstanceGroups", index, "output", "items"],
+          Result.isFailure(outputBytes)
+            ? undefined
+            : {
+              actual: outputBytes.success,
+              maximum: kernel.limits.maxMultiInstanceOutputCanonicalBytes
+            }
+        )
+      }
+    }
+    if (group.source._tag === "Collection") {
+      const binding = kernel.collectionBindingByTaskNodeId.get(group.activityId)
+      if (
+        binding === undefined ||
+        binding.dataInputRef !== group.source.dataInputRef
+      ) {
+        stateError(
+          `Collection group '${group.groupId}' does not match its compiled DataInput binding`,
+          ["multiInstanceGroups", index, "source", "dataInputRef"]
+        )
+      }
+      const collectionBytes = canonicalUtf8Bytes(
+        group.source.items as Schema.Json
+      )
+      if (
+        Result.isFailure(collectionBytes) ||
+        collectionBytes.success >
+          kernel.limits.maxMultiInstanceCollectionCanonicalBytes
+      ) {
+        stateError(
+          `Collection group '${group.groupId}' exceeds its compiled canonical-byte limit`,
+          ["multiInstanceGroups", index, "source", "items"],
+          Result.isFailure(collectionBytes)
+            ? undefined
+            : {
+              actual: collectionBytes.success,
+              maximum: kernel.limits.maxMultiInstanceCollectionCanonicalBytes
+            }
+        )
+      }
+      for (
+        let itemIndex = 0;
+        itemIndex < group.source.items.length;
+        itemIndex++
+      ) {
+        const itemBytes = canonicalUtf8Bytes(
+          group.source.items[itemIndex]!
+        )
+        if (
+          Result.isFailure(itemBytes) ||
+          itemBytes.success >
+            kernel.limits.maxMultiInstanceItemCanonicalBytes
+        ) {
+          stateError(
+            `Collection item '${group.groupId}:${itemIndex}' exceeds its compiled canonical-byte limit`,
+            [
+              "multiInstanceGroups",
+              index,
+              "source",
+              "items",
+              itemIndex
+            ],
+            Result.isFailure(itemBytes)
+              ? undefined
+              : {
+                actual: itemBytes.success,
+                maximum: kernel.limits.maxMultiInstanceItemCanonicalBytes
+              }
+          )
+        }
+      }
     }
   }
 
@@ -1903,6 +2326,14 @@ type EvaluationTarget =
     readonly activation: number
   }
   | {
+    readonly _tag: "MultiInstanceCollection"
+    readonly activity: BpmnModel.Task
+    readonly groupId: string
+    readonly activation: number
+    readonly dataInputRef: string
+    readonly expression: BpmnModel.Expression
+  }
+  | {
     readonly _tag: "MultiInstanceCompletionCondition"
     readonly activity: BpmnModel.Task
     readonly group: MutableMultiInstanceGroup
@@ -1943,6 +2374,8 @@ const evaluateExpression = (
     ? `standard loop on activity '${targetId}'`
     : target._tag === "MultiInstanceCardinality"
     ? `multi-instance cardinality on activity '${targetId}'`
+    : target._tag === "MultiInstanceCollection"
+    ? `multi-instance collection on activity '${targetId}'`
     : `multi-instance completion condition on activity '${targetId}'`
   const targetPath: ReadonlyArray<Diagnostic.PathSegment> = target._tag === "SequenceFlowCondition"
     ? ["sequenceFlows"]
@@ -1961,6 +2394,13 @@ const evaluateExpression = (
       activityId: targetId,
       groupId: target.groupId,
       activation: target.activation
+    }
+    : target._tag === "MultiInstanceCollection"
+    ? {
+      activityId: targetId,
+      groupId: target.groupId,
+      activation: target.activation,
+      dataInputRef: target.dataInputRef
     }
     : {
       activityId: targetId,
@@ -2077,6 +2517,17 @@ const evaluateExpression = (
       scopeInstance: frozenScope,
       state: frozenState
     }
+    : target._tag === "MultiInstanceCollection"
+    ? {
+      _tag: "MultiInstanceCollection" as const,
+      expression,
+      activity: target.activity,
+      groupId: target.groupId,
+      groupActivation: target.activation,
+      dataInputRef: target.dataInputRef,
+      scopeInstance: frozenScope,
+      state: frozenState
+    }
     : {
       _tag: "MultiInstanceCompletionCondition" as const,
       expression,
@@ -2146,6 +2597,8 @@ const evaluateExpression = (
     context: contextSnapshot.success,
     expectedResult: target._tag === "MultiInstanceCardinality"
       ? "non-negative-integer"
+      : target._tag === "MultiInstanceCollection"
+      ? "json-array"
       : "boolean"
   }
 
@@ -2220,6 +2673,8 @@ const evaluateExpression = (
       ? typeof outcome.result !== "number" ||
         !Number.isSafeInteger(outcome.result) ||
         outcome.result < 0
+      : target._tag === "MultiInstanceCollection"
+      ? !Array.isArray(outcome.result)
       : typeof outcome.result !== "boolean"
   ) {
     return Result.fail(compilationError(error(
@@ -2230,9 +2685,64 @@ const evaluateExpression = (
         ...targetDetails as Record<string, Schema.Json>,
         expectedResult: target._tag === "MultiInstanceCardinality"
           ? "non-negative-integer"
+          : target._tag === "MultiInstanceCollection"
+          ? "json-array"
           : "boolean"
       }
     )))
+  }
+  let collectionCanonicalBytes: number | undefined
+  let itemCanonicalBytes: Array<number> | undefined
+  if (target._tag === "MultiInstanceCollection") {
+    const items = outcome.result as ReadonlyArray<Schema.Json>
+    const measuredCollection = canonicalUtf8Bytes(
+      items as Schema.Json
+    )
+    if (Result.isFailure(measuredCollection)) {
+      return Result.fail(measuredCollection.failure)
+    }
+    if (
+      items.length > kernel.limits.maxMultiInstanceCardinality ||
+      measuredCollection.success >
+        kernel.limits.maxMultiInstanceCollectionCanonicalBytes
+    ) {
+      return Result.fail(compilationError(error(
+        Codes.InvalidKernelLimits,
+        `Multi-instance collection for task '${target.activity.id}' exceeds its compiled limit`,
+        ["limits"],
+        {
+          itemCount: items.length,
+          maximumItemCount: kernel.limits.maxMultiInstanceCardinality,
+          canonicalBytes: measuredCollection.success,
+          maximumCanonicalBytes: kernel.limits.maxMultiInstanceCollectionCanonicalBytes
+        }
+      )))
+    }
+    const measuredItems: Array<number> = []
+    for (let index = 0; index < items.length; index++) {
+      const measured = canonicalUtf8Bytes(items[index]!)
+      if (Result.isFailure(measured)) {
+        return Result.fail(measured.failure)
+      }
+      if (
+        measured.success >
+          kernel.limits.maxMultiInstanceItemCanonicalBytes
+      ) {
+        return Result.fail(compilationError(error(
+          Codes.InvalidKernelLimits,
+          `Multi-instance collection item '${index}' for task '${target.activity.id}' exceeds its compiled limit`,
+          ["limits", "maxMultiInstanceItemCanonicalBytes"],
+          {
+            itemIndex: index,
+            actual: measured.success,
+            maximum: kernel.limits.maxMultiInstanceItemCanonicalBytes
+          }
+        )))
+      }
+      measuredItems.push(measured.success)
+    }
+    collectionCanonicalBytes = measuredCollection.success
+    itemCanonicalBytes = measuredItems
   }
   const usage = {
     sourceUtf8Bytes,
@@ -2279,6 +2789,22 @@ const evaluateExpression = (
       })
       break
     }
+    case "MultiInstanceCollection": {
+      recordEvent(journal, {
+        _tag: "MultiInstanceCollectionEvaluated",
+        groupId: target.groupId,
+        activityId: target.activity.id,
+        activation: target.activation,
+        dataInputRef: target.dataInputRef,
+        expression,
+        evaluatorBinding,
+        usage,
+        collectionCanonicalBytes: collectionCanonicalBytes!,
+        itemCanonicalBytes: itemCanonicalBytes!,
+        items: outcome.result as Array<Schema.Json>
+      })
+      break
+    }
     case "MultiInstanceCompletionCondition": {
       recordEvent(journal, {
         _tag: "MultiInstanceCompletionConditionEvaluated",
@@ -2303,7 +2829,11 @@ const evaluateBooleanExpression = (
   kernel: CompiledKernel,
   services: Services,
   expression: BpmnModel.Expression,
-  target: Exclude<EvaluationTarget, { readonly _tag: "MultiInstanceCardinality" }>,
+  target: Exclude<
+    EvaluationTarget,
+    | { readonly _tag: "MultiInstanceCardinality" }
+    | { readonly _tag: "MultiInstanceCollection" }
+  >,
   scopeInstance: MutableScopeInstance,
   state: MutableState,
   journal: Array<TransitionEvent>
@@ -2886,19 +3416,36 @@ const startMultiInstanceMember = (
   })
 }
 
-type MultiInstanceTerminationReason = NonNullable<
-  BpmnExecutionState.MultiInstanceMember["terminationReason"]
->
+type MultiInstanceClosureReason = BpmnExecutionState.MultiInstanceClosureReason
 
-const terminateMultiInstanceMember = (
+const closeMultiInstanceMember = (
   state: MutableState,
   group: MutableMultiInstanceGroup,
   member: MutableMultiInstanceMember,
-  reason: MultiInstanceTerminationReason,
+  reason: MultiInstanceClosureReason,
   journal: Array<TransitionEvent>,
   now: ProtocolV2Wire.Timestamp
 ): void => {
-  if (member.status === "completed" || member.status === "terminated") {
+  if (
+    member.status === "completed" ||
+    member.status === "terminated" ||
+    member.status === "not-generated"
+  ) {
+    return
+  }
+  if (member.status === "pending") {
+    member.status = "not-generated"
+    member.nonGenerationReason = reason
+    recordEvent(journal, {
+      _tag: "MultiInstanceItemNotGenerated",
+      groupId: group.groupId,
+      activityId: group.activityId,
+      activation: group.activation,
+      itemIndex: member.index,
+      itemKey: member.itemKey,
+      reason,
+      notGeneratedAt: now
+    })
     return
   }
   const token = member.tokenId === undefined
@@ -2932,12 +3479,70 @@ const terminateMultiInstanceMember = (
 }
 
 const completeMultiInstanceGroup = (
+  kernel: CompiledKernel,
   group: MutableMultiInstanceGroup,
   activity: BpmnModel.Task,
   reason: "all-completed" | "completion-condition" | "empty",
   journal: Array<TransitionEvent>,
   now: ProtocolV2Wire.Timestamp
-): void => {
+): Result.Result<void, Diagnostic.CompilationError> => {
+  const characteristics = activity.loopCharacteristics
+  const dataOutputRef = characteristics?._tag === "MultiInstanceCharacteristics"
+    ? characteristics.loopDataOutputRef
+    : undefined
+  if (dataOutputRef !== undefined) {
+    if (reason === "completion-condition") {
+      return Result.fail(compilationError(error(
+        Codes.InvalidExecutableStructure,
+        `Collection output '${dataOutputRef}' requires complete all-member success`,
+        ["multiInstanceGroups"]
+      )))
+    }
+    const items: Array<Schema.Json> = []
+    for (const member of group.members) {
+      if (
+        member.status !== "completed" ||
+        member.output === undefined
+      ) {
+        return Result.fail(compilationError(error(
+          Codes.InvalidCommand,
+          `Multi-instance member '${group.groupId}:${member.index}' has no output for '${dataOutputRef}'`,
+          ["multiInstanceGroups"]
+        )))
+      }
+      const measured = canonicalUtf8Bytes(member.output)
+      if (
+        Result.isFailure(measured) ||
+        measured.success >
+          kernel.limits.maxMultiInstanceItemOutputCanonicalBytes
+      ) {
+        return Result.fail(compilationError(error(
+          Codes.InvalidKernelLimits,
+          `Multi-instance output item '${group.groupId}:${member.index}' exceeds its compiled limit`,
+          ["limits", "maxMultiInstanceItemOutputCanonicalBytes"]
+        )))
+      }
+      items.push(member.output)
+    }
+    const measured = canonicalUtf8Bytes(items as Schema.Json)
+    if (
+      Result.isFailure(measured) ||
+      measured.success >
+        kernel.limits.maxMultiInstanceOutputCanonicalBytes
+    ) {
+      return Result.fail(compilationError(error(
+        Codes.InvalidKernelLimits,
+        `Multi-instance output collection '${dataOutputRef}' exceeds its compiled limit`,
+        ["limits", "maxMultiInstanceOutputCanonicalBytes"]
+      )))
+    }
+    group.output = {
+      dataOutputRef,
+      items: directClone(items) as Mutable<
+        BpmnExecutionState.MultiInstanceOutput["items"]
+      >
+    }
+  }
   group.status = "completed"
   group.completionReason = reason
   group.closedAt = now
@@ -2947,21 +3552,29 @@ const completeMultiInstanceGroup = (
     activityId: activity.id,
     activation: group.activation,
     counters: multiInstanceCounters(group),
+    ...(group.output === undefined
+      ? undefined
+      : { output: group.output }),
     reason,
     completedAt: now
   })
+  return Result.succeed(undefined)
 }
 
 const cancelMultiInstanceGroup = (
   state: MutableState,
   group: MutableMultiInstanceGroup,
   sourceTokenId: string,
-  reason: Exclude<MultiInstanceTerminationReason, "completion-condition">,
+  reason: Exclude<MultiInstanceClosureReason, "completion-condition">,
   journal: Array<TransitionEvent>,
   now: ProtocolV2Wire.Timestamp
 ): void => {
   for (const member of group.members) {
-    if (member.status === "completed" || member.status === "terminated") {
+    if (
+      member.status === "completed" ||
+      member.status === "terminated" ||
+      member.status === "not-generated"
+    ) {
       continue
     }
     const token = member.tokenId === undefined
@@ -2972,7 +3585,7 @@ const cancelMultiInstanceGroup = (
     }
   }
   for (const member of group.members) {
-    terminateMultiInstanceMember(
+    closeMultiInstanceMember(
       state,
       group,
       member,
@@ -3007,9 +3620,14 @@ const openMultiInstance = (
   const characteristics = activity.loopCharacteristics
   if (
     characteristics?._tag !== "MultiInstanceCharacteristics" ||
-    characteristics.cardinality === undefined ||
-    characteristics.loopDataInputRef !== undefined ||
-    characteristics.loopDataOutputRef !== undefined ||
+    (
+      characteristics.cardinality === undefined &&
+      characteristics.loopDataInputRef === undefined
+    ) ||
+    (
+      characteristics.cardinality !== undefined &&
+      characteristics.loopDataInputRef !== undefined
+    ) ||
     (characteristics.behavior !== undefined && characteristics.behavior !== "all")
   ) {
     return Result.fail(compilationError(error(
@@ -3027,46 +3645,102 @@ const openMultiInstance = (
     state.multiInstanceGroups.map((candidate) => candidate.groupId),
     "multi-instance-group:"
   )
-  const evaluated = evaluateExpression(
-    kernel,
-    services,
-    characteristics.cardinality,
-    {
-      _tag: "MultiInstanceCardinality",
-      activity,
-      groupId,
-      activation
-    },
-    scope,
-    state,
-    journal
-  )
-  if (Result.isFailure(evaluated)) {
-    return Result.fail(evaluated.failure)
-  }
-  const cardinality = evaluated.success
-  if (
-    typeof cardinality !== "number" ||
-    !Number.isSafeInteger(cardinality) ||
-    cardinality < 0
-  ) {
-    return Result.fail(compilationError(error(
-      Codes.EvaluationFailed,
-      `Multi-instance cardinality for task '${activity.id}' must be a non-negative safe integer`,
-      ["flowNodes"]
-    )))
-  }
-  if (cardinality > kernel.limits.maxMultiInstanceCardinality) {
-    return Result.fail(compilationError(error(
-      Codes.InvalidKernelLimits,
-      `Multi-instance cardinality '${cardinality}' for task '${activity.id}' exceeds the compiled limit`,
-      ["limits", "maxMultiInstanceCardinality"],
+  let source: BpmnExecutionState.MultiInstanceSource
+  if (characteristics.cardinality !== undefined) {
+    const evaluated = evaluateExpression(
+      kernel,
+      services,
+      characteristics.cardinality,
       {
-        actual: cardinality,
-        maximum: kernel.limits.maxMultiInstanceCardinality
-      }
-    )))
+        _tag: "MultiInstanceCardinality",
+        activity,
+        groupId,
+        activation
+      },
+      scope,
+      state,
+      journal
+    )
+    if (Result.isFailure(evaluated)) {
+      return Result.fail(evaluated.failure)
+    }
+    const cardinality = evaluated.success
+    if (
+      typeof cardinality !== "number" ||
+      !Number.isSafeInteger(cardinality) ||
+      cardinality < 0
+    ) {
+      return Result.fail(compilationError(error(
+        Codes.EvaluationFailed,
+        `Multi-instance cardinality for task '${activity.id}' must be a non-negative safe integer`,
+        ["flowNodes"]
+      )))
+    }
+    if (cardinality > kernel.limits.maxMultiInstanceCardinality) {
+      return Result.fail(compilationError(error(
+        Codes.InvalidKernelLimits,
+        `Multi-instance cardinality '${cardinality}' for task '${activity.id}' exceeds the compiled limit`,
+        ["limits", "maxMultiInstanceCardinality"],
+        {
+          actual: cardinality,
+          maximum: kernel.limits.maxMultiInstanceCardinality
+        }
+      )))
+    }
+    source = {
+      _tag: "Cardinality",
+      value: cardinality
+    }
+  } else {
+    const dataInputRef = characteristics.loopDataInputRef!
+    const binding = kernel.collectionBindingByTaskNodeId.get(activity.id)
+    if (
+      binding === undefined ||
+      binding.dataInputRef !== dataInputRef
+    ) {
+      return Result.fail(compilationError(error(
+        Codes.InvalidExecutableStructure,
+        `Task '${activity.id}' has no exact collection DataInput binding`,
+        ["flowNodes"]
+      )))
+    }
+    const evaluated = evaluateExpression(
+      kernel,
+      services,
+      binding.collectionExpression,
+      {
+        _tag: "MultiInstanceCollection",
+        activity,
+        groupId,
+        activation,
+        dataInputRef,
+        expression: binding.collectionExpression
+      },
+      scope,
+      state,
+      journal
+    )
+    if (
+      Result.isFailure(evaluated) ||
+      !Array.isArray(evaluated.success)
+    ) {
+      return Result.isFailure(evaluated)
+        ? Result.fail(evaluated.failure)
+        : Result.fail(compilationError(error(
+          Codes.EvaluationFailed,
+          `Multi-instance DataInput '${dataInputRef}' for task '${activity.id}' must resolve to a JSON array`,
+          ["flowNodes"]
+        )))
+    }
+    source = {
+      _tag: "Collection",
+      dataInputRef,
+      items: evaluated.success
+    }
   }
+  const cardinality = source._tag === "Cardinality"
+    ? source.value
+    : source.items.length
   const members: Array<MutableMultiInstanceMember> = Array.from(
     { length: cardinality },
     (_, index) => ({
@@ -3082,10 +3756,7 @@ const openMultiInstance = (
     scopeInstanceId: scope.scopeInstanceId,
     activation,
     mode: characteristics.mode,
-    source: {
-      _tag: "Cardinality",
-      value: cardinality
-    },
+    source: directClone(source),
     members,
     completedInstanceCount: 0,
     status: "active",
@@ -3105,13 +3776,17 @@ const openMultiInstance = (
     openedAt: group.openedAt
   })
   if (cardinality === 0) {
-    completeMultiInstanceGroup(
+    const completed = completeMultiInstanceGroup(
+      kernel,
       group,
       activity,
       "empty",
       journal,
       services.now
     )
+    if (Result.isFailure(completed)) {
+      return Result.fail(completed.failure)
+    }
     return routeActivityOutgoing(
       kernel,
       services,
@@ -3145,7 +3820,8 @@ const completeMultiInstanceMember = (
   activity: BpmnModel.Task,
   scope: MutableScopeInstance,
   token: MutableToken,
-  journal: Array<TransitionEvent>
+  journal: Array<TransitionEvent>,
+  output?: Schema.Json
 ): Result.Result<void, Diagnostic.CompilationError> => {
   const characteristics = activity.loopCharacteristics
   const branch = multiInstanceBranch(token.invocation)
@@ -3174,6 +3850,21 @@ const completeMultiInstanceMember = (
   }
   member.status = "completed"
   member.endedAt = services.now
+  if (output !== undefined) {
+    const measuredOutput = canonicalUtf8Bytes(output)
+    if (
+      Result.isFailure(measuredOutput) ||
+      measuredOutput.success >
+        kernel.limits.maxMultiInstanceItemOutputCanonicalBytes
+    ) {
+      return Result.fail(compilationError(error(
+        Codes.InvalidKernelLimits,
+        `Multi-instance member output '${group.groupId}:${member.index}' exceeds its compiled limit`,
+        ["limits", "maxMultiInstanceItemOutputCanonicalBytes"]
+      )))
+    }
+    member.output = directClone(output)
+  }
   group.completedInstanceCount++
   recordEvent(journal, {
     _tag: "MultiInstanceItemCompleted",
@@ -3182,6 +3873,9 @@ const completeMultiInstanceMember = (
     activation: group.activation,
     itemIndex: member.index,
     itemKey: member.itemKey,
+    ...(member.output === undefined
+      ? undefined
+      : { output: member.output }),
     counters: multiInstanceCounters(group),
     completedAt: services.now
   })
@@ -3206,7 +3900,11 @@ const completeMultiInstanceMember = (
     }
     if (evaluated.success) {
       for (const remaining of group.members) {
-        if (remaining.status === "completed" || remaining.status === "terminated") {
+        if (
+          remaining.status === "completed" ||
+          remaining.status === "terminated" ||
+          remaining.status === "not-generated"
+        ) {
           continue
         }
         const remainingToken = remaining.tokenId === undefined
@@ -3222,7 +3920,7 @@ const completeMultiInstanceMember = (
         }
       }
       for (const remaining of group.members) {
-        terminateMultiInstanceMember(
+        closeMultiInstanceMember(
           state,
           group,
           remaining,
@@ -3231,13 +3929,17 @@ const completeMultiInstanceMember = (
           services.now
         )
       }
-      completeMultiInstanceGroup(
+      const completed = completeMultiInstanceGroup(
+        kernel,
         group,
         activity,
         "completion-condition",
         journal,
         services.now
       )
+      if (Result.isFailure(completed)) {
+        return Result.fail(completed.failure)
+      }
       return routeActivityOutgoing(
         kernel,
         services,
@@ -3250,13 +3952,17 @@ const completeMultiInstanceMember = (
   }
 
   if (group.completedInstanceCount === group.members.length) {
-    completeMultiInstanceGroup(
+    const completed = completeMultiInstanceGroup(
+      kernel,
       group,
       activity,
       "all-completed",
       journal,
       services.now
     )
+    if (Result.isFailure(completed)) {
+      return Result.fail(completed.failure)
+    }
     return routeActivityOutgoing(
       kernel,
       services,
@@ -4016,12 +4722,20 @@ type PendingMultiInstanceTransition =
     readonly transitionedAt: ProtocolV2Wire.Timestamp
   }
   | {
+    readonly kind: "collection"
+    readonly activity: BpmnModel.Task
+    readonly scopeInstanceId: string
+    readonly groupId: string
+    readonly activation: number
+    readonly transitionedAt: ProtocolV2Wire.Timestamp
+  }
+  | {
     readonly kind: "open"
     readonly activity: BpmnModel.Task
     readonly scopeInstanceId: string
     readonly groupId: string
     readonly activation: number
-    readonly cardinality: number
+    readonly source: BpmnExecutionState.MultiInstanceSource
     readonly transitionedAt: ProtocolV2Wire.Timestamp
   }
   | {
@@ -4037,6 +4751,7 @@ type PendingMultiInstanceTransition =
     readonly groupId: string
     readonly itemIndex: number
     readonly itemKey: string
+    readonly output?: Schema.Json | undefined
     readonly transitionedAt: ProtocolV2Wire.Timestamp
   }
   | {
@@ -4126,12 +4841,14 @@ const journalFailure = (
 
 const emptyReplayState = (
   kernel: CompiledKernel,
+  input: Schema.Json,
   startedAt: ProtocolV2Wire.Timestamp
 ): MutableState => ({
   stateKind: "BpmnExecutionState",
   stateVersion: BpmnExecutionState.BpmnExecutionStateVersion,
   model: directClone(kernel.modelReference),
   status: "active",
+  input: directClone(input),
   startedAt,
   extensionElements: [],
   scopeInstances: [],
@@ -4263,7 +4980,23 @@ const replayJournal = (
     )
   }
 
-  const state = emptyReplayState(kernel, header.startedAt)
+  const measuredInput = canonicalUtf8Bytes(header.input)
+  if (
+    Result.isFailure(measuredInput) ||
+    measuredInput.success !== header.inputCanonicalBytes ||
+    measuredInput.success >
+      kernel.limits.maxExecutionInputCanonicalBytes
+  ) {
+    return journalFailure(
+      0,
+      "Transition-journal execution input has invalid canonical-byte evidence"
+    )
+  }
+  const state = emptyReplayState(
+    kernel,
+    header.input,
+    header.startedAt
+  )
   let pendingEmissions: Array<ExpectedEmission> = []
   let pendingRoute: PendingRoute | undefined
   let pendingScopeEntry: PendingScopeEntry | undefined
@@ -4289,6 +5022,19 @@ const replayJournal = (
       position: { _tag: "OnSequenceFlow", sequenceFlowId },
       ...(createdAt === undefined ? undefined : { createdAt })
     }))
+  }
+  const expectedMemberClosureTag = (
+    groupId: string,
+    itemIndex: number | undefined
+  ):
+    | "MultiInstanceItemTerminated"
+    | "MultiInstanceItemNotGenerated" =>
+  {
+    const group = state.multiInstanceGroups.find((candidate) => candidate.groupId === groupId)
+    return itemIndex !== undefined &&
+        group?.members[itemIndex]?.status === "pending"
+      ? "MultiInstanceItemNotGenerated"
+      : "MultiInstanceItemTerminated"
   }
 
   for (let index = 1; index < events.length; index++) {
@@ -4321,6 +5067,8 @@ const replayJournal = (
       ? event.completedAt
       : event._tag === "MultiInstanceItemTerminated"
       ? event.terminatedAt
+      : event._tag === "MultiInstanceItemNotGenerated"
+      ? event.notGeneratedAt
       : event._tag === "MultiInstanceGroupCompleted"
       ? event.completedAt
       : event._tag === "MultiInstanceGroupCancelled"
@@ -4403,6 +5151,8 @@ const replayJournal = (
       const pending = pendingMultiInstanceTransition
       const expectedTag = pending.kind === "cardinality"
         ? "MultiInstanceCardinalityEvaluated"
+        : pending.kind === "collection"
+        ? "MultiInstanceCollectionEvaluated"
         : pending.kind === "open"
         ? "MultiInstanceGroupOpened"
         : pending.kind === "start-items"
@@ -4416,7 +5166,10 @@ const replayJournal = (
         : pending.tokenIds.length > 0
         ? "TokenWithdrawn"
         : pending.itemIndexes.length > 0
-        ? "MultiInstanceItemTerminated"
+        ? expectedMemberClosureTag(
+          pending.groupId,
+          pending.itemIndexes[0]
+        )
         : pending.kind === "terminate-and-finish"
         ? "MultiInstanceGroupCompleted"
         : "MultiInstanceGroupCancelled"
@@ -4454,7 +5207,10 @@ const replayJournal = (
         ? "LoopFrameCancelled"
         : pendingFailureCleanup.multiInstanceGroups.length > 0 &&
             pendingFailureCleanup.multiInstanceGroups[0]!.itemIndexes.length > 0
-        ? "MultiInstanceItemTerminated"
+        ? expectedMemberClosureTag(
+          pendingFailureCleanup.multiInstanceGroups[0]!.groupId,
+          pendingFailureCleanup.multiInstanceGroups[0]!.itemIndexes[0]
+        )
         : pendingFailureCleanup.multiInstanceGroups.length > 0
         ? "MultiInstanceGroupCancelled"
         : pendingFailureCleanup.interruptedScopeIds.length > 0
@@ -5003,7 +5759,132 @@ const replayJournal = (
           scopeInstanceId: pending.scopeInstanceId,
           groupId: pending.groupId,
           activation: pending.activation,
-          cardinality: event.cardinality,
+          source: {
+            _tag: "Cardinality",
+            value: event.cardinality
+          },
+          transitionedAt: pending.transitionedAt
+        }
+        break
+      }
+
+      case "MultiInstanceCollectionEvaluated": {
+        const pending = pendingMultiInstanceTransition
+        if (pending?.kind !== "collection") {
+          return journalFailure(
+            index,
+            `Multi-instance collection for '${event.groupId}' has no task-arrival cause`
+          )
+        }
+        const characteristics = pending.activity.loopCharacteristics
+        const dataInputRef = characteristics?._tag === "MultiInstanceCharacteristics"
+          ? characteristics.loopDataInputRef
+          : undefined
+        const binding = kernel.collectionBindingByTaskNodeId.get(
+          pending.activity.id
+        )
+        const expression = binding?.collectionExpression
+        const scope = findScope(state, pending.scopeInstanceId)
+        const expectedBinding = expression === undefined
+          ? undefined
+          : kernel.evaluatorBindings.find((candidate) =>
+            candidate.language === expression.language &&
+            candidate.languageVersion === expression.version
+          )
+        if (
+          dataInputRef === undefined ||
+          binding === undefined ||
+          expression === undefined ||
+          scope === undefined ||
+          scope.status !== "active" ||
+          expectedBinding === undefined ||
+          event.groupId !== pending.groupId ||
+          event.activityId !== pending.activity.id ||
+          event.activation !== pending.activation ||
+          event.dataInputRef !== dataInputRef ||
+          event.items.length >
+            kernel.limits.maxMultiInstanceCardinality ||
+          event.itemCanonicalBytes.length !== event.items.length ||
+          !sameExpression(event.expression, expression) ||
+          BpmnExpression.evaluatorBindingKey(event.evaluatorBinding) !==
+            BpmnExpression.evaluatorBindingKey(expectedBinding)
+        ) {
+          return journalFailure(
+            index,
+            `Multi-instance collection for '${event.groupId}' is out of order or invalid`
+          )
+        }
+        const contextSnapshot = Json.snapshot({
+          _tag: "MultiInstanceCollection",
+          expression,
+          activity: pending.activity,
+          groupId: pending.groupId,
+          groupActivation: pending.activation,
+          dataInputRef,
+          scopeInstance: scope,
+          state
+        })
+        if (Result.isFailure(contextSnapshot)) {
+          return journalFailure(
+            index,
+            `Multi-instance collection for '${event.groupId}' has no canonical context`
+          )
+        }
+        let sourceUtf8Bytes: number
+        let contextCanonicalBytes: number
+        try {
+          sourceUtf8Bytes = new TextEncoder().encode(expression.source).byteLength
+          contextCanonicalBytes = new TextEncoder().encode(
+            Json.canonicalizeSnapshot(contextSnapshot.success)
+          ).byteLength
+        } catch {
+          return journalFailure(
+            index,
+            `Multi-instance collection for '${event.groupId}' has invalid usage evidence`
+          )
+        }
+        const collectionBytes = canonicalUtf8Bytes(
+          event.items as Schema.Json
+        )
+        const itemBytes = event.items.map((item) => canonicalUtf8Bytes(item))
+        if (
+          event.usage.sourceUtf8Bytes !== sourceUtf8Bytes ||
+          event.usage.contextCanonicalBytes !== contextCanonicalBytes ||
+          event.usage.steps > expectedBinding.limits.maxSteps ||
+          sourceUtf8Bytes > expectedBinding.limits.maxSourceUtf8Bytes ||
+          contextCanonicalBytes >
+            expectedBinding.limits.maxContextCanonicalBytes ||
+          Result.isFailure(collectionBytes) ||
+          collectionBytes.success !== event.collectionCanonicalBytes ||
+          collectionBytes.success >
+            kernel.limits.maxMultiInstanceCollectionCanonicalBytes ||
+          itemBytes.some(Result.isFailure) ||
+          itemBytes.some((measured, itemIndex) =>
+            Result.isSuccess(measured) &&
+            (
+              measured.success !==
+                event.itemCanonicalBytes[itemIndex] ||
+              measured.success >
+                kernel.limits.maxMultiInstanceItemCanonicalBytes
+            )
+          )
+        ) {
+          return journalFailure(
+            index,
+            `Multi-instance collection for '${event.groupId}' has invalid usage or size evidence`
+          )
+        }
+        pendingMultiInstanceTransition = {
+          kind: "open",
+          activity: pending.activity,
+          scopeInstanceId: pending.scopeInstanceId,
+          groupId: pending.groupId,
+          activation: pending.activation,
+          source: {
+            _tag: "Collection",
+            dataInputRef,
+            items: directClone(event.items)
+          },
           transitionedAt: pending.transitionedAt
         }
         break
@@ -5019,8 +5900,11 @@ const replayJournal = (
         }
         const characteristics = pending.activity.loopCharacteristics
         const scope = findScope(state, pending.scopeInstanceId)
+        const cardinality = pending.source._tag === "Cardinality"
+          ? pending.source.value
+          : pending.source.items.length
         const expectedKeys = Array.from(
-          { length: pending.cardinality },
+          { length: cardinality },
           (_, itemIndex) => `item:${itemIndex}`
         )
         if (
@@ -5033,8 +5917,7 @@ const replayJournal = (
           event.scopeInstanceId !== pending.scopeInstanceId ||
           event.activation !== pending.activation ||
           event.mode !== characteristics.mode ||
-          event.source._tag !== "Cardinality" ||
-          event.source.value !== pending.cardinality ||
+          !sameJson(event.source, pending.source) ||
           !sameStringArray(event.itemKeys, expectedKeys) ||
           event.openedAt !== pending.transitionedAt
         ) {
@@ -5063,7 +5946,7 @@ const replayJournal = (
           status: "active",
           openedAt: event.openedAt
         })
-        pendingMultiInstanceTransition = pending.cardinality === 0
+        pendingMultiInstanceTransition = cardinality === 0
           ? {
             kind: "finish",
             activity: pending.activity,
@@ -5169,6 +6052,13 @@ const replayJournal = (
           event.activation !== group.activation ||
           event.itemIndex !== pending.itemIndex ||
           event.itemKey !== pending.itemKey ||
+          !(
+            event.output === undefined &&
+              pending.output === undefined ||
+            event.output !== undefined &&
+              pending.output !== undefined &&
+              sameJson(event.output, pending.output)
+          ) ||
           event.completedAt !== pending.transitionedAt
         ) {
           return journalFailure(
@@ -5178,6 +6068,20 @@ const replayJournal = (
         }
         member.status = "completed"
         member.endedAt = event.completedAt
+        if (event.output !== undefined) {
+          const measuredOutput = canonicalUtf8Bytes(event.output)
+          if (
+            Result.isFailure(measuredOutput) ||
+            measuredOutput.success >
+              kernel.limits.maxMultiInstanceItemOutputCanonicalBytes
+          ) {
+            return journalFailure(
+              index,
+              `Multi-instance item completion '${event.groupId}:${event.itemIndex}' has an invalid output`
+            )
+          }
+          member.output = directClone(event.output)
+        }
         group.completedInstanceCount++
         if (!sameJson(event.counters, multiInstanceCounters(group))) {
           return journalFailure(
@@ -5367,7 +6271,7 @@ const replayJournal = (
         const expectedIndex = pendingGroup?.itemIndexes[0] ??
           cleanupGroup?.itemIndexes[0]
         const member = expectedIndex === undefined ? undefined : group?.members[expectedIndex]
-        const expectedReason: MultiInstanceTerminationReason | undefined = pendingGroup?.kind === "terminate-and-finish"
+        const expectedReason: MultiInstanceClosureReason | undefined = pendingGroup?.kind === "terminate-and-finish"
           ? "completion-condition"
           : pendingGroup?.kind === "cancel-before-boundary"
           ? "boundary-error-caught"
@@ -5384,7 +6288,7 @@ const replayJournal = (
           group.status !== "active" ||
           expectedIndex === undefined ||
           member === undefined ||
-          (member.status !== "active" && member.status !== "pending") ||
+          member.status !== "active" ||
           token?.status === "active" ||
           event.groupId !== group.groupId ||
           event.activityId !== group.activityId ||
@@ -5414,6 +6318,67 @@ const replayJournal = (
         break
       }
 
+      case "MultiInstanceItemNotGenerated": {
+        const pending = pendingMultiInstanceTransition
+        const cleanup = pendingFailureCleanup
+        const pendingGroup = pending?.kind === "terminate-and-finish" ||
+            pending?.kind === "cancel-before-boundary"
+          ? pending
+          : undefined
+        const cleanupGroup = cleanup?.multiInstanceGroups[0]
+        const groupId = pendingGroup?.groupId ?? cleanupGroup?.groupId
+        const group = groupId === undefined
+          ? undefined
+          : state.multiInstanceGroups.find((candidate) => candidate.groupId === groupId)
+        const expectedIndex = pendingGroup?.itemIndexes[0] ??
+          cleanupGroup?.itemIndexes[0]
+        const member = expectedIndex === undefined
+          ? undefined
+          : group?.members[expectedIndex]
+        const expectedReason:
+          | MultiInstanceClosureReason
+          | undefined = pendingGroup?.kind === "terminate-and-finish"
+            ? "completion-condition"
+            : pendingGroup?.kind === "cancel-before-boundary"
+            ? "boundary-error-caught"
+            : cleanup?.failureKind === "UncaughtBpmnError"
+            ? "uncaught-bpmn-error"
+            : cleanup === undefined
+            ? undefined
+            : "unmapped-business-failure"
+        if (
+          group === undefined ||
+          group.status !== "active" ||
+          expectedIndex === undefined ||
+          member === undefined ||
+          member.status !== "pending" ||
+          member.tokenId !== undefined ||
+          event.groupId !== group.groupId ||
+          event.activityId !== group.activityId ||
+          event.activation !== group.activation ||
+          event.itemIndex !== member.index ||
+          event.itemKey !== member.itemKey ||
+          event.reason !== expectedReason ||
+          event.notGeneratedAt !== (
+              pendingGroup?.transitionedAt ??
+                cleanup?.resolution.resolvedAt
+            )
+        ) {
+          return journalFailure(
+            index,
+            `Multi-instance non-generation '${event.groupId}:${event.itemIndex}' is not causally authorized`
+          )
+        }
+        member.status = "not-generated"
+        member.nonGenerationReason = event.reason
+        if (pendingGroup !== undefined) {
+          pendingGroup.itemIndexes.shift()
+        } else {
+          cleanupGroup!.itemIndexes.shift()
+        }
+        break
+      }
+
       case "MultiInstanceGroupCompleted": {
         const pending = pendingMultiInstanceTransition
         if (
@@ -5427,6 +6392,16 @@ const replayJournal = (
         const expectedReason = pending.kind === "finish"
           ? pending.reason
           : "completion-condition"
+        const characteristics = pending.activity.loopCharacteristics
+        const dataOutputRef = characteristics?._tag === "MultiInstanceCharacteristics"
+          ? characteristics.loopDataOutputRef
+          : undefined
+        const expectedOutput = dataOutputRef === undefined
+          ? undefined
+          : {
+            dataOutputRef,
+            items: group?.members.flatMap((member) => member.output === undefined ? [] : [member.output]) ?? []
+          }
         if (
           group === undefined ||
           group.status !== "active" ||
@@ -5439,6 +6414,14 @@ const replayJournal = (
           event.activityId !== pending.activity.id ||
           event.activation !== group.activation ||
           !sameJson(event.counters, multiInstanceCounters(group)) ||
+          !(
+            event.output === undefined &&
+              expectedOutput === undefined ||
+            event.output !== undefined &&
+              expectedOutput !== undefined &&
+              expectedOutput.items.length === group.members.length &&
+              sameJson(event.output, expectedOutput)
+          ) ||
           event.reason !== expectedReason ||
           event.completedAt !== pending.transitionedAt
         ) {
@@ -5447,6 +6430,22 @@ const replayJournal = (
         group.status = "completed"
         group.completionReason = event.reason
         group.closedAt = event.completedAt
+        if (event.output !== undefined) {
+          const measured = canonicalUtf8Bytes(
+            event.output.items as Schema.Json
+          )
+          if (
+            Result.isFailure(measured) ||
+            measured.success >
+              kernel.limits.maxMultiInstanceOutputCanonicalBytes
+          ) {
+            return journalFailure(
+              index,
+              `Multi-instance completion '${event.groupId}' has an oversized output collection`
+            )
+          }
+          group.output = directClone(event.output)
+        }
         pendingMultiInstanceTransition = undefined
         pendingRoute = {
           sourceNode: pending.activity,
@@ -5469,7 +6468,7 @@ const replayJournal = (
         const group = groupId === undefined
           ? undefined
           : state.multiInstanceGroups.find((candidate) => candidate.groupId === groupId)
-        const expectedReason: Exclude<MultiInstanceTerminationReason, "completion-condition"> | undefined =
+        const expectedReason: Exclude<MultiInstanceClosureReason, "completion-condition"> | undefined =
           boundaryPending !== undefined
             ? "boundary-error-caught"
             : cleanup?.failureKind === "UncaughtBpmnError"
@@ -5642,6 +6641,11 @@ const replayJournal = (
           ) {
             return journalFailure(index, `Token '${event.tokenId}' has an invalid task-consumption reason`)
           }
+          const taskOutput = isProtocolSuccess &&
+              pendingResolvedTask?.resolution.outcome._tag ===
+                "Succeeded"
+            ? pendingResolvedTask.resolution.outcome.output.value
+            : undefined
           pendingResolvedTask = undefined
           if (
             task.loopCharacteristics?._tag ===
@@ -5701,6 +6705,9 @@ const replayJournal = (
               groupId: group.groupId,
               itemIndex: member.index,
               itemKey: member.itemKey,
+              ...(taskOutput === undefined
+                ? undefined
+                : { output: taskOutput }),
               transitionedAt: event.consumedAt
             }
           } else {
@@ -5755,8 +6762,11 @@ const replayJournal = (
               target.loopCharacteristics?._tag ===
                 "MultiInstanceCharacteristics"
             ) {
+              const characteristics = target.loopCharacteristics
               pendingMultiInstanceTransition = {
-                kind: "cardinality",
+                kind: characteristics.cardinality === undefined
+                  ? "collection"
+                  : "cardinality",
                 activity: target,
                 scopeInstanceId: scope.scopeInstanceId,
                 groupId: nextId(
@@ -6613,18 +7623,101 @@ const canonicalTaskBindings = (
       .sort((left, right) => left.taskNodeId.localeCompare(right.taskNodeId))
   )
 
+const canonicalCollectionBindings = (
+  bindings: ReadonlyArray<MultiInstanceCollectionBinding>
+): ReadonlyArray<MultiInstanceCollectionBinding> =>
+  Object.freeze(
+    bindings
+      .map((binding) =>
+        Object.freeze({
+          ...binding,
+          collectionExpression: Object.freeze({
+            ...binding.collectionExpression
+          })
+        })
+      )
+      .sort((left, right) => {
+        const task = left.taskNodeId.localeCompare(right.taskNodeId)
+        return task !== 0
+          ? task
+          : left.dataInputRef.localeCompare(right.dataInputRef)
+      })
+  )
+
+const dataOwnerContext = (
+  model: BpmnModel.BpmnModel
+): BpmnData.SemanticOwnerContext => ({
+  contextKind: "BpmnDataOwnerContext",
+  contextVersion: BpmnData.SemanticOwnerContextVersion,
+  owners: [
+    ...model.processes.map((process) => ({
+      _tag: "Process" as const,
+      id: process.id,
+      supportedInterfaceRefs: []
+    })),
+    ...model.flowNodes.flatMap((node): Array<BpmnData.SemanticOwner> => {
+      if (node._tag === "Task") {
+        return [{
+          _tag: "Task",
+          id: node.id,
+          processId: node.processId,
+          parentScopeId: node.parentScopeId,
+          taskKind: node.taskKind
+        }]
+      }
+      if (node._tag === "CallActivity") {
+        return [{
+          _tag: "CallActivity",
+          id: node.id,
+          processId: node.processId,
+          parentScopeId: node.parentScopeId
+        }]
+      }
+      if (
+        node._tag === "SubProcess" ||
+        node._tag === "AdHocSubProcess" ||
+        node._tag === "Transaction" ||
+        node._tag === "EventSubProcess"
+      ) {
+        return [{
+          _tag: "SubProcess",
+          id: node.id,
+          processId: node.processId,
+          parentScopeId: node.parentScopeId
+        }]
+      }
+      return []
+    })
+  ]
+})
+
 const compileStructure = (
   modelInput: unknown,
   options: CompileOptions
 ): Result.Result<CompiledStructure, Diagnostic.CompilationError> => {
   const { limits, profileId, rootProcessId } = options
   const taskBindings = canonicalTaskBindings(options.taskBindings ?? [])
+  const collectionBindings = canonicalCollectionBindings(
+    options.collectionBindings ?? []
+  )
   const validated = BpmnModel.validate(modelInput)
   if (Result.isFailure(validated)) {
     return Result.fail(validated.failure)
   }
   const model = validated.success
   const diagnostics: Array<Diagnostic.Diagnostic> = []
+  let dataDocument: BpmnData.BpmnDataDocument | null = null
+  if (options.dataDocument !== undefined) {
+    const validatedData = BpmnData.validate(
+      options.dataDocument,
+      dataOwnerContext(model)
+    )
+    if (Result.isFailure(validatedData)) {
+      diagnostics.push(...validatedData.failure.diagnostics)
+    } else {
+      dataDocument = validatedData.success
+    }
+  }
   const requiredExpressionBindings = new Map<
     string,
     BpmnModel.Expression
@@ -6636,6 +7729,15 @@ const compileStructure = (
         flow.condition
       )
     }
+  }
+  for (const binding of collectionBindings) {
+    requiredExpressionBindings.set(
+      JSON.stringify([
+        binding.collectionExpression.language,
+        binding.collectionExpression.version
+      ]),
+      binding.collectionExpression
+    )
   }
   for (const node of model.flowNodes) {
     const characteristics = node._tag === "Task" ||
@@ -6798,6 +7900,61 @@ const compileStructure = (
       }
     }
   }
+  const collectionBindingByTaskNodeId = new Map<
+    string,
+    MultiInstanceCollectionBinding
+  >()
+  for (let index = 0; index < collectionBindings.length; index++) {
+    const binding = collectionBindings[index]!
+    const path = ["options", "collectionBindings", index] as const
+    const node = nodeById.get(binding.taskNodeId)
+    const characteristics = node?._tag === "Task"
+      ? node.loopCharacteristics
+      : undefined
+    if (
+      node?._tag !== "Task" ||
+      node.processId !== rootProcessId ||
+      characteristics?._tag !== "MultiInstanceCharacteristics" ||
+      characteristics.cardinality !== undefined ||
+      characteristics.loopDataInputRef !== binding.dataInputRef
+    ) {
+      diagnostics.push(error(
+        Codes.InvalidKernelProfile,
+        `Collection binding '${binding.taskNodeId}:${binding.dataInputRef}' must match one collection-based multi-instance Task`,
+        path
+      ))
+    }
+    if (collectionBindingByTaskNodeId.has(binding.taskNodeId)) {
+      diagnostics.push(error(
+        Codes.InvalidKernelProfile,
+        `Task '${binding.taskNodeId}' has more than one collection binding`,
+        [...path, "taskNodeId"]
+      ))
+    } else {
+      collectionBindingByTaskNodeId.set(
+        binding.taskNodeId,
+        binding
+      )
+    }
+    const specification = dataDocument?.inputOutputSpecifications.find(
+      (candidate) => candidate.ownerId === binding.taskNodeId
+    )
+    const dataInput = specification?.dataInputs.find(
+      (candidate) => candidate.id === binding.dataInputRef
+    )
+    if (
+      dataDocument === null ||
+      specification === undefined ||
+      dataInput === undefined ||
+      dataInput.isCollection !== true
+    ) {
+      diagnostics.push(error(
+        Codes.InvalidKernelProfile,
+        `Collection binding '${binding.taskNodeId}:${binding.dataInputRef}' requires a collection-valued Task DataInput in the validated BPMN data document`,
+        [...path, "dataInputRef"]
+      ))
+    }
+  }
   const boundaryErrorByTaskNodeId = new Map<
     string,
     BpmnModel.BoundaryEvent
@@ -6926,26 +8083,89 @@ const compileStructure = (
           }
         } else {
           if (characteristics.cardinality === undefined) {
-            diagnostics.push(error(
-              Codes.UnsupportedLoop,
-              `Multi-instance task '${node.id}' requires loopCardinality in the fixed multi-instance profile`,
-              [...path, "loopCharacteristics", "cardinality"]
-            ))
-          }
-          if (
-            characteristics.loopDataInputRef !== undefined ||
-            characteristics.loopDataOutputRef !== undefined
+            const collectionBinding = collectionBindingByTaskNodeId.get(node.id)
+            if (
+              characteristics.loopDataInputRef === undefined ||
+              collectionBinding === undefined ||
+              collectionBinding.dataInputRef !==
+                characteristics.loopDataInputRef
+            ) {
+              diagnostics.push(error(
+                Codes.UnsupportedLoop,
+                `Collection multi-instance task '${node.id}' requires one exact compiled collection binding`,
+                [
+                  ...path,
+                  "loopCharacteristics",
+                  "loopDataInputRef"
+                ]
+              ))
+            }
+            if (characteristics.loopDataOutputRef !== undefined) {
+              if (characteristics.outputDataItem === undefined) {
+                diagnostics.push(error(
+                  Codes.UnsupportedLoop,
+                  `Collection multi-instance task '${node.id}' loopDataOutputRef requires one scalar outputDataItem in this executable profile`,
+                  [
+                    ...path,
+                    "loopCharacteristics",
+                    "outputDataItem"
+                  ]
+                ))
+              }
+              const specification = dataDocument?.inputOutputSpecifications.find(
+                (candidate) => candidate.ownerId === node.id
+              )
+              const dataOutput = specification?.dataOutputs.find(
+                (candidate) =>
+                  candidate.id ===
+                    characteristics.loopDataOutputRef
+              )
+              if (
+                dataOutput === undefined ||
+                dataOutput.isCollection !== true
+              ) {
+                diagnostics.push(error(
+                  Codes.UnsupportedLoop,
+                  `Collection multi-instance task '${node.id}' loopDataOutputRef must identify a collection-valued Task DataOutput`,
+                  [
+                    ...path,
+                    "loopCharacteristics",
+                    "loopDataOutputRef"
+                  ]
+                ))
+              }
+              if (
+                characteristics.completionCondition !== undefined
+              ) {
+                diagnostics.push(error(
+                  Codes.UnsupportedLoop,
+                  `Collection multi-instance task '${node.id}' cannot combine output aggregation with completionCondition until an explicit partial-result policy is selected`,
+                  [
+                    ...path,
+                    "loopCharacteristics",
+                    "completionCondition"
+                  ]
+                ))
+              }
+              if (!taskBindingByTaskNodeId.has(node.id)) {
+                diagnostics.push(error(
+                  Codes.UnsupportedLoop,
+                  `Collection multi-instance task '${node.id}' output aggregation requires a protocol-v3 Task binding with codec-validated output`,
+                  [
+                    ...path,
+                    "loopCharacteristics",
+                    "loopDataOutputRef"
+                  ]
+                ))
+              }
+            }
+          } else if (
+            collectionBindingByTaskNodeId.has(node.id)
           ) {
             diagnostics.push(error(
-              Codes.UnsupportedLoop,
-              `Multi-instance task '${node.id}' collection input/output requires the forthcoming data-snapshot profile`,
-              [
-                ...path,
-                "loopCharacteristics",
-                characteristics.loopDataInputRef !== undefined
-                  ? "loopDataInputRef"
-                  : "loopDataOutputRef"
-              ]
+              Codes.InvalidKernelProfile,
+              `Cardinality multi-instance task '${node.id}' cannot declare a collection binding`,
+              ["options", "collectionBindings"]
             ))
           }
           if (
@@ -7159,6 +8379,8 @@ const compileStructure = (
     profileId,
     evaluatorBindings,
     taskBindings,
+    dataDocument,
+    collectionBindings,
     rootProcessId,
     rootStartEventId: startEventIdByScopeId.get(rootProcessId)!,
     limits,
@@ -7167,6 +8389,9 @@ const compileStructure = (
     flowById: new Map(flowById),
     orderedOutgoingByNodeId: internalOutgoing,
     taskBindingByTaskNodeId: new Map(taskBindingByTaskNodeId),
+    collectionBindingByTaskNodeId: new Map(
+      collectionBindingByTaskNodeId
+    ),
     boundaryErrorByTaskNodeId: new Map(boundaryErrorByTaskNodeId)
   }))
 }
@@ -7191,6 +8416,9 @@ const authorizeKernel = (
     flowById: new Map(structure.flowById),
     orderedOutgoingByNodeId: publicOutgoing,
     taskBindingByTaskNodeId: new Map(structure.taskBindingByTaskNodeId),
+    collectionBindingByTaskNodeId: new Map(
+      structure.collectionBindingByTaskNodeId
+    ),
     boundaryErrorByTaskNodeId: new Map(
       structure.boundaryErrorByTaskNodeId
     )
@@ -7252,6 +8480,8 @@ export const prepare = Effect.fnUntraced(function*(
     limits: structure.limits,
     evaluatorBindings: structure.evaluatorBindings,
     taskBindings: structure.taskBindings,
+    dataDocument: structure.dataDocument,
+    collectionBindings: structure.collectionBindings,
     model: structure.model
   })
   if (Result.isFailure(documentSnapshot)) {
@@ -7286,6 +8516,7 @@ export const prepare = Effect.fnUntraced(function*(
  */
 export const initialize = (
   kernel: CompiledKernel,
+  commandInput: unknown,
   services: Services
 ): Result.Result<TransitionBatch, Diagnostic.CompilationError> => {
   const resolvedKernel = resolveKernel(kernel)
@@ -7293,6 +8524,44 @@ export const initialize = (
     return Result.fail(resolvedKernel.failure)
   }
   const authority = resolvedKernel.success
+  const commandSnapshot = Json.snapshot(commandInput)
+  if (Result.isFailure(commandSnapshot)) {
+    return Result.fail(compilationError(error(
+      Codes.InvalidCommand,
+      commandSnapshot.failure.message,
+      ["command", ...commandSnapshot.failure.path]
+    )))
+  }
+  const decodedCommand = decodeInitializeCommand(
+    commandSnapshot.success
+  )
+  if (Result.isFailure(decodedCommand)) {
+    return Result.fail(compilationError(error(
+      Codes.InvalidCommand,
+      "Invalid BPMN execution-start command",
+      ["command"],
+      { issue: String(decodedCommand.failure) }
+    )))
+  }
+  const command = commandSnapshot.success as unknown as InitializeCommand
+  const measuredInput = canonicalUtf8Bytes(command.input)
+  if (Result.isFailure(measuredInput)) {
+    return Result.fail(measuredInput.failure)
+  }
+  if (
+    measuredInput.success >
+      authority.limits.maxExecutionInputCanonicalBytes
+  ) {
+    return Result.fail(compilationError(error(
+      Codes.InvalidKernelLimits,
+      "Execution input exceeds the compiled canonical-byte limit",
+      ["command", "input"],
+      {
+        actual: measuredInput.success,
+        maximum: authority.limits.maxExecutionInputCanonicalBytes
+      }
+    )))
+  }
   const resolvedServices = resolveServices(services)
   if (Result.isFailure(resolvedServices)) {
     return Result.fail(resolvedServices.failure)
@@ -7303,6 +8572,7 @@ export const initialize = (
     stateVersion: BpmnExecutionState.BpmnExecutionStateVersion,
     model: directClone(authority.modelReference),
     status: "active",
+    input: directClone(command.input),
     startedAt: runtimeServices.now,
     extensionElements: [],
     scopeInstances: [],
@@ -7323,6 +8593,8 @@ export const initialize = (
     _tag: "JournalStarted",
     journalVersion: TransitionJournalVersion,
     model: authority.modelReference,
+    input: command.input,
+    inputCanonicalBytes: measuredInput.success,
     startedAt: runtimeServices.now
   })
   const entered = enterScope(
@@ -7740,7 +9012,8 @@ export const resolveTask = (
         node,
         scope,
         token,
-        journal
+        journal,
+        command.outcome.output.value
       )
       : routeActivityOutgoing(
         authority,

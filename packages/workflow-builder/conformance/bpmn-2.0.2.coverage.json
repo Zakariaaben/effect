@@ -1,7 +1,7 @@
 {
   "formatVersion": 1,
   "catalogId": "effect-workflow-builder-bpmn-2.0.2",
-  "catalogRevision": 9,
+  "catalogRevision": 10,
   "implementation": "@effect/workflow-builder",
   "implementationVersion": "4.0.0-beta.100",
   "reviewedAt": "2026-07-24",
@@ -77,7 +77,7 @@
     {
       "requirementId": "BPMN-EXECUTION-BASIC-TOKEN-KERNEL",
       "supportLevel": "executable",
-      "summary": "A deliberately bounded executable subset covers root and embedded subprocess scopes, none start/end events, generic tasks, normal/conditional/default sequence flows, exclusive routing, parallel split/join epochs, Standard Loops, and FixedMultiInstance/1 on generic Tasks. Fixed multi-instance execution freezes one bounded cardinality, records stable member identity and exact counters, runs sequentially or in parallel, joins all members or terminates the remainder on the first true completionCondition, fences late completion, and causally replays failure cleanup. Collection mapping, SubProcess or CallActivity multi-instance execution, progressive behavior events, output aggregation, and open or draining groups remain unsupported.",
+      "summary": "A deliberately bounded executable subset covers root and embedded subprocess scopes, none start/end events, generic tasks, normal/conditional/default sequence flows, exclusive routing, parallel split/join epochs, Standard Loops, FixedMultiInstance/1, and CollectionMultiInstance/1 on generic Tasks. Both Multi-Instance profiles freeze one bounded closed member set, record stable index identity and exact counters, run sequentially or in parallel, fence late completion, and causally replay failure cleanup. The collection profile additionally freezes source order and duplicates, makes item mapping explicit, and gathers only complete codec-validated outputs in source-index order. SubProcess or CallActivity multi-instance execution, progressive behavior events, partial output, and open or draining groups remain unsupported.",
       "evidence": [
         {
           "kind": "source",
@@ -119,7 +119,7 @@
     {
       "requirementId": "BPMN-EXECUTION-FIXED-MULTI-INSTANCE-TASK",
       "supportLevel": "executable",
-      "summary": "FixedMultiInstance/1 executes a bounded cardinality-based generic Task profile. It evaluates loopCardinality exactly once at activation, freezes stable item:index identities, supports sequential and parallel scheduling, records exact active/completed/terminated counters, and routes once after an all join or the first true completionCondition. Remaining members are terminated before continuation; stale completeTask commands are fenced and idempotent. Boundary Error and terminal business-failure paths cancel the group before routing or failing, and the journal replays every transition exactly. XML v4 represents broader collection and behavior metadata but executable admission rejects collection sources and behavior other than All.",
+      "summary": "FixedMultiInstance/1 executes a bounded cardinality-based generic Task profile. It evaluates loopCardinality exactly once at activation, freezes stable item:index identities, supports sequential and parallel scheduling, records exact active/completed/terminated counters over generated instances, and routes once after an all join or the first true completionCondition. That condition terminates already generated active members while a sequential planned suffix is durably marked not-generated and is not included in runtime instance counters; stale completeTask commands are fenced and idempotent. Boundary Error and terminal business-failure paths cancel the generated group before routing or failing, and the journal replays every transition exactly. XML v5 represents broader collection and behavior metadata, but collection execution belongs to the separately evidenced CollectionMultiInstance/1 profile and behavior remains All.",
       "evidence": [
         {
           "kind": "source",
@@ -169,6 +169,16 @@
         {
           "kind": "transition-test",
           "path": "test/BpmnMultiInstanceKernel.test.ts",
+          "testName": "keeps sequential BPMN runtime counters equal to generated active, completed, and terminated instances"
+        },
+        {
+          "kind": "replay-test",
+          "path": "test/BpmnMultiInstanceKernel.test.ts",
+          "testName": "keeps an early-completed sequential prefix and marks its never-generated suffix without inflating terminated counters"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/BpmnMultiInstanceKernel.test.ts",
           "testName": "accepts out-of-order parallel completion while preserving ordered member state and one outgoing route"
         },
         {
@@ -210,6 +220,103 @@
           "kind": "replay-test",
           "path": "test/BpmnExecutable.test.ts",
           "testName": "preserves deterministic member identity across out-of-order parallel Multi-Instance completion and canonical replay"
+        }
+      ]
+    },
+    {
+      "requirementId": "BPMN-EXECUTION-COLLECTION-MULTI-INSTANCE-TASK",
+      "supportLevel": "executable",
+      "summary": "CollectionMultiInstance/1 executes a bounded collection-driven generic Task profile without treating the source as a mutable queue. One exact externally compiled binding for loopDataInputRef is evaluated once at activation and its canonical JSON array is frozen with source indices, order, and duplicates intact. A scalar inputDataItem explicitly opts into current-item mapping. Complete output gathering requires loopDataOutputRef, a scalar outputDataItem, a matching collection-valued Task DataOutput, and a protocol-v3 Task binding; codec-validated outputs are gathered by source index, and empty input yields an empty output array. Output gathering with completionCondition is rejected until a partial-result policy exists. Data, evaluator, collection, and Task bindings plus all collection/item/output limits are fingerprinted. Parallel all-join mode supplies bounded WCP14 evidence. The pure kernel does not require Effect Workflow; its native bridge is optional and separately tested. Progressive behavior, SubProcess/CallActivity Multi-Instance, streaming manifests, open WCP15 creation, WCP34/WCP36, and complete Process Execution Conformance are not claimed.",
+      "evidence": [
+        {
+          "kind": "source",
+          "path": "src/BpmnKernel.ts",
+          "symbol": "MultiInstanceCollectionBinding"
+        },
+        {
+          "kind": "source",
+          "path": "src/BpmnKernel.ts",
+          "symbol": "taskCollectionItem"
+        },
+        {
+          "kind": "source",
+          "path": "src/BpmnExecutionState.ts",
+          "symbol": "MultiInstanceOutput"
+        },
+        {
+          "kind": "source",
+          "path": "src/BpmnExecutable.ts",
+          "symbol": "CompileXmlOptions"
+        },
+        {
+          "kind": "state-test",
+          "path": "test/BpmnExecutionState.test.ts",
+          "testName": "admits input-order aggregate output for an all-completed collection group"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/BpmnExpressionRuntime.test.ts",
+          "testName": "evaluates and snapshots one collection with exact durable runtime coordinates"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/BpmnMultiInstanceKernel.test.ts",
+          "testName": "snapshots a collection once, preserves order and duplicates, exposes each declared inputDataItem, and replays out-of-order completion"
+        },
+        {
+          "kind": "replay-test",
+          "path": "test/BpmnMultiInstanceKernel.test.ts",
+          "testName": "replays collection evidence and rejects tampered snapshots, measurements, and evaluator usage"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/BpmnMultiInstanceKernel.test.ts",
+          "testName": "keeps taskCollectionItem opt-in and rejects collection output without a scalar outputDataItem or with a partial completion policy"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/BpmnMultiInstanceKernel.test.ts",
+          "testName": "executes collection members sequentially and completes an empty collection without creating work"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/BpmnMultiInstanceKernel.test.ts",
+          "testName": "aggregates protocol-v3 member outputs in collection order and enforces output byte limits"
+        },
+        {
+          "kind": "replay-test",
+          "path": "test/BpmnMultiInstanceKernel.test.ts",
+          "testName": "rejects direct-state tampering that removes, oversizes, or over-aggregates collection outputs"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/EffectWorkflowBpmnMultiInstanceV3.test.ts",
+          "testName": "leaves collection members unbound without a BPMN inputDataItem"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/EffectWorkflowBpmnMultiInstanceV3.test.ts",
+          "testName": "binds native dispatch to the exact frozen collection item"
+        },
+        {
+          "kind": "roundtrip-test",
+          "path": "test/BpmnXml.test.ts",
+          "testName": "round-trips scalar Multi-Instance data items with namespace-expanded subject QNames"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/BpmnExecutable.test.ts",
+          "testName": "executes CollectionMultiInstance/1 from XML through ordered output aggregation and exact replay"
+        },
+        {
+          "kind": "replay-test",
+          "path": "test/BpmnExecutable.test.ts",
+          "testName": "executes CollectionMultiInstance/1 from XML through ordered output aggregation and exact replay"
+        },
+        {
+          "kind": "roundtrip-test",
+          "path": "test/BpmnExecutable.test.ts",
+          "testName": "executes CollectionMultiInstance/1 from XML through ordered output aggregation and exact replay"
         }
       ]
     },
@@ -273,7 +380,7 @@
     {
       "requirementId": "BPMN-EXECUTION-CORE-PROCESS-XML-SLICE",
       "supportLevel": "executable",
-      "summary": "A strict facade composes named profile bpmn-2.0.2-core-process-di-v4 with the bounded token kernel without projection or inference. The intersection includes conditional/default routing, parallel split/join, ordinary subprocesses, bounded generic-Task Standard Loops, and FixedMultiInstance/1 with cardinality, sequential/parallel behavior All, and optional completionCondition. Explicit external taskBindings may be supplied through CompileXmlOptions and are fingerprinted; they are not read from BPMN XML. Exact journal replay, canonical export, re-import, recompilation, and replay equivalence remain part of the boundary.",
+      "summary": "A strict facade composes named profile bpmn-2.0.2-core-process-di-v5 with the bounded token kernel without projection or inference. The intersection includes conditional/default routing, parallel split/join, ordinary subprocesses, bounded generic-Task Standard Loops, FixedMultiInstance/1, and CollectionMultiInstance/1 with sequential/parallel behavior All. Exact external taskBindings, dataDocument, and collectionBindings are passed through CompileXmlOptions and committed to the executable fingerprint; they are not inferred from BPMN XML. Collection output is complete-success-only and cannot be combined with completionCondition. Exact journal replay, canonical export, re-import, recompilation, and replay equivalence remain part of the boundary; this still is not Process Execution Conformance.",
       "evidence": [
         {
           "kind": "source",
@@ -324,6 +431,26 @@
           "kind": "roundtrip-test",
           "path": "test/BpmnExecutable.test.ts",
           "testName": "round-trips collection and progressive Multi-Instance mapping while executable admission fails closed"
+        },
+        {
+          "kind": "roundtrip-test",
+          "path": "test/BpmnXml.test.ts",
+          "testName": "round-trips scalar Multi-Instance data items with namespace-expanded subject QNames"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/BpmnMultiInstanceKernel.test.ts",
+          "testName": "snapshots a collection once, preserves order and duplicates, exposes each declared inputDataItem, and replays out-of-order completion"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/BpmnExecutable.test.ts",
+          "testName": "executes CollectionMultiInstance/1 from XML through ordered output aggregation and exact replay"
+        },
+        {
+          "kind": "replay-test",
+          "path": "test/BpmnExecutable.test.ts",
+          "testName": "executes CollectionMultiInstance/1 from XML through ordered output aggregation and exact replay"
         }
       ]
     },
@@ -352,7 +479,7 @@
     {
       "requirementId": "BPMN-INTERCHANGE-CORE-PROCESS-XML-SLICE",
       "supportLevel": "modeled",
-      "summary": "Named profile bpmn-2.0.2-core-process-di-v4 performs fail-closed namespace-expanded import, validation, canonical-prefix export, and normalized round-trip for its explicitly bounded process/control-flow slice, including Standard Loop and represented Multi-Instance characteristics on generic Tasks. Multi-Instance cardinality, collection references, mode, completionCondition, behavior, and One/None event references round-trip in schema order, while input/output data items and complex behavior definitions remain outside the slice. The executable FixedMultiInstance/1 intersection is narrower than interchange. Modeled records implementation maturity because normative XSD validation, complete semantic mapping, and an OMG conformance subclass are not claimed.",
+      "summary": "Named profile bpmn-2.0.2-core-process-di-v5 performs fail-closed namespace-expanded import, validation, canonical-prefix export, and normalized round-trip for its explicitly bounded process/control-flow slice, including Standard Loop and represented Multi-Instance characteristics on generic Tasks. Multi-Instance cardinality, collection references, scalar inputDataItem/outputDataItem declarations with namespace-expanded itemSubjectRef QNames and xsd:string names including the empty string, mode, completionCondition, behavior, and One/None event references round-trip in BPMN XSD order. Data-item IDs are globally checked, absent isCollection materializes false, and unrepresented child content fails closed; complex behavior definitions remain outside the slice. Executable collection semantics additionally require exact fingerprinted external bindings. Modeled records implementation maturity because normative XSD validation, complete semantic mapping, and an OMG conformance subclass are not claimed.",
       "evidence": [
         {
           "kind": "source",
@@ -383,6 +510,16 @@
           "kind": "roundtrip-test",
           "path": "test/BpmnXml.test.ts",
           "testName": "round-trips callActivity calledElement as an expanded QName"
+        },
+        {
+          "kind": "roundtrip-test",
+          "path": "test/BpmnXml.test.ts",
+          "testName": "round-trips scalar Multi-Instance data items with namespace-expanded subject QNames"
+        },
+        {
+          "kind": "schema-test",
+          "path": "test/BpmnXml.test.ts",
+          "testName": "preserves empty data-item names and fails closed on malformed or unrepresented content"
         }
       ]
     },
@@ -456,7 +593,7 @@
     {
       "requirementId": "BPMN-DATA-IO-INTERFACE-SLICE",
       "supportLevel": "modeled",
-      "summary": "A strict normalized semantic slice covers item definitions, scoped data objects and references, data stores, typed IO owners, input/output specifications and sets, concrete data associations, interfaces, operations, messages, errors, and local callable bindings. Event payload IO, imported or external operation binding, task-kind mappings, complete CallActivity IO equality, expression-language typing, XML interchange, and the full Common Executable metamodel remain outside this requirement.",
+      "summary": "A strict normalized semantic slice covers item definitions, scoped data objects and references, data stores, typed IO owners, input/output specifications and sets, concrete data associations, interfaces, operations, messages, errors, and local callable bindings. Collection-valued Task DataInput/DataOutput declarations are used as explicit external authority by CollectionMultiInstance/1, without turning this modeled slice into a complete Common Executable claim. Event payload IO, imported or external operation binding, general task-kind mappings, complete CallActivity IO equality, expression-language typing, broad XML interchange, and the full Common Executable metamodel remain outside this requirement.",
       "evidence": [
         {
           "kind": "source",
@@ -467,6 +604,11 @@
           "kind": "schema-test",
           "path": "test/BpmnData.test.ts",
           "testName": "accepts the bounded rich graph with ancestor accessibility and callable binding"
+        },
+        {
+          "kind": "schema-test",
+          "path": "test/BpmnData.test.ts",
+          "testName": "checks explicit collection defaults and untransformed item compatibility"
         }
       ]
     },
@@ -617,7 +759,7 @@
     {
       "requirementId": "WFP-WCP14-MULTI-INSTANCE-RUNTIME",
       "supportLevel": "executable",
-      "summary": "FixedMultiInstance/1 evaluates a runtime cardinality exactly once before member creation, freezes that closed set under maxMultiInstanceCardinality, and waits for all members before one continuation. Parallel mode supplies the WCP14 concurrent form: members may complete in any order without changing stable identity or ordered durable state. Sequential mode is an additional BPMN execution form. No later source mutation can add a member.",
+      "summary": "FixedMultiInstance/1 evaluates a runtime cardinality exactly once before member creation. CollectionMultiInstance/1 instead snapshots one bounded array with stable source indices, order, and duplicates. Parallel all-join mode supplies the WCP14 concurrent form: the closed member set is known before expansion, members may complete in any order without changing identity or ordered durable state, and no later source mutation can add a member. Sequential mode is an additional BPMN execution form, not evidence for WCP14's concurrent reading. Open WCP15 creation is not claimed.",
       "evidence": [
         {
           "kind": "source",
@@ -643,13 +785,23 @@
           "kind": "replay-test",
           "path": "test/BpmnExecutable.test.ts",
           "testName": "preserves deterministic member identity across out-of-order parallel Multi-Instance completion and canonical replay"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/BpmnMultiInstanceKernel.test.ts",
+          "testName": "snapshots a collection once, preserves order and duplicates, exposes each declared inputDataItem, and replays out-of-order completion"
+        },
+        {
+          "kind": "replay-test",
+          "path": "test/BpmnMultiInstanceKernel.test.ts",
+          "testName": "replays collection evidence and rejects tampered snapshots, measurements, and evaluator usage"
         }
       ]
     },
     {
       "requirementId": "WFP-WCP35-CANCELLING-PARTIAL-MI-JOIN",
       "supportLevel": "executable",
-      "summary": "The admitted WCP35 subset evaluates one pinned completionCondition after each committed member completion. Its first true result records exact counters, terminates every remaining active or pending member, emits one continuation, and fences late completeTask commands. The member set was frozen before execution; WCP15 open creation and WCP34/WCP36 draining behavior are not claimed and require OpenForEachGroup/1.",
+      "summary": "The admitted WCP35 evidence is the parallel closed-group subset. It evaluates one pinned completionCondition after each committed member completion; the first true result records exact counters, terminates every already generated active remainder, emits one continuation, and fences late completeTask commands. A sequential planned suffix is not counted as generated or terminated and supplies no concurrent-cancellation evidence. CollectionMultiInstance/1 admits the same condition only without output gathering. WCP15 open creation and WCP34/WCP36 draining behavior are not claimed and require OpenForEachGroup/1.",
       "evidence": [
         {
           "kind": "source",
@@ -667,6 +819,16 @@
           "testName": "evaluates completion after each commit, terminates remaining members on the first true result, and idempotently rejects late work"
         },
         {
+          "kind": "transition-test",
+          "path": "test/BpmnMultiInstanceKernel.test.ts",
+          "testName": "keeps sequential BPMN runtime counters equal to generated active, completed, and terminated instances"
+        },
+        {
+          "kind": "replay-test",
+          "path": "test/BpmnMultiInstanceKernel.test.ts",
+          "testName": "keeps an early-completed sequential prefix and marks its never-generated suffix without inflating terminated counters"
+        },
+        {
           "kind": "replay-test",
           "path": "test/BpmnMultiInstanceKernel.test.ts",
           "testName": "rejects tampered cardinality, item identity, ordering, counters, completion result, model fingerprint, and limits"
@@ -675,13 +837,18 @@
           "kind": "transition-test",
           "path": "test/BpmnExecutable.test.ts",
           "testName": "imports, compiles, executes, replays, and canonically recompiles a sequential Multi-Instance task"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/BpmnMultiInstanceKernel.test.ts",
+          "testName": "keeps taskCollectionItem opt-in and rejects collection output without a scalar outputDataItem or with a partial completion policy"
         }
       ]
     },
     {
       "requirementId": "WFP-WCP21-STRUCTURED-LOOP",
       "supportLevel": "executable",
-      "summary": "The admitted WCP21 slice executes while-style pre-test and BPMN post-tested Standard Loops on one generic Task. It records exact iteration and version-bound condition evidence, interprets a true condition as continue, materializes BPMN's testBefore=false default at XML import, and enforces a mandatory positive loopMaximum. Combined pre/post-test loops, Standard Loops on SubProcesses, and arbitrary cycles remain unsupported; fixed Task Multi-Instance execution is tracked separately by WCP13, WCP14, and WCP35.",
+      "summary": "The admitted WCP21 slice executes while-style pre-test and BPMN post-tested Standard Loops on one generic Task. It records exact iteration and version-bound condition evidence, interprets a true condition as continue, materializes BPMN's testBefore=false default at XML import, and enforces a mandatory positive loopMaximum. Combined pre/post-test loops, Standard Loops on SubProcesses, and arbitrary cycles remain unsupported; closed Task Multi-Instance execution is tracked separately by WCP13, WCP14, and WCP35.",
       "evidence": [
         {
           "kind": "source",

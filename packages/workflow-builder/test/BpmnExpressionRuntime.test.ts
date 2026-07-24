@@ -9,6 +9,7 @@ import * as Schema from "effect/Schema"
 import * as TestClock from "effect/testing/TestClock"
 import { createHash } from "node:crypto"
 import * as BpmnActivityV3 from "../src/BpmnActivityV3.ts"
+import * as BpmnData from "../src/BpmnData.ts"
 import type * as BpmnExpression from "../src/BpmnExpression.ts"
 import * as Evaluator from "../src/BpmnExpressionEvaluator.ts"
 import * as Runtime from "../src/BpmnExpressionRuntime.ts"
@@ -19,6 +20,10 @@ import * as ProtocolV3Wire from "../src/ProtocolV3Wire.ts"
 
 const processId = "process-main"
 const now = "2026-07-23T10:00:00.000Z" as const
+const startCommand: BpmnKernel.InitializeCommand = {
+  commandVersion: BpmnKernel.InitializeCommandVersion,
+  input: null
+}
 const emptyExtensions = (): Array<BpmnModel.ExtensionElement> => []
 
 const testCrypto = Crypto.make({
@@ -94,7 +99,8 @@ const succeededOutcome = (): BpmnActivityV3.TaskSucceeded =>
     occurrenceDigest,
     firstActivityDigest,
     attempt: 1,
-    completedActivityDigest
+    completedActivityDigest,
+    output: { _tag: "Inline", value: null }
   })
 
 const expression = (source: string): BpmnModel.Expression => ({
@@ -309,6 +315,76 @@ const multiInstanceModel = (
     ]
   )
 
+const collectionMultiInstanceModel = (): BpmnModel.BpmnModel =>
+  makeModel(
+    [
+      start(["flow-start"]),
+      {
+        ...task("multi", ["flow-start"], ["flow-end"]),
+        loopCharacteristics: {
+          _tag: "MultiInstanceCharacteristics",
+          mode: "parallel",
+          loopDataInputRef: "items",
+          inputDataItem: {
+            id: "current-item",
+            isCollection: false,
+            extensionElements: []
+          }
+        }
+      },
+      end(["flow-end"])
+    ],
+    [
+      flow("flow-start", "start", "multi", "normal"),
+      flow("flow-end", "multi", "end", "normal")
+    ]
+  )
+
+const collectionDataDocument: BpmnData.BpmnDataDocument = {
+  documentKind: "BpmnDataDocument",
+  documentVersion: BpmnData.BpmnDataDocumentVersion,
+  bpmnSpecVersion: "2.0.2",
+  extensionElements: [],
+  itemDefinitions: [],
+  dataStores: [],
+  messages: [],
+  errors: [],
+  interfaces: [],
+  dataObjects: [],
+  dataObjectReferences: [],
+  dataStoreReferences: [],
+  properties: [],
+  inputOutputSpecifications: [{
+    id: "multi-io",
+    ownerId: "multi",
+    dataInputs: [{
+      id: "items",
+      isCollection: true,
+      extensionElements: []
+    }],
+    dataOutputs: [],
+    inputSets: [{
+      id: "multi-input-set",
+      dataInputRefs: ["items"],
+      optionalInputRefs: [],
+      whileExecutingInputRefs: [],
+      outputSetRefs: [],
+      extensionElements: []
+    }],
+    outputSets: [{
+      id: "multi-output-set",
+      dataOutputRefs: [],
+      optionalOutputRefs: [],
+      whileExecutingOutputRefs: [],
+      inputSetRefs: [],
+      extensionElements: []
+    }],
+    extensionElements: []
+  }],
+  dataAssociations: [],
+  inputOutputBindings: []
+}
+
 const routedStandardLoopModel = (): BpmnModel.BpmnModel =>
   makeModel(
     [
@@ -349,14 +425,25 @@ const routedStandardLoopModel = (): BpmnModel.BpmnModel =>
 const prepare = (
   model: BpmnModel.BpmnModel,
   evaluatorBinding: BpmnExpression.EvaluatorBinding,
-  taskBindings: ReadonlyArray<BpmnActivityV3.TaskBinding> = []
+  taskBindings: ReadonlyArray<BpmnActivityV3.TaskBinding> = [],
+  options: {
+    readonly dataDocument?: BpmnData.BpmnDataDocument
+    readonly collectionBindings?: ReadonlyArray<
+      BpmnKernel.MultiInstanceCollectionBinding
+    >
+  } = {}
 ): Effect.Effect<BpmnKernel.CompiledKernel, unknown> =>
   BpmnKernel.prepare(model, {
     profileId: "runtime-test-v1",
     rootProcessId: processId,
     limits: {
       maxAutomaticTransitions: 1_000,
-      maxMultiInstanceCardinality: 100
+      maxExecutionInputCanonicalBytes: 1_048_576,
+      maxMultiInstanceCardinality: 100,
+      maxMultiInstanceCollectionCanonicalBytes: 1_048_576,
+      maxMultiInstanceItemCanonicalBytes: 262_144,
+      maxMultiInstanceOutputCanonicalBytes: 1_048_576,
+      maxMultiInstanceItemOutputCanonicalBytes: 262_144
     },
     evaluatorBindings: model.sequenceFlows.some((candidate) => candidate.condition !== undefined) ||
         model.flowNodes.some((candidate) =>
@@ -374,10 +461,17 @@ const prepare = (
               )
             )
           )
-        )
+        ) ||
+        (options.collectionBindings?.length ?? 0) > 0
       ? [evaluatorBinding]
       : [],
-    ...(taskBindings.length === 0 ? undefined : { taskBindings })
+    ...(taskBindings.length === 0 ? undefined : { taskBindings }),
+    ...(options.dataDocument === undefined
+      ? undefined
+      : { dataDocument: options.dataDocument }),
+    ...(options.collectionBindings === undefined
+      ? undefined
+      : { collectionBindings: options.collectionBindings })
   }).pipe(Effect.provideService(Crypto.Crypto, testCrypto))
 
 const activeNodeIds = (
@@ -391,6 +485,11 @@ const provideRegistry = <A, E>(
   effect: Effect.Effect<A, E, Evaluator.EvaluatorRegistry>,
   registry: Evaluator.EvaluatorRegistry.Service
 ): Effect.Effect<A, E> => Effect.provideService(effect, Evaluator.EvaluatorRegistry, registry)
+
+const initializeRuntime = (
+  kernel: BpmnKernel.CompiledKernel,
+  services: BpmnKernel.Services
+) => Runtime.initialize(kernel, startCommand, services)
 
 describe("BpmnExpressionRuntime", () => {
   it("admits only exclusive complete runtime-error decision coordinates", () => {
@@ -418,6 +517,13 @@ describe("BpmnExpressionRuntime", () => {
       multiInstanceActivityId: "multi",
       multiInstanceGroupId: "multi-instance-group:1",
       multiInstanceGroupActivation: 0
+    })))
+    assert.isTrue(Result.isSuccess(decode({
+      ...base,
+      multiInstanceActivityId: "multi",
+      multiInstanceGroupId: "multi-instance-group:1",
+      multiInstanceGroupActivation: 0,
+      multiInstanceDataInputRef: "items"
     })))
     assert.isTrue(Result.isSuccess(decode({
       ...base,
@@ -460,6 +566,29 @@ describe("BpmnExpressionRuntime", () => {
       multiInstanceGroupActivation: 0,
       multiInstanceCompletedItemIndex: 1
     })))
+    assert.isTrue(Result.isFailure(decode({
+      ...base,
+      multiInstanceDataInputRef: "items"
+    })))
+    assert.isTrue(Result.isFailure(decode({
+      ...base,
+      sequenceFlowId: "flow-one",
+      multiInstanceDataInputRef: "items"
+    })))
+    assert.isTrue(Result.isFailure(decode({
+      ...base,
+      multiInstanceActivityId: "multi",
+      multiInstanceGroupId: "multi-instance-group:1",
+      multiInstanceGroupActivation: 0,
+      multiInstanceDataInputRef: "items",
+      multiInstanceCompletedItemIndex: 1,
+      multiInstanceCompletedItemKey: "item:1",
+      multiInstanceLoopCounter: 1,
+      multiInstanceNumberOfInstances: 3,
+      multiInstanceNumberOfActiveInstances: 2,
+      multiInstanceNumberOfCompletedInstances: 1,
+      multiInstanceNumberOfTerminatedInstances: 0
+    })))
   })
 
   it.effect("resolves the exact binding and evaluates an asynchronous condition", () =>
@@ -484,7 +613,7 @@ describe("BpmnExpressionRuntime", () => {
       })
       const registry = yield* Evaluator.makeMemory([definition])
       const batch = yield* provideRegistry(
-        Runtime.initialize(kernel, services),
+        initializeRuntime(kernel, services),
         registry
       )
 
@@ -524,7 +653,7 @@ describe("BpmnExpressionRuntime", () => {
         })
       ])
       const batch = yield* provideRegistry(
-        Runtime.initialize(kernel, { now }),
+        initializeRuntime(kernel, { now }),
         registry
       )
 
@@ -571,7 +700,7 @@ describe("BpmnExpressionRuntime", () => {
         })
       ])
       const batch = yield* provideRegistry(
-        Runtime.initialize(kernel, { now }),
+        initializeRuntime(kernel, { now }),
         registry
       )
 
@@ -607,6 +736,135 @@ describe("BpmnExpressionRuntime", () => {
       )
     }))
 
+  it.effect("evaluates and snapshots one collection with exact durable runtime coordinates", () =>
+    Effect.gen(function*() {
+      const exactBinding = binding({
+        deploymentId: "multi-collection-reruns"
+      })
+      const collectionExpression = expression("execution.items")
+      const requests: Array<Evaluator.EvaluationRequest> = []
+      const items = [{ id: "a" }, { id: "a" }, null] as const
+      const registry = yield* Evaluator.makeMemory([
+        Evaluator.makeDefinition({
+          binding: exactBinding,
+          evaluate: (request) =>
+            Effect.gen(function*() {
+              requests.push(request)
+              yield* Effect.yieldNow
+              return { result: items, steps: 5 }
+            })
+        })
+      ])
+      const kernel = yield* prepare(
+        collectionMultiInstanceModel(),
+        exactBinding,
+        [],
+        {
+          dataDocument: collectionDataDocument,
+          collectionBindings: [{
+            bindingVersion: BpmnKernel.MultiInstanceCollectionBindingVersion,
+            taskNodeId: "multi",
+            dataInputRef: "items",
+            collectionExpression
+          }]
+        }
+      )
+      const initialized = yield* provideRegistry(
+        Runtime.initialize(
+          kernel,
+          {
+            commandVersion: BpmnKernel.InitializeCommandVersion,
+            input: { items: [...items] }
+          },
+          { now }
+        ),
+        registry
+      )
+
+      assert.strictEqual(requests.length, 1)
+      assert.strictEqual(requests[0]?.source, "execution.items")
+      assert.strictEqual(requests[0]?.expectedResult, "json-array")
+      assert.include(
+        JSON.stringify(requests[0]?.context),
+        "\"items\":[{\"id\":\"a\"},{\"id\":\"a\"},null]"
+      )
+      const group = initialized.state.multiInstanceGroups[0]
+      assert.strictEqual(group?.source._tag, "Collection")
+      if (group?.source._tag === "Collection") {
+        assert.strictEqual(group.source.dataInputRef, "items")
+        assert.deepStrictEqual(group.source.items, items)
+      }
+      assert.deepStrictEqual(
+        group?.members.map((member) => member.itemKey),
+        ["item:0", "item:1", "item:2"]
+      )
+      const evaluated = initialized.events.filter(
+        (event) => event._tag === "MultiInstanceCollectionEvaluated"
+      )
+      assert.strictEqual(evaluated.length, 1)
+      assert.strictEqual(
+        evaluated[0]?._tag === "MultiInstanceCollectionEvaluated"
+          ? evaluated[0].usage.steps
+          : undefined,
+        5
+      )
+      assert.deepStrictEqual(
+        BpmnKernel.replay(kernel, initialized.events),
+        Result.succeed(initialized.state)
+      )
+    }))
+
+  it.effect("reports a failed collection evaluation with its data-input coordinate", () =>
+    Effect.gen(function*() {
+      const exactBinding = binding({
+        deploymentId: "multi-collection-failure"
+      })
+      const kernel = yield* prepare(
+        collectionMultiInstanceModel(),
+        exactBinding,
+        [],
+        {
+          dataDocument: collectionDataDocument,
+          collectionBindings: [{
+            bindingVersion: BpmnKernel.MultiInstanceCollectionBindingVersion,
+            taskNodeId: "multi",
+            dataInputRef: "items",
+            collectionExpression: expression("execution.items")
+          }]
+        }
+      )
+      const registry = yield* Evaluator.makeMemory([
+        Evaluator.makeDefinition({
+          binding: exactBinding,
+          evaluate: () => Effect.fail("private-collection-error")
+        })
+      ])
+      const result = yield* provideRegistry(
+        initializeRuntime(kernel, { now }),
+        registry
+      ).pipe(Effect.result)
+
+      assert.isTrue(Result.isFailure(result))
+      if (
+        Result.isSuccess(result) ||
+        !(result.failure instanceof Runtime.RuntimeError)
+      ) {
+        throw new Error("expected collection runtime error")
+      }
+      assert.strictEqual(result.failure.code, Runtime.Codes.EvaluatorFailed)
+      assert.strictEqual(result.failure.multiInstanceActivityId, "multi")
+      assert.strictEqual(
+        result.failure.multiInstanceGroupId,
+        "multi-instance-group:1"
+      )
+      assert.strictEqual(result.failure.multiInstanceGroupActivation, 0)
+      assert.strictEqual(result.failure.multiInstanceDataInputRef, "items")
+      assert.notInclude(
+        JSON.stringify(result.failure),
+        "private-collection-error"
+      )
+    }))
+
   it.effect("uses collision-free completion decisions for distinct multi-instance items", () =>
     Effect.gen(function*() {
       const exactBinding = binding({ deploymentId: "multi-completion-items" })
@@ -629,7 +887,7 @@ describe("BpmnExpressionRuntime", () => {
         exactBinding
       )
       const initialized = yield* provideRegistry(
-        Runtime.initialize(kernel, { now }),
+        initializeRuntime(kernel, { now }),
         registry
       )
       const members = initialized.state.tokens
@@ -715,7 +973,7 @@ describe("BpmnExpressionRuntime", () => {
         })
       ])
       const cardinalityResult = yield* provideRegistry(
-        Runtime.initialize(cardinalityKernel, { now }),
+        initializeRuntime(cardinalityKernel, { now }),
         cardinalityRegistry
       ).pipe(Effect.result)
       assert.isTrue(Result.isFailure(cardinalityResult))
@@ -769,7 +1027,7 @@ describe("BpmnExpressionRuntime", () => {
         })
       ])
       const initialized = yield* provideRegistry(
-        Runtime.initialize(completionKernel, { now }),
+        initializeRuntime(completionKernel, { now }),
         completionRegistry
       )
       const token = initialized.state.tokens.find((candidate) =>
@@ -873,7 +1131,7 @@ describe("BpmnExpressionRuntime", () => {
         })
       ])
       const initialized = yield* provideRegistry(
-        Runtime.initialize(kernel, { now }),
+        initializeRuntime(kernel, { now }),
         registry
       )
       assert.strictEqual(calls, 0)
@@ -958,7 +1216,7 @@ describe("BpmnExpressionRuntime", () => {
         })
       ])
       const failedResult = yield* provideRegistry(
-        Runtime.initialize(failedKernel, { now }),
+        initializeRuntime(failedKernel, { now }),
         failedRegistry
       ).pipe(Effect.result)
       assert.isTrue(Result.isFailure(failedResult))
@@ -987,7 +1245,7 @@ describe("BpmnExpressionRuntime", () => {
         })
       ])
       const fiber = yield* provideRegistry(
-        Runtime.initialize(timeoutKernel, { now }),
+        initializeRuntime(timeoutKernel, { now }),
         timeoutRegistry
       ).pipe(Effect.result, Effect.forkChild)
       yield* Effect.yieldNow
@@ -1012,7 +1270,7 @@ describe("BpmnExpressionRuntime", () => {
       const kernel = yield* prepare(gatewayModel(), binding())
       const registry = yield* Evaluator.makeMemory([])
       const result = yield* provideRegistry(
-        Runtime.initialize(kernel, { now }),
+        initializeRuntime(kernel, { now }),
         registry
       ).pipe(Effect.result)
 
@@ -1081,7 +1339,7 @@ describe("BpmnExpressionRuntime", () => {
           })
         ])
         const result = yield* provideRegistry(
-          Runtime.initialize(kernel, { now }),
+          initializeRuntime(kernel, { now }),
           registry
         ).pipe(Effect.result)
 
@@ -1110,7 +1368,7 @@ describe("BpmnExpressionRuntime", () => {
         })
       ])
       const exit = yield* provideRegistry(
-        Runtime.initialize(kernel, { now }),
+        initializeRuntime(kernel, { now }),
         registry
       ).pipe(Effect.exit)
 
@@ -1134,7 +1392,7 @@ describe("BpmnExpressionRuntime", () => {
         })
       ])
       const fiber = yield* provideRegistry(
-        Runtime.initialize(kernel, { now }),
+        initializeRuntime(kernel, { now }),
         registry
       ).pipe(Effect.result, Effect.forkChild)
       yield* Effect.yieldNow
@@ -1172,7 +1430,7 @@ describe("BpmnExpressionRuntime", () => {
         })
       ])
       const initialized = yield* provideRegistry(
-        Runtime.initialize(kernel, { now }),
+        initializeRuntime(kernel, { now }),
         registry
       )
       const token = initialized.state.tokens.find((candidate) =>
@@ -1234,7 +1492,7 @@ describe("BpmnExpressionRuntime", () => {
         })
       ])
       const initialized = yield* provideRegistry(
-        Runtime.initialize(kernel, { now }),
+        initializeRuntime(kernel, { now }),
         registry
       )
       const advanced = yield* provideRegistry(
@@ -1261,7 +1519,7 @@ describe("BpmnExpressionRuntime", () => {
         resolve: () => Effect.succeed(definition)
       })
       const result = yield* Effect.provideService(
-        Runtime.initialize(kernel, { now }),
+        initializeRuntime(kernel, { now }),
         Evaluator.EvaluatorRegistry,
         forged
       ).pipe(Effect.result)

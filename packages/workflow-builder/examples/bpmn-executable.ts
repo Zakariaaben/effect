@@ -44,7 +44,12 @@ const program = Effect.gen(function*() {
     rootProcessId: "approval",
     limits: {
       maxAutomaticTransitions: 1_000,
-      maxMultiInstanceCardinality: 128
+      maxExecutionInputCanonicalBytes: 1_048_576,
+      maxMultiInstanceCardinality: 128,
+      maxMultiInstanceCollectionCanonicalBytes: 1_048_576,
+      maxMultiInstanceItemCanonicalBytes: 262_144,
+      maxMultiInstanceOutputCanonicalBytes: 1_048_576,
+      maxMultiInstanceItemOutputCanonicalBytes: 262_144
     },
     evaluatorBindings: []
   })
@@ -54,7 +59,14 @@ const program = Effect.gen(function*() {
   }
 
   const initialized = getOrThrow(
-    BpmnKernel.initialize(compiled.kernel, services)
+    BpmnKernel.initialize(
+      compiled.kernel,
+      {
+        commandVersion: BpmnKernel.InitializeCommandVersion,
+        input: null
+      },
+      services
+    )
   )
   const review = initialized.state.tokens.find((token) =>
     token.status === "active" &&

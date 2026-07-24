@@ -83,10 +83,25 @@ Implemented foundations:
   schedules it sequentially or in parallel with behavior All. Exact runtime
   counters are supplied to an optional completion condition after every
   committed logical member completion. The first `true` result atomically
-  terminates remaining active or pending members before one outgoing
-  continuation. Cardinality zero, out-of-order parallel completion, Boundary
-  Error and failure cleanup, late-completion fencing/idempotency, exact native
-  task occurrences, and causal journal replay are tested;
+  terminates already generated active members and prevents a sequential planned
+  suffix from being generated before one outgoing continuation; that suffix is
+  not counted as terminated. Cardinality zero, out-of-order parallel
+  completion, Boundary Error and failure cleanup, late-completion
+  fencing/idempotency, exact native task occurrences, and causal journal replay
+  are tested;
+- `CollectionMultiInstance/1`, a second generic-Task-only closed-group profile.
+  One exact externally compiled binding for `loopDataInputRef` is evaluated
+  once at activity activation and its bounded canonical JSON array is frozen.
+  Source indices, order, and duplicate values are preserved. A declared scalar
+  `inputDataItem` opts into per-member item mapping; absence means no implicit
+  item injection. Complete-result gathering requires `loopDataOutputRef`, one
+  scalar `outputDataItem`, a matching collection-valued Task DataOutput, and a
+  protocol-v3 Task binding. Every output is codec-validated and the final array
+  follows input-index order rather than parallel completion order. Empty input
+  creates no work and produces `[]` when gathering is configured. Output
+  gathering with `completionCondition` fails closed until a partial-result
+  policy is explicitly modeled. Collection/data bindings, declarations,
+  limits, and evaluator pins are committed to the executable fingerprint;
 - an atomic protocol-v3 Task/Boundary Error slice whose executable fingerprint
   commits immutable task bindings and exact business-failure identity mappings.
   Exact success follows the normal route; an explicitly promoted failure may
@@ -102,7 +117,7 @@ Implemented foundations:
   from BPMN XML; and
 - a resource-bounded namespace-aware XML 1.0 infoset parser, semantic
   validator, and serializer;
-- strict profile `bpmn-2.0.2-core-process-di-v4`, which fails closed while
+- strict profile `bpmn-2.0.2-core-process-di-v5`, which fails closed while
   importing, validating, canonically exporting, and normalized-round-tripping
   definitions metadata, ordinary processes and recursive subprocesses, generic
   tasks, source-level call activities with namespace-expanded callable-element
@@ -111,9 +126,12 @@ Implemented foundations:
   Multi-Instance characteristics on Tasks, explicit expression-language
   version bindings, and the complete current normalized DI slice. The
   Multi-Instance XML mapping round-trips cardinality, collection references,
-  sequential/parallel mode, completion condition, behavior, and One/None event
-  references, while its executable intersection is deliberately narrower. A
-  mapped Standard Loop requires one version-bound formal
+  scalar input/output data items with namespace-expanded subject QNames and
+  xsd:string names including the empty string, sequential/parallel mode,
+  completion condition, behavior, and One/None event references in BPMN XSD
+  order, while its executable intersection is deliberately narrower.
+  Unrepresented data-item children fail closed. A mapped Standard Loop requires
+  one version-bound formal
   `loopCondition`, materializes the BPMN `testBefore=false` default when
   omitted, and requires a positive `loopMaximum`. BPMN 2.0.2 itself permits an
   absent `loopMaximum` and a more general or absent `tExpression`
@@ -122,14 +140,16 @@ Implemented foundations:
 - a strict executable-admission facade that composes that named XML profile
   with the bounded token kernel without lowering through the version `1` DAG,
   and proves import, conditional/default routing, parallel split/join,
-  subprocess, bounded Standard Loop, and fixed Multi-Instance execution,
-  journal replay, canonical export, re-import, recompilation, and same-journal
-  replay;
+  subprocess, bounded Standard Loop, fixed Multi-Instance, and collection
+  Multi-Instance execution, journal replay, canonical export, re-import,
+  recompilation, and same-journal replay. Optional task, data-document, and
+  collection bindings are external compile inputs, not semantics inferred from
+  BPMN XML alone;
 - an Effectful executable-preparation boundary whose domain-separated
   SHA-256 fingerprint commits to the normalized semantic model, root process,
   kernel semantic version, limits, named profile, and exact evaluator-build
-  manifest; kernel semantic version `4`, state version `5`, fingerprint version
-  `3`, and transition-journal version `4` fail closed on a model/profile
+  manifest; kernel semantic version `5`, state version `6`, fingerprint version
+  `4`, and transition-journal version `5` fail closed on a model/profile
   mismatch;
 - a strict Effect evaluator registry with full language/version/build/limit
   tuple resolution and no compatibility or latest fallback, plus exact
@@ -223,13 +243,13 @@ Not yet implemented and therefore not claimed:
   interchange surfaces;
 - token-transition and Activity lifecycle semantics beyond the explicitly
   bounded kernel subset;
-- Multi-Instance collection data mapping or externalized item manifests,
-  input/output data items and output collection aggregation, Multi-Instance
-  SubProcesses or CallActivities, One/None/Complex progressive behavior
-  events, open/dynamic WCP15 fan-out, draining WCP34/WCP36 joins, and a native
-  collective-cancellation/audit projection. These require a separate
+- externalized or streaming Multi-Instance item manifests, partial-result
+  collection policy, Multi-Instance SubProcesses or CallActivities,
+  One/None/Complex progressive behavior events, open/dynamic WCP15 fan-out,
+  draining WCP34/WCP36 joins, and a native collective-cancellation/audit
+  projection. Open creation and draining require a separate
   `OpenForEachGroup/1` profile instead of widening the closed
-  `FixedMultiInstance/1` journal;
+  `FixedMultiInstance/1` or `CollectionMultiInstance/1` journals;
 - executable call activities, immutable callable-element resolution, a
   transactional parent/child execution authority, and integration of the
   implemented protocol-v3 linkage, cancellation, lineage, and replay semantics
@@ -385,19 +405,47 @@ counters. At each decision boundary, generated instances equal active plus
 completed plus terminated instances; a sequential member not yet generated
 remains in the durable pending suffix instead of corrupting that BPMN runtime
 invariant. The optional condition is evaluated after each logical member
-completion; its first `true` result terminates the remainder, fences late
-`completeTask`, and emits one continuation. Behavior absent or All is admitted.
-Boundary Error and terminal failure cancel the remaining group before their
-normal failure semantics proceed. State, transition journal, replay, XML
-round-trip, expression runtime, executable facade, and the exact native Effect
-Workflow occurrence bridge all carry direct tests.
+completion; its first `true` result terminates any already generated active
+remainder, prevents a sequential planned suffix from being generated, fences
+late `completeTask`, and emits one continuation. The ungenerated suffix is not
+counted as terminated. Behavior absent or All is admitted. Boundary Error and
+terminal failure cancel generated group members before their normal failure
+semantics proceed. State, transition journal, replay, XML round-trip,
+expression runtime, executable facade, and the exact native Effect Workflow
+occurrence bridge all carry direct tests.
+
+`CollectionMultiInstance/1` reuses that closed group without pretending a
+collection is a mutable work queue. The exact collection binding is evaluated
+once at activity activation, before member creation, and its canonical array is
+copied into durable source evidence under separate collection, item, and
+cardinality limits. Indices are stable semantic identities; array order and
+duplicate values are retained. Mutation of the evaluator's later source cannot
+change the group. Sequential mode exposes one member at a time and parallel
+mode may finish in any order without changing durable index order. Empty input
+completes immediately; configured output gathering records an empty array.
+
+BPMN's `inputDataItem` is an explicit scalar mapping switch in this executable
+profile. If it is present with `isCollection=false`, the exact current item,
+index, key, and collection DataInput reference are available to the Task bridge.
+If it is absent, no current item is injected implicitly. Complete output
+gathering is also explicit: `loopDataOutputRef` and a scalar
+`outputDataItem` must name a collection-valued Task DataOutput, and a
+protocol-v3 Task binding must codec-validate each member output. The final
+array is assembled by input index, never by completion order. Because a
+first-true `completionCondition` deliberately terminates a suffix or subset,
+combining it with output gathering is rejected until the model selects a
+partial-result contract. External data documents, expression bindings,
+collection bindings, Task bindings, and byte limits are fingerprinted; BPMN XML
+alone is not treated as executable data authority.
 
 Parallel mode supports WCP13 when a pinned expression represents a
 design-time-fixed model cardinality and WCP14 when it obtains the cardinality
-from activation data; sequential mode is an additional BPMN execution form,
-not evidence for those patterns' concurrent reading. The profile supports the
-cancelling portion of WCP35 with a first-true
-`completionCondition`. It does not support WCP15 open creation or the draining
+from activation data. A collection snapshot also supports WCP14 because its
+membership is determined at runtime before expansion. Sequential mode is an
+additional BPMN execution form, not evidence for those patterns' concurrent
+reading. The parallel closed profiles support the cancelling portion of WCP35
+with a first-true `completionCondition`, but collection output gathering is not
+admitted in that mode. Neither supports WCP15 open creation or the draining
 semantics of WCP34/WCP36: those need `OpenForEachGroup/1`, whose creation-close
 fact and drain/ignore policy cannot be reconstructed from a closed group.
 The pattern names and distinctions follow the official
@@ -406,13 +454,13 @@ The pattern names and distinctions follow the official
 The cross-engine comparison reinforces five rules. A closed item set is
 snapshotted before expansion; logical item identity never aliases retry or
 delivery identity; semantic cardinality and worker-concurrency limits are
-separate; future result aggregation must preserve input order despite
+separate; complete result aggregation preserves input order despite
 out-of-order parallel completion; and very large groups require explicit
 history segmentation or continuation rather than unbounded journals. Native
-Effect Workflow supplies persistence, child execution, replay, activities,
-deferreds, clocks, and backend interruption. The builder owns portable BPMN
-group semantics, expression evidence, and occurrence mapping; it does not
-reimplement those native capabilities.
+Effect Workflow can supply persistence, child execution, replay, activities,
+deferreds, clocks, and backend interruption when selected. The builder owns
+portable BPMN group semantics, expression evidence, and occurrence mapping; it
+does not reimplement or require those native capabilities.
 
 ### Concurrency, triggers, cancellation, and completion
 

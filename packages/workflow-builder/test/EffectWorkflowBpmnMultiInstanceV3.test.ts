@@ -13,6 +13,7 @@ import * as NativeWorkflow from "effect/unstable/workflow/Workflow"
 import { createHash } from "node:crypto"
 import type * as ActivityPolicyV3 from "../src/ActivityPolicyV3.ts"
 import * as BpmnActivityV3 from "../src/BpmnActivityV3.ts"
+import * as BpmnData from "../src/BpmnData.ts"
 import type * as BpmnExpression from "../src/BpmnExpression.ts"
 import * as BpmnKernel from "../src/BpmnKernel.ts"
 import * as BpmnModel from "../src/BpmnModel.ts"
@@ -397,6 +398,17 @@ const cardinalityExpression: BpmnModel.Expression = {
   source: "item-count"
 }
 
+const collectionDataInputRef = "native-mi-items"
+const collectionExpression: BpmnModel.Expression = {
+  language: "feel",
+  version: "1.0",
+  source: "collection-items"
+}
+const collectionItems: ReadonlyArray<Schema.Json> = [
+  {},
+  { itemId: "different" }
+]
+
 const evaluatorBinding: BpmnExpression.EvaluatorBinding = {
   language: "feel",
   languageVersion: "1.0",
@@ -413,6 +425,16 @@ const evaluatorBinding: BpmnExpression.EvaluatorBinding = {
     timeoutMillis: 1_000
   }
 }
+
+const kernelLimits = {
+  maxAutomaticTransitions: 100,
+  maxExecutionInputCanonicalBytes: 1_048_576,
+  maxMultiInstanceCardinality: 16,
+  maxMultiInstanceCollectionCanonicalBytes: 1_048_576,
+  maxMultiInstanceItemCanonicalBytes: 262_144,
+  maxMultiInstanceOutputCanonicalBytes: 1_048_576,
+  maxMultiInstanceItemOutputCanonicalBytes: 262_144
+} satisfies BpmnKernel.KernelLimits
 
 const bpmnModel = (): BpmnModel.BpmnModel => ({
   modelKind: "BpmnModel",
@@ -487,11 +509,90 @@ const bpmnModel = (): BpmnModel.BpmnModel => ({
   ]
 })
 
+const collectionBpmnModel = (
+  bindInputDataItem = true
+): BpmnModel.BpmnModel => {
+  const model = bpmnModel()
+  return {
+    ...model,
+    flowNodes: model.flowNodes.map((node): BpmnModel.FlowNode =>
+      node.id === taskNodeId && node._tag === "Task"
+        ? {
+          ...node,
+          loopCharacteristics: {
+            _tag: "MultiInstanceCharacteristics",
+            mode: "parallel",
+            loopDataInputRef: collectionDataInputRef,
+            ...(bindInputDataItem
+              ? {
+                inputDataItem: {
+                  id: "native-mi-item",
+                  isCollection: false,
+                  extensionElements: []
+                }
+              }
+              : undefined)
+          }
+        }
+        : node
+    )
+  }
+}
+
+const collectionDataDocument = (): BpmnData.BpmnDataDocument => ({
+  documentKind: "BpmnDataDocument",
+  documentVersion: BpmnData.BpmnDataDocumentVersion,
+  bpmnSpecVersion: "2.0.2",
+  extensionElements: [],
+  itemDefinitions: [],
+  dataStores: [],
+  messages: [],
+  errors: [],
+  interfaces: [],
+  dataObjects: [],
+  dataObjectReferences: [],
+  dataStoreReferences: [],
+  properties: [],
+  inputOutputSpecifications: [{
+    id: "native-mi-io",
+    ownerId: taskNodeId,
+    dataInputs: [{
+      id: collectionDataInputRef,
+      isCollection: true,
+      extensionElements: []
+    }],
+    dataOutputs: [],
+    inputSets: [{
+      id: "native-mi-input-set",
+      dataInputRefs: [collectionDataInputRef],
+      optionalInputRefs: [],
+      whileExecutingInputRefs: [],
+      outputSetRefs: [],
+      extensionElements: []
+    }],
+    outputSets: [{
+      id: "native-mi-output-set",
+      dataOutputRefs: [],
+      optionalOutputRefs: [],
+      whileExecutingOutputRefs: [],
+      inputSetRefs: [],
+      extensionElements: []
+    }],
+    extensionElements: []
+  }],
+  dataAssociations: [],
+  inputOutputBindings: []
+})
+
 const bpmnServices = (): BpmnKernel.Services => ({
   now,
   evaluateExpression: (context) =>
     Result.succeed({
-      result: context._tag === "MultiInstanceCardinality" ? 2 : false,
+      result: context._tag === "MultiInstanceCardinality"
+        ? 2
+        : context._tag === "MultiInstanceCollection"
+        ? collectionItems
+        : false,
       steps: 1
     })
 })
@@ -530,7 +631,8 @@ const activeTaskTokens = (
 const prepareInvocation = (
   fixture: NativeFixture,
   coordinates: BpmnKernel.TaskOccurrenceCoordinates,
-  runId: string
+  runId: string,
+  input: Schema.Json = {}
 ) =>
   Effect.gen(function*() {
     const preparedOccurrence = yield* Occurrence.prepare({
@@ -544,7 +646,7 @@ const prepareInvocation = (
     const invocation = yield* Retry.prepare({
       artifact: fixture.resolved,
       occurrence: preparedOccurrence,
-      input: { _tag: "Inline", value: {} }
+      input: { _tag: "Inline", value: input }
     })
     return { invocation, preparedOccurrence }
   })
@@ -610,6 +712,46 @@ const expectBridgeFailure = <A, E>(
 }
 
 describe("EffectWorkflowBpmnV3 native Multi-Instance bridge", () => {
+  it.effect("leaves collection members unbound without a BPMN inputDataItem", () =>
+    Effect.gen(function*() {
+      const kernel = yield* BpmnKernel.prepare(
+        collectionBpmnModel(false),
+        {
+          profileId: "effect-workflow-mi-unbound-collection-v1",
+          rootProcessId: processId,
+          limits: kernelLimits,
+          evaluatorBindings: [evaluatorBinding],
+          dataDocument: collectionDataDocument(),
+          collectionBindings: [{
+            bindingVersion: BpmnKernel.MultiInstanceCollectionBindingVersion,
+            taskNodeId,
+            dataInputRef: collectionDataInputRef,
+            collectionExpression
+          }]
+        }
+      ).pipe(Effect.orDie)
+      const initialized = BpmnKernel.initialize(
+        kernel,
+        {
+          commandVersion: BpmnKernel.InitializeCommandVersion,
+          input: null
+        },
+        bpmnServices()
+      )
+      if (Result.isFailure(initialized)) {
+        return yield* Effect.die(initialized.failure)
+      }
+      const tokens = activeTaskTokens(initialized.success.state)
+      assert.strictEqual(tokens.length, 2)
+      const selected = BpmnKernel.taskCollectionItem(
+        kernel,
+        initialized.success.state,
+        target(tokens[0]!)
+      )
+      assert(Result.isSuccess(selected))
+      assert.isUndefined(selected.success)
+    }).pipe(provideCrypto))
+
   it.effect("authorizes exact member occurrences before dispatch and delegates replay/dedup to native Effect Workflow", () =>
     Effect.gen(function*() {
       let handlerRuns = 0
@@ -630,15 +772,16 @@ describe("EffectWorkflowBpmnV3 native Multi-Instance bridge", () => {
       const kernel = yield* BpmnKernel.prepare(bpmnModel(), {
         profileId: "effect-workflow-mi-native-bridge-v1",
         rootProcessId: processId,
-        limits: {
-          maxAutomaticTransitions: 100,
-          maxMultiInstanceCardinality: 16
-        },
+        limits: kernelLimits,
         evaluatorBindings: [evaluatorBinding],
         taskBindings: [binding]
       }).pipe(Effect.orDie)
       const initializedResult = BpmnKernel.initialize(
         kernel,
+        {
+          commandVersion: BpmnKernel.InitializeCommandVersion,
+          input: null
+        },
         bpmnServices()
       )
       if (Result.isFailure(initializedResult)) {
@@ -891,5 +1034,146 @@ describe("EffectWorkflowBpmnV3 native Multi-Instance bridge", () => {
         replayed.success,
         secondResolved.success.state
       )
+    }).pipe(provideCrypto))
+
+  it.effect("binds native dispatch to the exact frozen collection item", () =>
+    Effect.gen(function*() {
+      let handlerRuns = 0
+      const fixture = yield* makeNativeFixture(
+        (() =>
+          Effect.sync(() => ({
+            value: ++handlerRuns
+          }))) as Node.Handler<typeof nativeNode>
+      )
+      const binding: BpmnActivityV3.TaskBinding = {
+        bindingVersion: BpmnActivityV3.BindingVersion,
+        executionProtocolVersion: 3,
+        taskNodeId,
+        artifactDigest: fixture.verified.artifactDigest,
+        semanticNodeId: "native-mi-step",
+        errorMappings: []
+      }
+      const kernel = yield* BpmnKernel.prepare(
+        collectionBpmnModel(),
+        {
+          profileId: "effect-workflow-mi-native-collection-bridge-v1",
+          rootProcessId: processId,
+          limits: kernelLimits,
+          evaluatorBindings: [evaluatorBinding],
+          taskBindings: [binding],
+          dataDocument: collectionDataDocument(),
+          collectionBindings: [{
+            bindingVersion: BpmnKernel.MultiInstanceCollectionBindingVersion,
+            taskNodeId,
+            dataInputRef: collectionDataInputRef,
+            collectionExpression
+          }]
+        }
+      ).pipe(Effect.orDie)
+      const initializedResult = BpmnKernel.initialize(
+        kernel,
+        {
+          commandVersion: BpmnKernel.InitializeCommandVersion,
+          input: null
+        },
+        bpmnServices()
+      )
+      if (Result.isFailure(initializedResult)) {
+        return yield* Effect.die(initializedResult.failure)
+      }
+      const initialized = initializedResult.success
+      const tokens = activeTaskTokens(initialized.state)
+      assert.strictEqual(tokens.length, 2)
+      const taskTarget = target(tokens[0]!)
+
+      const selectedItem = BpmnKernel.taskCollectionItem(
+        kernel,
+        initialized.state,
+        taskTarget
+      )
+      assert(Result.isSuccess(selectedItem))
+      assert.deepStrictEqual(selectedItem.success, {
+        dataInputRef: collectionDataInputRef,
+        itemIndex: 0,
+        itemKey: "item:0",
+        item: collectionItems[0]
+      })
+      assert.isTrue(Object.isFrozen(selectedItem.success?.item))
+
+      const coordinates = BpmnKernel.taskOccurrence(
+        kernel,
+        initialized.state,
+        taskTarget
+      )
+      if (Result.isFailure(coordinates)) {
+        return yield* Effect.die(coordinates.failure)
+      }
+      const exact = yield* prepareInvocation(
+        fixture,
+        coordinates.success,
+        "mi-native-collection-parent",
+        collectionItems[0]!
+      )
+      const differentItem = yield* prepareInvocation(
+        fixture,
+        coordinates.success,
+        "mi-native-collection-parent",
+        collectionItems[1]!
+      )
+
+      const execute = (
+        invocation: Retry.PreparedRetryInvocation
+      ) =>
+        EffectWorkflowBpmnV3.executeTask(
+          kernel,
+          initialized.state,
+          invocation,
+          taskTarget,
+          { interruptRetryPolicy: noInterruptRetry }
+        )
+
+      const rejected = yield* execute(
+        differentItem.invocation
+      ).pipe(Effect.exit)
+      const rejection = expectBridgeFailure(rejected)
+      assert.strictEqual(
+        rejection.code,
+        EffectWorkflowBpmnV3.ErrorCodes.InvocationInputMismatch
+      )
+      assert.strictEqual(handlerRuns, 0)
+
+      const registration = MultiInstanceBridgeWorkflow.toLayer(
+        () => execute(exact.invocation)
+      )
+      const receipt = yield* Effect.gen(function*() {
+        const executionId = yield* MultiInstanceBridgeWorkflow.execute(
+          {
+            executionKey: "mi-native-collection-exact-item",
+            itemIndex: 0
+          },
+          { discard: true }
+        )
+        const terminal = yield* pollUntilComplete(executionId)
+        if (Exit.isFailure(terminal.exit)) {
+          return yield* Effect.die(terminal.exit.cause)
+        }
+        return terminal.exit.value
+      }).pipe(
+        Effect.provide(
+          registration.pipe(
+            Layer.provideMerge(WorkflowEngine.layerMemory)
+          )
+        )
+      )
+
+      assert.strictEqual(handlerRuns, 1)
+      assert.strictEqual(receipt.command.outcome._tag, "Succeeded")
+      if (receipt.command.outcome._tag !== "Succeeded") {
+        return yield* Effect.die("Expected exact collection item success")
+      }
+      assert.deepStrictEqual(receipt.command.outcome.output, {
+        _tag: "Inline",
+        value: { value: 1 }
+      })
     }).pipe(provideCrypto))
 })

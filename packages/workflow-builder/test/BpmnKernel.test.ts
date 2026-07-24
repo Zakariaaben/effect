@@ -38,8 +38,23 @@ const services = (
 
 const limits: BpmnKernel.KernelLimits = {
   maxAutomaticTransitions: 1_000,
-  maxMultiInstanceCardinality: 128
+  maxExecutionInputCanonicalBytes: 1_048_576,
+  maxMultiInstanceCardinality: 128,
+  maxMultiInstanceCollectionCanonicalBytes: 1_048_576,
+  maxMultiInstanceItemCanonicalBytes: 262_144,
+  maxMultiInstanceOutputCanonicalBytes: 1_048_576,
+  maxMultiInstanceItemOutputCanonicalBytes: 262_144
 }
+
+const initializeCommand = {
+  commandVersion: BpmnKernel.InitializeCommandVersion,
+  input: null
+} as const
+
+const initializeKernel = (
+  kernel: BpmnKernel.CompiledKernel,
+  runtime: BpmnKernel.Services
+): ReturnType<typeof BpmnKernel.initialize> => BpmnKernel.initialize(kernel, initializeCommand, runtime)
 
 const testCrypto = Crypto.make({
   randomBytes: (size) => new Uint8Array(size),
@@ -108,6 +123,10 @@ const succeededOutcome = (
     firstActivityDigest,
     attempt: 2,
     completedActivityDigest,
+    output: {
+      _tag: "Inline",
+      value: null
+    },
     ...overrides
   })
 
@@ -489,7 +508,7 @@ describe("BpmnKernel", () => {
       ]
     ))
 
-    const initialized = BpmnKernel.initialize(compiled, services())
+    const initialized = initializeKernel(compiled, services())
     assert.isTrue(Result.isSuccess(initialized))
     if (Result.isFailure(initialized)) {
       throw initialized.failure
@@ -533,7 +552,7 @@ describe("BpmnKernel", () => {
     assert(
       missingBinding.failure.diagnostics.some((diagnostic) => diagnostic.code === BpmnKernel.Codes.InvalidCommand)
     )
-    const initialized = BpmnKernel.initialize(compiled, services())
+    const initialized = initializeKernel(compiled, services())
     assert(Result.isSuccess(initialized))
     const token = initialized.success.state.tokens.find((candidate) =>
       candidate.status === "active" &&
@@ -682,7 +701,7 @@ describe("BpmnKernel", () => {
       errorRef
     }])
     const compiled = compile(definition, [binding])
-    const initialized = BpmnKernel.initialize(compiled, services())
+    const initialized = initializeKernel(compiled, services())
     assert(Result.isSuccess(initialized))
     const token = initialized.success.state.tokens.find((candidate) =>
       candidate.status === "active" &&
@@ -772,7 +791,7 @@ describe("BpmnKernel", () => {
         errorRef: mappedErrorRef
       }])
     ])
-    const initialized = BpmnKernel.initialize(compiled, services())
+    const initialized = initializeKernel(compiled, services())
     assert(Result.isSuccess(initialized))
     const token = initialized.success.state.tokens.find((candidate) =>
       candidate.status === "active" &&
@@ -860,7 +879,7 @@ describe("BpmnKernel", () => {
       readonly initialized: BpmnKernel.TransitionBatch
       readonly resolved: BpmnKernel.TransitionBatch
     } => {
-      const initialized = BpmnKernel.initialize(compiled, services())
+      const initialized = initializeKernel(compiled, services())
       assert(Result.isSuccess(initialized))
       const token = initialized.success.state.tokens.find((candidate) =>
         candidate.status === "active" &&
@@ -973,7 +992,7 @@ describe("BpmnKernel", () => {
       ]
     )
     const compiled = compile(definition)
-    const initialized = BpmnKernel.initialize(compiled, services())
+    const initialized = initializeKernel(compiled, services())
     assert.isTrue(Result.isSuccess(initialized))
     if (Result.isFailure(initialized)) {
       throw initialized.failure
@@ -1067,7 +1086,7 @@ describe("BpmnKernel", () => {
       observedAt: now
     }])
 
-    const defaultInit = BpmnKernel.initialize(compiled, services())
+    const defaultInit = initializeKernel(compiled, services())
     assert.isTrue(Result.isSuccess(defaultInit))
     if (Result.isFailure(defaultInit)) {
       throw defaultInit.failure
@@ -1124,7 +1143,7 @@ describe("BpmnKernel", () => {
         flow("flow-source-default", processId, "task-source", "task-default", "default")
       ]
     ))
-    const initialized = BpmnKernel.initialize(compiled, services())
+    const initialized = initializeKernel(compiled, services())
     assert(Result.isSuccess(initialized))
     const sourceToken = initialized.success.state.tokens.find((token) =>
       token.status === "active" &&
@@ -1191,7 +1210,7 @@ describe("BpmnKernel", () => {
       ]
     ))
 
-    const initialized = BpmnKernel.initialize(compiled, services({ first: true, second: true }))
+    const initialized = initializeKernel(compiled, services({ first: true, second: true }))
     assert.isTrue(Result.isSuccess(initialized))
     if (Result.isFailure(initialized)) {
       throw initialized.failure
@@ -1221,7 +1240,7 @@ describe("BpmnKernel", () => {
         flow("flow-join-after", processId, "gateway-join", "task-after", "normal")
       ]
     ))
-    const initialized = BpmnKernel.initialize(compiled, services())
+    const initialized = initializeKernel(compiled, services())
     assert.isTrue(Result.isSuccess(initialized))
     if (Result.isFailure(initialized)) {
       throw initialized.failure
@@ -1306,7 +1325,7 @@ describe("BpmnKernel", () => {
         flow("flow-join-after", processId, "gateway-join", "task-after", "normal")
       ]
     ))
-    const initialized = BpmnKernel.initialize(compiled, services())
+    const initialized = initializeKernel(compiled, services())
     assert(Result.isSuccess(initialized))
     const seeded = structuredClone(initialized.success.state)
     const tokenA = seeded.tokens.find((token) =>
@@ -1378,7 +1397,7 @@ describe("BpmnKernel", () => {
         flow("flow-split-task", processId, "gateway-split", "task-right", "normal")
       ]
     ))
-    const initialized = BpmnKernel.initialize(compiled, services())
+    const initialized = initializeKernel(compiled, services())
     assert.isTrue(Result.isSuccess(initialized))
     if (Result.isFailure(initialized)) {
       throw initialized.failure
@@ -1406,7 +1425,7 @@ describe("BpmnKernel", () => {
         flow("flow-inner-end", "subprocess", "task-inner", "end-sub", "normal")
       ]
     ))
-    const initialized = BpmnKernel.initialize(compiled, services())
+    const initialized = initializeKernel(compiled, services())
     assert.isTrue(Result.isSuccess(initialized))
     if (Result.isFailure(initialized)) {
       throw initialized.failure
@@ -1451,7 +1470,7 @@ describe("BpmnKernel", () => {
         flow("flow-sub-inner", "subprocess", "start-sub", "task-inner", "normal")
       ]
     ))
-    const initialized = BpmnKernel.initialize(compiled, services())
+    const initialized = initializeKernel(compiled, services())
     assert.isTrue(Result.isSuccess(initialized))
     if (Result.isFailure(initialized)) {
       throw initialized.failure
@@ -1494,7 +1513,7 @@ describe("BpmnKernel", () => {
       ],
       [flow("flow-start-task", processId, "start", "task", "normal")]
     ))
-    const initialized = BpmnKernel.initialize(compiled, services())
+    const initialized = initializeKernel(compiled, services())
     assert(Result.isSuccess(initialized))
     const taskToken = initialized.success.state.tokens.find((token) =>
       token.status === "active" && token.position._tag === "AtNode"
@@ -1566,11 +1585,11 @@ describe("BpmnKernel", () => {
     )
     const compiled = compile(definition)
     ;(compiled.orderedOutgoingByNodeId as Map<string, ReadonlyArray<string>>).set("start", [])
-    const initialized = BpmnKernel.initialize(compiled, services())
+    const initialized = initializeKernel(compiled, services())
     assert(Result.isSuccess(initialized))
     assert.deepStrictEqual(activeNodeIds(initialized.success.state), ["task"])
     const forged = { ...compiled }
-    const forgedResult = BpmnKernel.initialize(forged, services())
+    const forgedResult = initializeKernel(forged, services())
     assert(Result.isFailure(forgedResult))
     assert(forgedResult.failure.diagnostics.some((diagnostic) => diagnostic.code === BpmnKernel.Codes.InvalidKernel))
 
@@ -1620,14 +1639,14 @@ describe("BpmnKernel", () => {
         return now
       }
     }) as BpmnKernel.Services
-    const hostile = BpmnKernel.initialize(compiled, hostileServices)
+    const hostile = initializeKernel(compiled, hostileServices)
     assert(Result.isFailure(hostile))
     assert.isFalse(getterRead)
     assert(
       hostile.failure.diagnostics.some((diagnostic) => diagnostic.code === BpmnKernel.Codes.InvalidServices)
     )
 
-    const initialized = BpmnKernel.initialize(compiled, services())
+    const initialized = initializeKernel(compiled, services())
     assert(Result.isSuccess(initialized))
     const waiting = initialized.success.state.tokens.find((token) =>
       token.status === "active" && token.position._tag === "AtNode"
@@ -1665,7 +1684,7 @@ describe("BpmnKernel", () => {
         flow("flow-task-end", processId, "task", "end", "normal")
       ]
     ))
-    const initialized = BpmnKernel.initialize(compiled, services())
+    const initialized = initializeKernel(compiled, services())
     assert(Result.isSuccess(initialized))
     const waiting = initialized.success.state.tokens.find((token) =>
       token.status === "active" &&
@@ -1745,6 +1764,7 @@ describe("BpmnKernel", () => {
       "different-profile-v1"
     )
     const changedLimits = prepareResult(baselineModel, {
+      ...limits,
       maxAutomaticTransitions: limits.maxAutomaticTransitions + 1,
       maxMultiInstanceCardinality: limits.maxMultiInstanceCardinality
     })
@@ -1807,7 +1827,7 @@ describe("BpmnKernel", () => {
       )
     }
 
-    const initialized = BpmnKernel.initialize(baseline, services())
+    const initialized = initializeKernel(baseline, services())
     assert(Result.isSuccess(initialized))
     assert.strictEqual(
       initialized.success.events[0]?._tag,
@@ -1892,7 +1912,7 @@ describe("BpmnKernel", () => {
       ],
       [flow("flow-start-task", processId, "start", "task", "normal")]
     ))
-    const initialized = BpmnKernel.initialize(compiled, services())
+    const initialized = initializeKernel(compiled, services())
     assert(Result.isSuccess(initialized))
 
     const tampered = structuredClone(initialized.success.events)
@@ -1948,7 +1968,7 @@ describe("BpmnKernel", () => {
       ]
     }
     const compiled = compile(definition)
-    const initialized = BpmnKernel.initialize(compiled, services())
+    const initialized = initializeKernel(compiled, services())
     assert(Result.isSuccess(initialized))
     const activeToken = initialized.success.state.tokens.find((token) => token.status === "active")
     if (activeToken === undefined) {
@@ -2045,6 +2065,7 @@ describe("BpmnKernel", () => {
       ]
     )
     const bounded = prepareResult(automaticCycle, {
+      ...limits,
       maxAutomaticTransitions: 8,
       maxMultiInstanceCardinality: limits.maxMultiInstanceCardinality
     })
@@ -2054,7 +2075,7 @@ describe("BpmnKernel", () => {
         ? bounded.failure.diagnostics.map((diagnostic) => `${diagnostic.code}:${diagnostic.message}`).join(",")
         : undefined
     )
-    const exceeded = BpmnKernel.initialize(bounded.success, services())
+    const exceeded = initializeKernel(bounded.success, services())
     assert(Result.isFailure(exceeded))
     assert(
       exceeded.failure.diagnostics.some((diagnostic) =>
@@ -2069,8 +2090,8 @@ describe("BpmnKernel", () => {
       ],
       [flow("flow-start-task", processId, "start", "task", "normal")]
     ))
-    const first = BpmnKernel.initialize(deterministic, services())
-    const second = BpmnKernel.initialize(deterministic, services())
+    const first = initializeKernel(deterministic, services())
+    const second = initializeKernel(deterministic, services())
     assert(Result.isSuccess(first))
     assert(Result.isSuccess(second))
     assert.deepStrictEqual(first.success, second.success)
@@ -2283,7 +2304,7 @@ describe("BpmnKernel", () => {
 
   it("executes and replays a test-before Standard Loop with zero iterations", () => {
     const compiled = compile(standardLoopModel(true, 3))
-    const initialized = BpmnKernel.initialize(
+    const initialized = initializeKernel(
       compiled,
       services({ repeat: false })
     )
@@ -2324,7 +2345,7 @@ describe("BpmnKernel", () => {
 
   it("persists exact test-before iterations, replays them, and makes old completion idempotent", () => {
     const compiled = compile(standardLoopModel(true, 5))
-    const initialized = BpmnKernel.initialize(
+    const initialized = initializeKernel(
       compiled,
       services({ repeat: true })
     )
@@ -2452,7 +2473,7 @@ describe("BpmnKernel", () => {
         return Result.succeed({ result: true, steps: 1 })
       }
     }
-    const initialized = BpmnKernel.initialize(compiled, loopServices)
+    const initialized = initializeKernel(compiled, loopServices)
     assert.isTrue(Result.isSuccess(initialized))
     if (Result.isFailure(initialized)) {
       throw initialized.failure
@@ -2520,7 +2541,7 @@ describe("BpmnKernel", () => {
 
   it("rejects tampered Standard Loop activation, decision evidence, iteration, and completion cause", () => {
     const compiled = compile(standardLoopModel(true, 5))
-    const initialized = BpmnKernel.initialize(
+    const initialized = initializeKernel(
       compiled,
       services({ repeat: true })
     )
@@ -2600,7 +2621,7 @@ describe("BpmnKernel", () => {
       standardLoopModel(false, 3),
       [taskBinding("task-loop")]
     )
-    const initialized = BpmnKernel.initialize(compiled, services())
+    const initialized = initializeKernel(compiled, services())
     assert.isTrue(Result.isSuccess(initialized))
     if (Result.isFailure(initialized)) {
       throw initialized.failure
@@ -2717,7 +2738,7 @@ describe("BpmnKernel", () => {
         errorRef
       }])
     ])
-    const initialized = BpmnKernel.initialize(compiled, services())
+    const initialized = initializeKernel(compiled, services())
     assert.isTrue(Result.isSuccess(initialized))
     if (Result.isFailure(initialized)) {
       throw initialized.failure
@@ -2801,7 +2822,7 @@ describe("BpmnKernel", () => {
         flow("flow-join-after", processId, "gateway-join", "task-after", "normal")
       ]
     ))
-    const initialized = BpmnKernel.initialize(compiled, services())
+    const initialized = initializeKernel(compiled, services())
     assert.isTrue(Result.isSuccess(initialized))
     if (Result.isFailure(initialized)) {
       throw initialized.failure

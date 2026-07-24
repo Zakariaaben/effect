@@ -91,7 +91,12 @@ const prepare = (input: BpmnModel.BpmnModel): BpmnKernel.CompiledKernel =>
       rootProcessId: processId,
       limits: {
         maxAutomaticTransitions: 100,
-        maxMultiInstanceCardinality: 128
+        maxExecutionInputCanonicalBytes: 1_048_576,
+        maxMultiInstanceCardinality: 128,
+        maxMultiInstanceCollectionCanonicalBytes: 1_048_576,
+        maxMultiInstanceItemCanonicalBytes: 262_144,
+        maxMultiInstanceOutputCanonicalBytes: 1_048_576,
+        maxMultiInstanceItemOutputCanonicalBytes: 262_144
       },
       evaluatorBindings: []
     }).pipe(Effect.provideService(Crypto.Crypto, testCrypto))
@@ -105,7 +110,14 @@ describe("BpmnHistory", () => {
   it.effect("seals and verifies a complete exact-model journal", () =>
     Effect.gen(function*() {
       const kernel = prepare(model())
-      const initialized = BpmnKernel.initialize(kernel, { now })
+      const initialized = BpmnKernel.initialize(
+        kernel,
+        {
+          commandVersion: BpmnKernel.InitializeCommandVersion,
+          input: null
+        },
+        { now }
+      )
       assert(Result.isSuccess(initialized))
 
       const sealed = yield* BpmnHistory.seal(
@@ -127,7 +139,14 @@ describe("BpmnHistory", () => {
   it.effect("detects payload and digest corruption before kernel replay", () =>
     Effect.gen(function*() {
       const kernel = prepare(model())
-      const initialized = BpmnKernel.initialize(kernel, { now })
+      const initialized = BpmnKernel.initialize(
+        kernel,
+        {
+          commandVersion: BpmnKernel.InitializeCommandVersion,
+          input: null
+        },
+        { now }
+      )
       assert(Result.isSuccess(initialized))
       const sealed = yield* BpmnHistory.seal(
         kernel,
@@ -162,7 +181,14 @@ describe("BpmnHistory", () => {
     Effect.gen(function*() {
       const kernel = prepare(model())
       const changedKernel = prepare(model("changed semantic name"))
-      const initialized = BpmnKernel.initialize(kernel, { now })
+      const initialized = BpmnKernel.initialize(
+        kernel,
+        {
+          commandVersion: BpmnKernel.InitializeCommandVersion,
+          input: null
+        },
+        { now }
+      )
       assert(Result.isSuccess(initialized))
       const sealed = yield* BpmnHistory.seal(
         kernel,

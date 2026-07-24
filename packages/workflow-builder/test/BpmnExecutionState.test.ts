@@ -357,6 +357,14 @@ const state = (): BpmnExecutionState.BpmnExecutionState => ({
   },
   status: "active",
   startedAt: "2026-07-23T10:00:00.000Z",
+  input: {
+    caseId: "case-1",
+    reviewItems: [
+      { documentId: "doc-1" },
+      { documentId: "doc-2" },
+      { documentId: "doc-3" }
+    ]
+  },
   extensionElements: [{
     namespaceUri: "urn:effect:test",
     localName: "meta",
@@ -693,6 +701,60 @@ const completedByConditionMultiInstanceState = (): BpmnExecutionState.BpmnExecut
   return input
 }
 
+const completedCollectionMultiInstanceFixture = (): {
+  readonly model: BpmnModel.BpmnModel
+  readonly state: BpmnExecutionState.BpmnExecutionState
+} => {
+  const inputModel = model()
+  const activity = inputModel.flowNodes.find((node) => node.id === "task-review")
+  if (
+    activity?._tag !== "Task" ||
+    activity.loopCharacteristics?._tag !== "MultiInstanceCharacteristics"
+  ) {
+    throw new Error("missing multi-instance task fixture")
+  }
+  delete activity.loopCharacteristics.cardinality
+  activity.loopCharacteristics.loopDataInputRef = "review-items"
+  activity.loopCharacteristics.loopDataOutputRef = "review-results"
+
+  const inputState = state()
+  const group = inputState.multiInstanceGroups[0]!
+  const close = "2026-07-23T10:00:04.000Z"
+  group.source = {
+    _tag: "Collection",
+    dataInputRef: "review-items",
+    items: [
+      { documentId: "doc-1" },
+      { documentId: "doc-2" },
+      { documentId: "doc-3" }
+    ]
+  }
+  const outputs: ReadonlyArray<Schema.Json> = [
+    { accepted: true, ordinal: 0 },
+    { accepted: false, ordinal: 1 },
+    { accepted: true, ordinal: 2 }
+  ]
+  for (let index = 0; index < group.members.length; index++) {
+    const member = group.members[index]!
+    const token = inputState.tokens.find((candidate) => candidate.tokenId === member.tokenId)!
+    member.status = "completed"
+    member.endedAt ??= close
+    member.output = outputs[index]!
+    token.status = "consumed"
+    token.consumedAt = member.endedAt
+  }
+  group.completedInstanceCount = group.members.length
+  group.status = "completed"
+  group.completionReason = "all-completed"
+  group.closedAt = close
+  group.output = {
+    dataOutputRef: "review-results",
+    items: outputs.map((output) => structuredClone(output))
+  }
+
+  return { model: inputModel, state: inputState }
+}
+
 const assertDiagnostic = (
   result: ReturnType<typeof BpmnExecutionState.validate>,
   code: BpmnExecutionState.ExecutionStateCode,
@@ -719,14 +781,15 @@ describe("BpmnExecutionState", () => {
   it("admits a durable BPMN execution-state snapshot against a validated model", () => {
     const result = BpmnExecutionState.validate(model(), state())
 
-    assert.strictEqual(BpmnExecutionState.BpmnExecutionStateVersion, 5)
-    assert.strictEqual(BpmnExecutionState.BpmnExecutableFingerprintVersion, 3)
-    assert.strictEqual(BpmnExecutionState.BpmnKernelSemanticVersion, "4")
+    assert.strictEqual(BpmnExecutionState.BpmnExecutionStateVersion, 6)
+    assert.strictEqual(BpmnExecutionState.BpmnExecutableFingerprintVersion, 4)
+    assert.strictEqual(BpmnExecutionState.BpmnKernelSemanticVersion, "5")
     assert.isTrue(Result.isSuccess(result))
     if (Result.isFailure(result)) {
       throw result.failure
     }
     assert.isTrue(Object.isFrozen(result.success))
+    assert.isTrue(Object.isFrozen(result.success.input))
     assert.isTrue(Object.isFrozen(result.success.scopeInstances))
     assert.isTrue(Object.isFrozen(result.success.scopeInstances[0]))
 
@@ -806,8 +869,8 @@ describe("BpmnExecutionState", () => {
     sequentialTriggerToken.status = "consumed"
     sequentialTriggerToken.consumedAt = sequentialClose
     const sequentialTail = sequentialGroup.members[2]!
-    sequentialTail.status = "terminated"
-    sequentialTail.terminationReason = "completion-condition"
+    sequentialTail.status = "not-generated"
+    sequentialTail.nonGenerationReason = "completion-condition"
     sequentialGroup.completedInstanceCount = 2
     sequentialGroup.status = "completed"
     sequentialGroup.completionReason = "completion-condition"
@@ -837,6 +900,128 @@ describe("BpmnExecutionState", () => {
     assert(Result.isSuccess(
       BpmnExecutionState.validate(model(), completedByConditionMultiInstanceState())
     ))
+  })
+
+  it("admits input-order aggregate output for an all-completed collection group", () => {
+    const fixture = completedCollectionMultiInstanceFixture()
+    const result = BpmnExecutionState.validate(fixture.model, fixture.state)
+    assert.isTrue(Result.isSuccess(result))
+    if (Result.isFailure(result)) {
+      throw result.failure
+    }
+    const group = result.success.multiInstanceGroups[0]!
+    assert.deepStrictEqual(
+      group.output?.items,
+      group.members.map((member) => member.output)
+    )
+    assert.isTrue(Object.isFrozen(group.output))
+    assert.isTrue(Object.isFrozen(group.output?.items))
+    assert.isTrue(Object.isFrozen(group.members[0]!.output))
+  })
+
+  it("rejects member output before completion and incoherent aggregate output", () => {
+    const activeMemberOutput = state()
+    activeMemberOutput.multiInstanceGroups[0]!.members[1]!.output = {
+      accepted: true
+    }
+    assertDiagnostic(
+      BpmnExecutionState.validate(model(), activeMemberOutput),
+      BpmnExecutionState.Codes.InvalidMultiInstanceGroup,
+      {
+        path: "multiInstanceGroups/0/members/1/output",
+        message: "Only a completed"
+      }
+    )
+
+    const wrongSource = completedCollectionMultiInstanceFixture()
+    wrongSource.state.multiInstanceGroups[0]!.source = {
+      _tag: "Cardinality",
+      value: 3
+    }
+    assertDiagnostic(
+      BpmnExecutionState.validate(wrongSource.model, wrongSource.state),
+      BpmnExecutionState.Codes.InvalidMultiInstanceGroup,
+      {
+        path: "multiInstanceGroups/0/output",
+        message: "requires a collection source"
+      }
+    )
+
+    const wrongStatus = completedCollectionMultiInstanceFixture()
+    const wrongStatusGroup = wrongStatus.state.multiInstanceGroups[0]!
+    wrongStatusGroup.status = "cancelled"
+    wrongStatusGroup.completionReason = "execution-cancelled"
+    assertDiagnostic(
+      BpmnExecutionState.validate(wrongStatus.model, wrongStatus.state),
+      BpmnExecutionState.Codes.InvalidMultiInstanceGroup,
+      {
+        path: "multiInstanceGroups/0/output",
+        message: "only after all members completed"
+      }
+    )
+
+    const wrongReference = completedCollectionMultiInstanceFixture()
+    wrongReference.state.multiInstanceGroups[0]!.output!.dataOutputRef = "other-results"
+    assertDiagnostic(
+      BpmnExecutionState.validate(wrongReference.model, wrongReference.state),
+      BpmnExecutionState.Codes.InvalidMultiInstanceGroup,
+      {
+        path: "multiInstanceGroups/0/output/dataOutputRef",
+        message: "exactly match"
+      }
+    )
+
+    const wrongLength = completedCollectionMultiInstanceFixture()
+    wrongLength.state.multiInstanceGroups[0]!.output!.items.pop()
+    assertDiagnostic(
+      BpmnExecutionState.validate(wrongLength.model, wrongLength.state),
+      BpmnExecutionState.Codes.InvalidMultiInstanceGroup,
+      {
+        path: "multiInstanceGroups/0/output/items",
+        message: "length must equal"
+      }
+    )
+
+    const missingMemberOutput = completedCollectionMultiInstanceFixture()
+    delete missingMemberOutput.state.multiInstanceGroups[0]!.members[1]!.output
+    assertDiagnostic(
+      BpmnExecutionState.validate(missingMemberOutput.model, missingMemberOutput.state),
+      BpmnExecutionState.Codes.InvalidMultiInstanceGroup,
+      {
+        path: "multiInstanceGroups/0/members/1/output",
+        message: "requires completed member"
+      }
+    )
+
+    const mismatchedItem = completedCollectionMultiInstanceFixture()
+    mismatchedItem.state.multiInstanceGroups[0]!.output!.items[1] = {
+      accepted: true,
+      ordinal: 1
+    }
+    assertDiagnostic(
+      BpmnExecutionState.validate(mismatchedItem.model, mismatchedItem.state),
+      BpmnExecutionState.Codes.InvalidMultiInstanceGroup,
+      {
+        path: "multiInstanceGroups/0/output/items/1",
+        message: "exactly equal"
+      }
+    )
+  })
+
+  it("rejects sparse aggregate output before semantic validation", () => {
+    const fixture = completedCollectionMultiInstanceFixture()
+    const sparse = new Array<Schema.Json>(3)
+    sparse[0] = fixture.state.multiInstanceGroups[0]!.members[0]!.output!
+    sparse[2] = fixture.state.multiInstanceGroups[0]!.members[2]!.output!
+    fixture.state.multiInstanceGroups[0]!.output!.items = sparse
+    assertDiagnostic(
+      BpmnExecutionState.validate(fixture.model, fixture.state),
+      BpmnExecutionState.Codes.InvalidJson,
+      {
+        path: "multiInstanceGroups/0/output/items",
+        message: "dense"
+      }
+    )
   })
 
   it("rejects corrupt multi-instance source, ordering, counts, lifecycle, and activation authority", () => {
@@ -962,7 +1147,7 @@ describe("BpmnExecutionState", () => {
       BpmnExecutionState.Codes.InvalidMultiInstanceGroup,
       {
         path: "multiInstanceGroups/0/members/2",
-        message: "parallel multi-instance member"
+        message: "complete activated token lifecycle"
       }
     )
   })
@@ -1425,7 +1610,11 @@ describe("BpmnExecutionState", () => {
         occurrenceDigest,
         firstActivityDigest: operationDigest,
         attempt: 1,
-        completedActivityDigest: operationDigest
+        completedActivityDigest: operationDigest,
+        output: {
+          _tag: "Inline",
+          value: { accepted: true }
+        }
       },
       resolvedAt: token.consumedAt
     }]

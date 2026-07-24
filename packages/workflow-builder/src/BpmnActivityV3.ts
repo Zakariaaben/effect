@@ -41,7 +41,7 @@ export const BindingVersion = 1 as const
  * @category constants
  * @since 4.0.0
  */
-export const OutcomeVersion = 1 as const
+export const OutcomeVersion = 2 as const
 
 /**
  * Version of the task-resolution command.
@@ -49,7 +49,7 @@ export const OutcomeVersion = 1 as const
  * @category constants
  * @since 4.0.0
  */
-export const CommandVersion = 1 as const
+export const CommandVersion = 2 as const
 
 /**
  * Version of one durable activity-resolution record.
@@ -57,7 +57,7 @@ export const CommandVersion = 1 as const
  * @category constants
  * @since 4.0.0
  */
-export const ResolutionVersion = 1 as const
+export const ResolutionVersion = 2 as const
 
 /**
  * Exact promotion of one protocol-v3 application-failure identity to one
@@ -131,7 +131,8 @@ const OutcomeCoordinates = {
 export const TaskSucceeded = Schema.TaggedStruct("Succeeded", {
   ...OutcomeCoordinates,
   attempt: Wire.PositiveSafeInt,
-  completedActivityDigest: Wire.OperationDigest
+  completedActivityDigest: Wire.OperationDigest,
+  output: Wire.InlineEncodedPayload
 }).annotate({
   identifier: "WorkflowBpmnActivityV3TaskSucceeded",
   parseOptions: strictParseOptions

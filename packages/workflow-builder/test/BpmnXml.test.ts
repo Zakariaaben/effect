@@ -1,5 +1,6 @@
 import { assert, describe, it } from "@effect/vitest"
 import * as Result from "effect/Result"
+import * as BpmnModel from "../src/BpmnModel.ts"
 import * as BpmnXml from "../src/BpmnXml.ts"
 import * as BpmnXmlAst from "../src/BpmnXmlAst.ts"
 
@@ -264,7 +265,7 @@ describe("BpmnXml", () => {
     ))
     assert.strictEqual(
       explicit.profileId,
-      "bpmn-2.0.2-core-process-di-v4"
+      "bpmn-2.0.2-core-process-di-v5"
     )
     const explicitTask = explicit.model.flowNodes[1]!
     assert.strictEqual(explicitTask._tag, "Task")
@@ -709,6 +710,107 @@ ${condition}
     }
   })
 
+  it("round-trips scalar Multi-Instance data items with namespace-expanded subject QNames", () => {
+    const fixture = (itemPrefix: string): string =>
+      multiInstanceXml(
+        `<mi:multiInstanceLoopCharacteristics isSequential="false">
+          <mi:loopDataInputRef>tns:items_input</mi:loopDataInputRef>
+          <mi:loopDataOutputRef>tns:items_output</mi:loopDataOutputRef>
+          <mi:inputDataItem
+            id="input_item"
+            name="Current order"
+            itemSubjectRef="${itemPrefix}:Order"/>
+          <mi:outputDataItem
+            id="output_item"
+            name="Processed order"
+            itemSubjectRef="tns:ProcessedOrder"
+            isCollection="0"/>
+          <mi:completionCondition xsi:type="mi:tFormalExpression">accepted</mi:completionCondition>
+        </mi:multiInstanceLoopCharacteristics>`
+      ).replace(
+        `xmlns:tns="urn:workflow:multi-instance"`,
+        `xmlns:tns="urn:workflow:multi-instance" xmlns:${itemPrefix}="urn:example:order"`
+      )
+
+    const imported = success(BpmnXml.importXml(
+      fixture("itemType"),
+      multiInstanceOptions
+    ))
+    const alternatePrefix = success(BpmnXml.importXml(
+      fixture("subject"),
+      multiInstanceOptions
+    ))
+    assert.deepStrictEqual(alternatePrefix.model, imported.model)
+
+    const task = imported.model.flowNodes[1]!
+    if (
+      task._tag !== "Task" ||
+      task.loopCharacteristics?._tag !== "MultiInstanceCharacteristics"
+    ) {
+      throw new Error("expected imported multi-instance task")
+    }
+    assert.deepStrictEqual(task.loopCharacteristics.inputDataItem, {
+      id: "input_item",
+      name: "Current order",
+      itemSubjectRef: {
+        namespaceUri: "urn:example:order",
+        localName: "Order"
+      },
+      isCollection: false,
+      extensionElements: []
+    })
+    assert.deepStrictEqual(task.loopCharacteristics.outputDataItem, {
+      id: "output_item",
+      name: "Processed order",
+      itemSubjectRef: {
+        namespaceUri: "urn:workflow:multi-instance",
+        localName: "ProcessedOrder"
+      },
+      isCollection: false,
+      extensionElements: []
+    })
+    assert.isTrue(
+      imported.mappingReport.defaultsApplied.some(
+        (entry) => entry.code === "MultiInstanceInputDataItemCollectionDefault"
+      )
+    )
+
+    const serialized = success(BpmnXml.exportXml(imported, {
+      format: "compact"
+    }))
+    assert.include(serialized, `xmlns:item0="urn:example:order"`)
+    assert.include(
+      serialized,
+      `<bpmn:inputDataItem id="input_item" name="Current order" itemSubjectRef="item0:Order" isCollection="false"/>`
+    )
+    assert.include(
+      serialized,
+      `<bpmn:outputDataItem id="output_item" name="Processed order" itemSubjectRef="tns:ProcessedOrder" isCollection="false"/>`
+    )
+    const orderedChildren = [
+      "<bpmn:loopDataInputRef>",
+      "<bpmn:loopDataOutputRef>",
+      "<bpmn:inputDataItem",
+      "<bpmn:outputDataItem",
+      "<bpmn:completionCondition"
+    ]
+    const indexes = orderedChildren.map((child) => serialized.indexOf(child))
+    assert.isAtLeast(indexes[0]!, 0)
+    for (let index = 1; index < indexes.length; index++) {
+      assert.isAbove(indexes[index]!, indexes[index - 1]!)
+    }
+
+    const reimported = success(BpmnXml.importXml(
+      serialized,
+      multiInstanceOptions
+    ))
+    assert.deepStrictEqual(reimported.model, imported.model)
+    assert.strictEqual(
+      success(BpmnXml.exportXml(reimported, { format: "compact" })),
+      serialized
+    )
+  })
+
   it("exports Multi-Instance children in BPMN schema order at a canonical fixed point", () => {
     for (
       const fixture of [
@@ -774,6 +876,15 @@ ${condition}
         wrap(
           `<mi:loopDataInputRef>items</mi:loopDataInputRef><mi:loopCardinality xsi:type="mi:tFormalExpression">2</mi:loopCardinality>`
         ),
+        wrap(
+          `<mi:loopDataInputRef>items</mi:loopDataInputRef><mi:inputDataItem id="item_1"/><mi:inputDataItem id="item_2"/>`
+        ),
+        wrap(
+          `<mi:loopDataInputRef>items</mi:loopDataInputRef><mi:outputDataItem id="output_item"/><mi:inputDataItem id="input_item"/>`
+        ),
+        wrap(
+          `${cardinality}${completion}<mi:inputDataItem id="input_item"/>`
+        ),
         multiInstanceXml().replace(
           `</mi:multiInstanceLoopCharacteristics>`,
           `</mi:multiInstanceLoopCharacteristics><mi:multiInstanceLoopCharacteristics isSequential="true">${cardinality}</mi:multiInstanceLoopCharacteristics>`
@@ -795,8 +906,6 @@ ${condition}
 
     for (
       const unsupported of [
-        "<mi:inputDataItem id=\"item\"/>",
-        "<mi:outputDataItem id=\"item\"/>",
         "<mi:complexBehaviorDefinition/>",
         "<mi:vendorSpecific/>"
       ]
@@ -807,6 +916,150 @@ ${condition}
           multiInstanceOptions
         )),
         BpmnXml.Codes.UnsupportedElement
+      )
+    }
+  })
+
+  it("preserves empty data-item names and fails closed on malformed or unrepresented content", () => {
+    const references = `<mi:loopDataInputRef>items_input</mi:loopDataInputRef>
+      <mi:loopDataOutputRef>items_output</mi:loopDataOutputRef>`
+    const wrap = (children: string) =>
+      multiInstanceXml(
+        `<mi:multiInstanceLoopCharacteristics isSequential="true">${children}</mi:multiInstanceLoopCharacteristics>`
+      )
+    const emptyName = success(BpmnXml.importXml(
+      wrap(
+        `${references}<mi:inputDataItem id="item" name=""/>`
+      ),
+      multiInstanceOptions
+    ))
+    const emptyNameTask = emptyName.model.flowNodes.find((node) => node.id === "process_item")
+    assert.strictEqual(
+      emptyNameTask?._tag === "Task" &&
+        emptyNameTask.loopCharacteristics?._tag ===
+          "MultiInstanceCharacteristics"
+        ? emptyNameTask.loopCharacteristics.inputDataItem?.name
+        : undefined,
+      ""
+    )
+    assert.include(
+      success(BpmnXml.exportXml(emptyName, { format: "compact" })),
+      `name=""`
+    )
+
+    for (
+      const [candidate, code] of [
+        [
+          wrap(`${references}<mi:inputDataItem name="Missing id"/>`),
+          BpmnXml.Codes.InvalidStructure
+        ],
+        [
+          wrap(`${references}<mi:inputDataItem id="bad id"/>`),
+          BpmnXml.Codes.InvalidId
+        ],
+        [
+          wrap(`${references}<mi:inputDataItem id="item" itemSubjectRef="missing:Order"/>`),
+          BpmnXml.Codes.UnknownPrefix
+        ],
+        [
+          wrap(`${references}<mi:inputDataItem id="item" itemSubjectRef="a:b:c"/>`),
+          BpmnXml.Codes.InvalidQName
+        ],
+        [
+          wrap(`${references}<mi:inputDataItem id="item" unknown="value"/>`),
+          BpmnXml.Codes.UnsupportedAttribute
+        ],
+        [
+          wrap(`${references}<mi:inputDataItem id="item" isCollection="sometimes"/>`),
+          BpmnXml.Codes.InvalidLexicalValue
+        ],
+        [
+          wrap(`${references}<mi:inputDataItem id="item">text</mi:inputDataItem>`),
+          BpmnXml.Codes.InvalidStructure
+        ],
+        [
+          wrap(
+            `${references}<mi:inputDataItem id="item"><mi:documentation>hidden</mi:documentation></mi:inputDataItem>`
+          ),
+          BpmnXml.Codes.UnsupportedElement
+        ],
+        [
+          wrap(
+            `${references}<mi:inputDataItem id="item"><mi:extensionElements/></mi:inputDataItem>`
+          ),
+          BpmnXml.Codes.UnsupportedElement
+        ]
+      ] as const
+    ) {
+      assert.include(
+        failureCodes(BpmnXml.importXml(candidate, multiInstanceOptions)),
+        code
+      )
+    }
+
+    const foreignAttribute = wrap(
+      `${references}<mi:inputDataItem id="item" foreign:flag="true"/>`
+    ).replace(
+      `xmlns:tns="urn:workflow:multi-instance"`,
+      `xmlns:tns="urn:workflow:multi-instance" xmlns:foreign="urn:foreign"`
+    )
+    assert.include(
+      failureCodes(BpmnXml.importXml(foreignAttribute, multiInstanceOptions)),
+      BpmnXml.Codes.UnsupportedNamespace
+    )
+
+    const foreignChild = wrap(
+      `${references}<mi:inputDataItem id="item"><foreign:value/></mi:inputDataItem>`
+    ).replace(
+      `xmlns:tns="urn:workflow:multi-instance"`,
+      `xmlns:tns="urn:workflow:multi-instance" xmlns:foreign="urn:foreign"`
+    )
+    assert.include(
+      failureCodes(BpmnXml.importXml(foreignChild, multiInstanceOptions)),
+      BpmnXml.Codes.UnsupportedNamespace
+    )
+
+    assert.include(
+      failureCodes(BpmnXml.importXml(
+        wrap(
+          `<mi:loopDataInputRef>items_input</mi:loopDataInputRef><mi:inputDataItem id="item" isCollection="true"/>`
+        ),
+        multiInstanceOptions
+      )),
+      BpmnXml.Codes.UnsupportedModel
+    )
+    assert.include(
+      failureCodes(BpmnXml.importXml(
+        wrap(
+          `<mi:loopCardinality xsi:type="mi:tFormalExpression">2</mi:loopCardinality><mi:inputDataItem id="item"/>`
+        ),
+        multiInstanceOptions
+      )),
+      BpmnModel.Codes.InvalidLoopCharacteristics
+    )
+    assert.include(
+      failureCodes(BpmnXml.importXml(
+        wrap(
+          `<mi:loopDataInputRef>items_input</mi:loopDataInputRef><mi:outputDataItem id="item"/>`
+        ),
+        multiInstanceOptions
+      )),
+      BpmnModel.Codes.InvalidLoopCharacteristics
+    )
+
+    for (
+      const duplicate of [
+        wrap(
+          `<mi:loopDataInputRef>items_input</mi:loopDataInputRef><mi:inputDataItem id="process_item"/>`
+        ),
+        wrap(
+          `${references}<mi:inputDataItem id="item"/><mi:outputDataItem id="item"/>`
+        )
+      ]
+    ) {
+      assert.include(
+        failureCodes(BpmnXml.importXml(duplicate, multiInstanceOptions)),
+        BpmnXml.Codes.DuplicateId
       )
     }
   })

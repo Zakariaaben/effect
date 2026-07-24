@@ -89,6 +89,9 @@ const sortDiagnostics = (diagnostics: Array<Diagnostic.Diagnostic>): Array<Diagn
     return left.message.localeCompare(right.message)
   })
 
+const sameJson = (left: Schema.Json, right: Schema.Json): boolean =>
+  Json.canonicalizeSnapshot(left) === Json.canonicalizeSnapshot(right)
+
 const compilationError = (
   head: Diagnostic.Diagnostic,
   tail: ReadonlyArray<Diagnostic.Diagnostic> = []
@@ -110,7 +113,7 @@ const codeError = (
  * @category constants
  * @since 4.0.0
  */
-export const BpmnExecutionStateVersion = 5 as const
+export const BpmnExecutionStateVersion = 6 as const
 
 /**
  * Version of the executable BPMN fingerprint preimage.
@@ -118,7 +121,7 @@ export const BpmnExecutionStateVersion = 5 as const
  * @category constants
  * @since 4.0.0
  */
-export const BpmnExecutableFingerprintVersion = 3 as const
+export const BpmnExecutableFingerprintVersion = 4 as const
 
 /**
  * Version of the token-kernel semantics committed by an execution.
@@ -126,7 +129,7 @@ export const BpmnExecutableFingerprintVersion = 3 as const
  * @category constants
  * @since 4.0.0
  */
-export const BpmnKernelSemanticVersion = "4" as const
+export const BpmnKernelSemanticVersion = "5" as const
 
 /**
  * Execution snapshot identity pinned to one BPMN semantic model version.
@@ -374,7 +377,66 @@ export const MultiInstanceSource = Schema.Union([
 export type MultiInstanceSource = Schema.Schema.Type<typeof MultiInstanceSource>
 
 /**
+ * Durable input-order aggregate produced by one collection-backed
+ * multi-instance activation.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const MultiInstanceOutput = Schema.Struct({
+  dataOutputRef: Identifier,
+  items: Schema.Array(Schema.Json)
+}).annotate({
+  identifier: "WorkflowBpmnMultiInstanceOutput",
+  parseOptions: strictParseOptions
+})
+
+/**
+ * The decoded type of {@link MultiInstanceOutput}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type MultiInstanceOutput = Schema.Schema.Type<typeof MultiInstanceOutput>
+
+/**
+ * Why one generated member was terminated or one planned sequential member
+ * was never generated.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const MultiInstanceClosureReason = Schema.Literals([
+  "completion-condition",
+  "boundary-error-caught",
+  "uncaught-bpmn-error",
+  "unmapped-business-failure",
+  "execution-cancelled"
+]).annotate({
+  identifier: "WorkflowBpmnMultiInstanceClosureReason"
+})
+
+/**
+ * The decoded type of {@link MultiInstanceClosureReason}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type MultiInstanceClosureReason = Schema.Schema.Type<
+  typeof MultiInstanceClosureReason
+>
+
+/**
  * One durable member of a multi-instance activation.
+ *
+ * **Details**
+ *
+ * A sequential group's `pending` suffix records the fixed source partition
+ * without claiming that those BPMN instances have been generated.
+ * `not-generated` is the terminal evidence that group completion or
+ * cancellation suppressed one such slot. Only `active`, `completed`, and
+ * `terminated` members are generated instances and participate in the BPMN
+ * runtime instance counters.
  *
  * @category schemas
  * @since 4.0.0
@@ -382,17 +444,19 @@ export type MultiInstanceSource = Schema.Schema.Type<typeof MultiInstanceSource>
 export const MultiInstanceMember = Schema.Struct({
   index: NonNegativeInt,
   itemKey: Identifier,
-  status: Schema.Literals(["pending", "active", "completed", "terminated"]),
-  terminationReason: Schema.optionalKey(Schema.Literals([
-    "completion-condition",
-    "boundary-error-caught",
-    "uncaught-bpmn-error",
-    "unmapped-business-failure",
-    "execution-cancelled"
-  ])),
+  status: Schema.Literals([
+    "pending",
+    "active",
+    "completed",
+    "terminated",
+    "not-generated"
+  ]),
+  terminationReason: Schema.optionalKey(MultiInstanceClosureReason),
+  nonGenerationReason: Schema.optionalKey(MultiInstanceClosureReason),
   tokenId: Schema.optionalKey(Identifier),
   startedAt: Schema.optionalKey(ProtocolV2Wire.Timestamp),
-  endedAt: Schema.optionalKey(ProtocolV2Wire.Timestamp)
+  endedAt: Schema.optionalKey(ProtocolV2Wire.Timestamp),
+  output: Schema.optionalKey(Schema.Json)
 }).annotate({
   identifier: "WorkflowBpmnMultiInstanceMember",
   parseOptions: strictParseOptions
@@ -421,6 +485,7 @@ export const MultiInstanceGroup = Schema.Struct({
   mode: Schema.Literals(["sequential", "parallel"]),
   source: MultiInstanceSource,
   members: Schema.Array(MultiInstanceMember),
+  output: Schema.optionalKey(MultiInstanceOutput),
   completedInstanceCount: NonNegativeInt,
   status: Schema.Literals(["active", "completed", "cancelled"]),
   completionReason: Schema.optionalKey(Schema.Literals([
@@ -642,6 +707,7 @@ export const BpmnExecutionState = Schema.Struct({
   model: ModelReference,
   status: Schema.Literals(["active", "completed", "failed", "cancelled", "terminated"]),
   startedAt: ProtocolV2Wire.Timestamp,
+  input: Schema.Json,
   completedAt: Schema.optionalKey(ProtocolV2Wire.Timestamp),
   extensionElements: Schema.Array(BpmnModel.ExtensionElement),
   scopeInstances: Schema.Array(ScopeInstance),
@@ -2009,6 +2075,7 @@ export const validate = (
     let activeCount = 0
     let pendingCount = 0
     let terminatedCount = 0
+    let notGeneratedCount = 0
     for (let memberIndex = 0; memberIndex < group.members.length; memberIndex++) {
       const member = group.members[memberIndex]!
       const memberPath = [...groupPath, "members", memberIndex] as const
@@ -2035,8 +2102,18 @@ export const validate = (
         activeCount++
       } else if (member.status === "pending") {
         pendingCount++
-      } else {
+      } else if (member.status === "terminated") {
         terminatedCount++
+      } else {
+        notGeneratedCount++
+      }
+
+      if (member.status !== "completed" && member.output !== undefined) {
+        diagnostics.push(codeError(
+          Codes.InvalidMultiInstanceGroup,
+          `Only a completed multi-instance member may retain output`,
+          [...memberPath, "output"]
+        ))
       }
 
       if (member.status === "pending") {
@@ -2044,7 +2121,8 @@ export const validate = (
           member.tokenId !== undefined ||
           member.startedAt !== undefined ||
           member.endedAt !== undefined ||
-          member.terminationReason !== undefined
+          member.terminationReason !== undefined ||
+          member.nonGenerationReason !== undefined
         ) {
           diagnostics.push(codeError(
             Codes.InvalidMultiInstanceGroup,
@@ -2057,7 +2135,8 @@ export const validate = (
           member.tokenId === undefined ||
           member.startedAt === undefined ||
           member.endedAt !== undefined ||
-          member.terminationReason !== undefined
+          member.terminationReason !== undefined ||
+          member.nonGenerationReason !== undefined
         ) {
           diagnostics.push(codeError(
             Codes.InvalidMultiInstanceGroup,
@@ -2070,7 +2149,8 @@ export const validate = (
           member.tokenId === undefined ||
           member.startedAt === undefined ||
           member.endedAt === undefined ||
-          member.terminationReason !== undefined
+          member.terminationReason !== undefined ||
+          member.nonGenerationReason !== undefined
         ) {
           diagnostics.push(codeError(
             Codes.InvalidMultiInstanceGroup,
@@ -2078,30 +2158,43 @@ export const validate = (
             memberPath
           ))
         }
-      } else {
-        const hasNoActivation = member.tokenId === undefined &&
-          member.startedAt === undefined &&
-          member.endedAt === undefined
+      } else if (member.status === "terminated") {
         const hasTerminalActivation = member.tokenId !== undefined &&
           member.startedAt !== undefined &&
           member.endedAt !== undefined
         if (
           member.terminationReason === undefined ||
-          (!hasNoActivation && !hasTerminalActivation)
+          member.nonGenerationReason !== undefined ||
+          !hasTerminalActivation
         ) {
           diagnostics.push(codeError(
             Codes.InvalidMultiInstanceGroup,
-            `Terminated multi-instance member '${member.itemKey}' requires a termination reason and either no activation data or a complete terminal activation`,
+            `Terminated multi-instance member '${member.itemKey}' requires a termination reason and a complete activated token lifecycle`,
             memberPath
           ))
         }
-        if (group.mode === "parallel" && hasNoActivation) {
-          diagnostics.push(codeError(
-            Codes.InvalidMultiInstanceGroup,
-            `Terminated parallel multi-instance member '${member.itemKey}' must retain its activated token lifecycle`,
-            memberPath
-          ))
-        }
+      } else if (
+        member.tokenId !== undefined ||
+        member.startedAt !== undefined ||
+        member.endedAt !== undefined ||
+        member.terminationReason !== undefined ||
+        member.nonGenerationReason === undefined
+      ) {
+        diagnostics.push(codeError(
+          Codes.InvalidMultiInstanceGroup,
+          `Not-generated multi-instance member '${member.itemKey}' requires only a non-generation reason`,
+          memberPath
+        ))
+      }
+      if (
+        member.status === "not-generated" &&
+        group.mode === "parallel"
+      ) {
+        diagnostics.push(codeError(
+          Codes.InvalidMultiInstanceGroup,
+          `Parallel multi-instance member '${member.itemKey}' cannot be marked not-generated`,
+          memberPath
+        ))
       }
 
       if (member.startedAt !== undefined && member.startedAt < group.openedAt) {
@@ -2188,6 +2281,86 @@ export const validate = (
       }
     }
 
+    const characteristics = node !== undefined &&
+        activityLikeTags.has(node._tag) &&
+        "loopCharacteristics" in node &&
+        node.loopCharacteristics?._tag === "MultiInstanceCharacteristics"
+      ? node.loopCharacteristics
+      : undefined
+    if (group.output !== undefined) {
+      if (
+        group.status !== "completed" ||
+        (
+          group.completionReason !== "all-completed" &&
+          !(
+            group.completionReason === "empty" &&
+            group.members.length === 0 &&
+            group.output.items.length === 0
+          )
+        )
+      ) {
+        diagnostics.push(codeError(
+          Codes.InvalidMultiInstanceGroup,
+          `Multi-instance group '${group.groupId}' may retain aggregate output only after all members completed or an empty collection completed`,
+          [...groupPath, "output"]
+        ))
+      }
+      if (group.source._tag !== "Collection") {
+        diagnostics.push(codeError(
+          Codes.InvalidMultiInstanceGroup,
+          `Multi-instance group '${group.groupId}' aggregate output requires a collection source`,
+          [...groupPath, "output"]
+        ))
+      }
+      if (
+        characteristics?.loopDataOutputRef === undefined ||
+        characteristics.loopDataOutputRef !== group.output.dataOutputRef
+      ) {
+        diagnostics.push(codeError(
+          Codes.InvalidMultiInstanceGroup,
+          `Multi-instance group '${group.groupId}' dataOutputRef must exactly match its activity loopDataOutputRef`,
+          [...groupPath, "output", "dataOutputRef"]
+        ))
+      }
+      if (group.output.items.length !== group.members.length) {
+        diagnostics.push(codeError(
+          Codes.InvalidMultiInstanceGroup,
+          `Multi-instance group '${group.groupId}' aggregate output length must equal its members length`,
+          [...groupPath, "output", "items"]
+        ))
+      }
+      for (let memberIndex = 0; memberIndex < group.members.length; memberIndex++) {
+        const member = group.members[memberIndex]!
+        if (member.status !== "completed" || member.output === undefined) {
+          diagnostics.push(codeError(
+            Codes.InvalidMultiInstanceGroup,
+            `Multi-instance group '${group.groupId}' aggregate output requires completed member '${member.itemKey}' to retain output`,
+            [...groupPath, "members", memberIndex, "output"]
+          ))
+          continue
+        }
+        const item = group.output.items[memberIndex]
+        if (item !== undefined && !sameJson(item, member.output)) {
+          diagnostics.push(codeError(
+            Codes.InvalidMultiInstanceGroup,
+            `Multi-instance group '${group.groupId}' aggregate output item '${memberIndex}' must exactly equal its member output`,
+            [...groupPath, "output", "items", memberIndex]
+          ))
+        }
+      }
+    }
+    if (
+      group.status === "completed" &&
+      characteristics?.loopDataOutputRef !== undefined &&
+      group.output === undefined
+    ) {
+      diagnostics.push(codeError(
+        Codes.InvalidMultiInstanceGroup,
+        `Completed multi-instance group '${group.groupId}' must retain the aggregate output required by its activity`,
+        [...groupPath, "output"]
+      ))
+    }
+
     if (group.completedInstanceCount !== exactCompletedCount) {
       diagnostics.push(codeError(
         Codes.InvalidMultiInstanceGroup,
@@ -2204,10 +2377,15 @@ export const validate = (
           groupPath
         ))
       }
-      if (sourceCount === 0 || activeCount === 0 || terminatedCount > 0) {
+      if (
+        sourceCount === 0 ||
+        activeCount === 0 ||
+        terminatedCount > 0 ||
+        notGeneratedCount > 0
+      ) {
         diagnostics.push(codeError(
           Codes.InvalidMultiInstanceGroup,
-          `Active multi-instance group '${group.groupId}' requires at least one active member and cannot contain terminated members`,
+          `Active multi-instance group '${group.groupId}' requires at least one active member and cannot contain closed members`,
           [...groupPath, "members"]
         ))
       }
@@ -2332,18 +2510,28 @@ export const validate = (
         ))
       }
       if (group.mode === "sequential") {
-        let terminatedSeen = false
+        let phase: "completed" | "terminated" | "not-generated" = "completed"
         for (let memberIndex = 0; memberIndex < group.members.length; memberIndex++) {
           const member = group.members[memberIndex]!
-          if (member.status === "terminated") {
-            terminatedSeen = true
-          } else if (terminatedSeen && member.status === "completed") {
+          const valid = phase === "completed"
+            ? member.status === "completed" ||
+              member.status === "terminated" ||
+              member.status === "not-generated"
+            : phase === "terminated"
+            ? member.status === "not-generated"
+            : member.status === "not-generated"
+          if (!valid) {
             diagnostics.push(codeError(
               Codes.InvalidMultiInstanceGroup,
-              `Terminal sequential multi-instance group '${group.groupId}' must retain a completed prefix followed by a terminated suffix`,
+              `Terminal sequential multi-instance group '${group.groupId}' must retain a completed prefix, at most one terminated generated member, then a not-generated suffix`,
               [...groupPath, "members", memberIndex, "status"]
             ))
             break
+          }
+          if (member.status === "terminated") {
+            phase = "terminated"
+          } else if (member.status === "not-generated") {
+            phase = "not-generated"
           }
         }
       }
@@ -2357,6 +2545,21 @@ export const validate = (
             Codes.InvalidMultiInstanceGroup,
             `Terminated member '${member.itemKey}' reason must match group '${group.groupId}' completionReason`,
             [...groupPath, "members", memberIndex, "terminationReason"]
+          ))
+        }
+        if (
+          member.status === "not-generated" &&
+          member.nonGenerationReason !== group.completionReason
+        ) {
+          diagnostics.push(codeError(
+            Codes.InvalidMultiInstanceGroup,
+            `Not-generated member '${member.itemKey}' reason must match group '${group.groupId}' completionReason`,
+            [
+              ...groupPath,
+              "members",
+              memberIndex,
+              "nonGenerationReason"
+            ]
           ))
         }
       }

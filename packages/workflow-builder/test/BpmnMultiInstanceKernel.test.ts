@@ -5,6 +5,7 @@ import * as Result from "effect/Result"
 import * as Schema from "effect/Schema"
 import { createHash } from "node:crypto"
 import * as BpmnActivityV3 from "../src/BpmnActivityV3.ts"
+import * as BpmnData from "../src/BpmnData.ts"
 import type * as BpmnExpression from "../src/BpmnExpression.ts"
 import type * as BpmnExpressionEvaluator from "../src/BpmnExpressionEvaluator.ts"
 import * as BpmnKernel from "../src/BpmnKernel.ts"
@@ -25,11 +26,33 @@ const expression = (source: string): BpmnModel.Expression => ({
 
 const cardinalityExpression = expression("item-count")
 const completionExpression = expression("completed-count >= 2")
+const collectionExpression = expression("execution.items")
+const alternateCollectionExpression = expression("execution.alternateItems")
+const collectionInputRef = "items"
+const collectionOutputRef = "results"
 
 const limits: BpmnKernel.KernelLimits = {
   maxAutomaticTransitions: 1_000,
-  maxMultiInstanceCardinality: 16
+  maxExecutionInputCanonicalBytes: 1_048_576,
+  maxMultiInstanceCardinality: 16,
+  maxMultiInstanceCollectionCanonicalBytes: 1_048_576,
+  maxMultiInstanceItemCanonicalBytes: 262_144,
+  maxMultiInstanceOutputCanonicalBytes: 1_048_576,
+  maxMultiInstanceItemOutputCanonicalBytes: 262_144
 }
+
+const initializeCommand = (
+  input: Schema.Json = null
+): BpmnKernel.InitializeCommand => ({
+  commandVersion: BpmnKernel.InitializeCommandVersion,
+  input
+})
+
+const initializeKernel = (
+  kernel: BpmnKernel.CompiledKernel,
+  runtime: BpmnKernel.Services,
+  input: Schema.Json = null
+): ReturnType<typeof BpmnKernel.initialize> => BpmnKernel.initialize(kernel, initializeCommand(input), runtime)
 
 const testCrypto = Crypto.make({
   randomBytes: (size) => new Uint8Array(size),
@@ -76,6 +99,10 @@ const firstActivityDigest = Schema.decodeUnknownSync(
 const failedActivityDigest = Schema.decodeUnknownSync(
   ProtocolV3Wire.OperationDigest
 )(`sha256:${"d".repeat(64)}`)
+
+const completedActivityDigest = Schema.decodeUnknownSync(
+  ProtocolV3Wire.OperationDigest
+)(`sha256:${"6".repeat(64)}`)
 
 const classificationActivityDigest = Schema.decodeUnknownSync(
   ProtocolV3Wire.OperationDigest
@@ -133,6 +160,24 @@ const failedOutcome = (
     }
   })
 
+const succeededOutcome = (
+  output: Schema.Json
+): BpmnActivityV3.TaskSucceeded =>
+  Schema.decodeUnknownSync(BpmnActivityV3.TaskSucceeded)({
+    _tag: "Succeeded",
+    outcomeVersion: BpmnActivityV3.OutcomeVersion,
+    artifactDigest,
+    semanticNodeId,
+    occurrenceDigest,
+    firstActivityDigest,
+    attempt: 1,
+    completedActivityDigest,
+    output: {
+      _tag: "Inline",
+      value: output
+    }
+  })
+
 interface MultiInstanceFixtureOptions {
   readonly mode: "sequential" | "parallel"
   readonly cardinality?: BpmnModel.Expression
@@ -140,6 +185,8 @@ interface MultiInstanceFixtureOptions {
   readonly behavior?: "all" | "one" | "none" | "complex"
   readonly loopDataInputRef?: string
   readonly loopDataOutputRef?: string
+  readonly inputDataItem?: boolean
+  readonly outputDataItem?: boolean
   readonly oneBehaviorEventRef?: string
   readonly noneBehaviorEventRef?: string
 }
@@ -184,6 +231,24 @@ const multiInstanceModel = (
       ...(options.loopDataOutputRef === undefined
         ? {}
         : { loopDataOutputRef: options.loopDataOutputRef }),
+      ...(options.inputDataItem === true
+        ? {
+          inputDataItem: {
+            id: "current-item",
+            isCollection: false,
+            extensionElements: []
+          }
+        }
+        : {}),
+      ...(options.outputDataItem === true
+        ? {
+          outputDataItem: {
+            id: "current-result",
+            isCollection: false,
+            extensionElements: []
+          }
+        }
+        : {}),
       ...(options.oneBehaviorEventRef === undefined
         ? {}
         : { oneBehaviorEventRef: options.oneBehaviorEventRef }),
@@ -239,6 +304,89 @@ const multiInstanceModel = (
     ]
   }
 }
+
+const collectionModel = (
+  mode: "sequential" | "parallel",
+  options: {
+    readonly output?: boolean
+    readonly declareInputDataItem?: boolean
+  } = {}
+): BpmnModel.BpmnModel =>
+  multiInstanceModel({
+    mode,
+    loopDataInputRef: collectionInputRef,
+    ...(options.output === true
+      ? {
+        loopDataOutputRef: collectionOutputRef,
+        outputDataItem: true
+      }
+      : {}),
+    ...(options.declareInputDataItem === false
+      ? {}
+      : { inputDataItem: true })
+  })
+
+const collectionDataDocument = (
+  withOutput = false
+): BpmnData.BpmnDataDocument => ({
+  documentKind: "BpmnDataDocument",
+  documentVersion: BpmnData.BpmnDataDocumentVersion,
+  bpmnSpecVersion: "2.0.2",
+  extensionElements: [],
+  itemDefinitions: [],
+  dataStores: [],
+  messages: [],
+  errors: [],
+  interfaces: [],
+  dataObjects: [],
+  dataObjectReferences: [],
+  dataStoreReferences: [],
+  properties: [],
+  inputOutputSpecifications: [{
+    id: "multi-instance-io",
+    ownerId: taskNodeId,
+    dataInputs: [{
+      id: collectionInputRef,
+      isCollection: true,
+      extensionElements: []
+    }],
+    dataOutputs: withOutput
+      ? [{
+        id: collectionOutputRef,
+        isCollection: true,
+        extensionElements: []
+      }]
+      : [],
+    inputSets: [{
+      id: "multi-instance-input-set",
+      dataInputRefs: [collectionInputRef],
+      optionalInputRefs: [],
+      whileExecutingInputRefs: [],
+      outputSetRefs: [],
+      extensionElements: []
+    }],
+    outputSets: [{
+      id: "multi-instance-output-set",
+      dataOutputRefs: withOutput ? [collectionOutputRef] : [],
+      optionalOutputRefs: [],
+      whileExecutingOutputRefs: [],
+      inputSetRefs: [],
+      extensionElements: []
+    }],
+    extensionElements: []
+  }],
+  dataAssociations: [],
+  inputOutputBindings: []
+})
+
+const collectionBinding = (
+  selectedExpression: BpmnModel.Expression = collectionExpression
+): BpmnKernel.MultiInstanceCollectionBinding => ({
+  bindingVersion: BpmnKernel.MultiInstanceCollectionBindingVersion,
+  taskNodeId,
+  dataInputRef: collectionInputRef,
+  collectionExpression: selectedExpression
+})
 
 const boundaryErrorModel = (
   options: MultiInstanceFixtureOptions,
@@ -299,7 +447,13 @@ const boundaryErrorModel = (
 const prepareResult = (
   model: BpmnModel.BpmnModel,
   selectedLimits: BpmnKernel.KernelLimits = limits,
-  taskBindings: ReadonlyArray<BpmnActivityV3.TaskBinding> = []
+  taskBindings: ReadonlyArray<BpmnActivityV3.TaskBinding> = [],
+  options: {
+    readonly dataDocument?: BpmnData.BpmnDataDocument
+    readonly collectionBindings?: ReadonlyArray<
+      BpmnKernel.MultiInstanceCollectionBinding
+    >
+  } = {}
 ): Result.Result<BpmnKernel.CompiledKernel, Diagnostic.CompilationError> =>
   Effect.runSync(
     BpmnKernel.prepare(model, {
@@ -307,7 +461,13 @@ const prepareResult = (
       rootProcessId: processId,
       limits: selectedLimits,
       evaluatorBindings: [evaluatorBinding],
-      ...(taskBindings.length === 0 ? {} : { taskBindings })
+      ...(taskBindings.length === 0 ? {} : { taskBindings }),
+      ...(options.dataDocument === undefined
+        ? {}
+        : { dataDocument: options.dataDocument }),
+      ...(options.collectionBindings === undefined
+        ? {}
+        : { collectionBindings: options.collectionBindings })
     }).pipe(
       Effect.provideService(Crypto.Crypto, testCrypto),
       Effect.result
@@ -325,10 +485,36 @@ const success = <A, E>(result: Result.Result<A, E>): A => {
 const compile = (
   model: BpmnModel.BpmnModel,
   selectedLimits: BpmnKernel.KernelLimits = limits,
-  taskBindings: ReadonlyArray<BpmnActivityV3.TaskBinding> = []
+  taskBindings: ReadonlyArray<BpmnActivityV3.TaskBinding> = [],
+  options: {
+    readonly dataDocument?: BpmnData.BpmnDataDocument
+    readonly collectionBindings?: ReadonlyArray<
+      BpmnKernel.MultiInstanceCollectionBinding
+    >
+  } = {}
 ): BpmnKernel.CompiledKernel =>
   success(
-    prepareResult(model, selectedLimits, taskBindings)
+    prepareResult(model, selectedLimits, taskBindings, options)
+  )
+
+const compileCollection = (
+  mode: "sequential" | "parallel",
+  options: {
+    readonly limits?: BpmnKernel.KernelLimits
+    readonly output?: boolean
+    readonly expression?: BpmnModel.Expression
+  } = {}
+): BpmnKernel.CompiledKernel =>
+  compile(
+    collectionModel(mode, { output: options.output }),
+    options.limits ?? limits,
+    options.output === true ? [taskBinding()] : [],
+    {
+      dataDocument: collectionDataDocument(options.output),
+      collectionBindings: [
+        collectionBinding(options.expression)
+      ]
+    }
   )
 
 interface EvaluationObservation {
@@ -369,6 +555,29 @@ const services = (
           ? cardinality
           : context._tag === "MultiInstanceCompletionCondition"
           ? completion(context)
+          : false
+      ) as Schema.Json,
+      steps: 1
+    })
+  }
+})
+
+const collectionServices = (
+  evaluate: (
+    context: BpmnKernel.MultiInstanceCollectionEvaluationContext
+  ) => unknown,
+  observations: Array<EvaluationObservation> = []
+): BpmnKernel.Services => ({
+  now,
+  evaluateExpression: (context) => {
+    observations.push({
+      tag: context._tag,
+      expectedResult: context.request.expectedResult
+    })
+    return Result.succeed({
+      result: (
+        context._tag === "MultiInstanceCollection"
+          ? evaluate(context)
           : false
       ) as Schema.Json,
       steps: 1
@@ -436,7 +645,7 @@ describe("BpmnKernel fixed multi-instance execution", () => {
     }))
     const observations: Array<EvaluationObservation> = []
     const runtime = services(3, () => false, observations)
-    const initialized = success(BpmnKernel.initialize(kernel, runtime))
+    const initialized = success(initializeKernel(kernel, runtime))
     const journal: Array<BpmnKernel.TransitionEvent> = [
       ...initialized.events
     ]
@@ -541,7 +750,7 @@ describe("BpmnKernel fixed multi-instance execution", () => {
     }))
     const observations: Array<EvaluationObservation> = []
     const runtime = services(3, () => false, observations)
-    const initialized = success(BpmnKernel.initialize(kernel, runtime))
+    const initialized = success(initializeKernel(kernel, runtime))
     const journal: Array<BpmnKernel.TransitionEvent> = [
       ...initialized.events
     ]
@@ -592,13 +801,203 @@ describe("BpmnKernel fixed multi-instance execution", () => {
     }
   })
 
+  it("keeps an early-completed sequential prefix and marks its never-generated suffix without inflating terminated counters", () => {
+    const kernel = compile(multiInstanceModel({
+      mode: "sequential",
+      cardinality: cardinalityExpression,
+      completionCondition: completionExpression
+    }))
+    const observations: Array<EvaluationObservation> = []
+    const runtime = services(
+      4,
+      (context) => context.runtime.numberOfCompletedInstances >= 2,
+      observations
+    )
+    const initialized = success(initializeKernel(kernel, runtime))
+    const journal: Array<BpmnKernel.TransitionEvent> = [
+      ...initialized.events
+    ]
+    const generatedTokenIds: Array<string> = []
+    let state = initialized.state
+
+    for (let itemIndex = 0; itemIndex < 2; itemIndex++) {
+      const waiting = activeTaskTokens(state)
+      assert.strictEqual(waiting.length, 1)
+      generatedTokenIds.push(waiting[0]!.tokenId)
+      assert.strictEqual(
+        waiting[0]?.invocation.branch?._tag === "MultiInstanceItem"
+          ? waiting[0].invocation.branch.itemIndex
+          : undefined,
+        itemIndex
+      )
+      const completed = success(BpmnKernel.completeTask(
+        kernel,
+        state,
+        target(waiting[0]!),
+        runtime
+      ))
+      journal.push(...completed.events)
+      state = completed.state
+      assertReplay(kernel, journal, state)
+    }
+
+    assert.strictEqual(state.status, "completed")
+    assert.deepStrictEqual(
+      state.multiInstanceGroups[0]?.members.map((member) => ({
+        index: member.index,
+        status: member.status,
+        tokenId: member.tokenId,
+        startedAt: member.startedAt,
+        endedAt: member.endedAt,
+        terminationReason: member.terminationReason,
+        nonGenerationReason: member.nonGenerationReason
+      })),
+      [
+        {
+          index: 0,
+          status: "completed",
+          tokenId: generatedTokenIds[0],
+          startedAt: now,
+          endedAt: now,
+          terminationReason: undefined,
+          nonGenerationReason: undefined
+        },
+        {
+          index: 1,
+          status: "completed",
+          tokenId: generatedTokenIds[1],
+          startedAt: now,
+          endedAt: now,
+          terminationReason: undefined,
+          nonGenerationReason: undefined
+        },
+        {
+          index: 2,
+          status: "not-generated",
+          tokenId: undefined,
+          startedAt: undefined,
+          endedAt: undefined,
+          terminationReason: undefined,
+          nonGenerationReason: "completion-condition"
+        },
+        {
+          index: 3,
+          status: "not-generated",
+          tokenId: undefined,
+          startedAt: undefined,
+          endedAt: undefined,
+          terminationReason: undefined,
+          nonGenerationReason: "completion-condition"
+        }
+      ]
+    )
+    assert.deepStrictEqual(
+      observations,
+      [
+        {
+          tag: "MultiInstanceCardinality",
+          expectedResult: "non-negative-integer"
+        },
+        {
+          tag: "MultiInstanceCompletionCondition",
+          expectedResult: "boolean",
+          itemIndex: 0,
+          numberOfInstances: 1,
+          numberOfActiveInstances: 0,
+          numberOfCompletedInstances: 1,
+          numberOfTerminatedInstances: 0
+        },
+        {
+          tag: "MultiInstanceCompletionCondition",
+          expectedResult: "boolean",
+          itemIndex: 1,
+          numberOfInstances: 2,
+          numberOfActiveInstances: 0,
+          numberOfCompletedInstances: 2,
+          numberOfTerminatedInstances: 0
+        }
+      ]
+    )
+    assert.deepStrictEqual(
+      journal.flatMap((event) =>
+        event._tag === "MultiInstanceItemNotGenerated"
+          ? [{
+            itemIndex: event.itemIndex,
+            itemKey: event.itemKey,
+            reason: event.reason
+          }]
+          : []
+      ),
+      [
+        {
+          itemIndex: 2,
+          itemKey: "item:2",
+          reason: "completion-condition"
+        },
+        {
+          itemIndex: 3,
+          itemKey: "item:3",
+          reason: "completion-condition"
+        }
+      ]
+    )
+    assert.strictEqual(
+      journal.filter((event) => event._tag === "MultiInstanceItemTerminated").length,
+      0
+    )
+    for (
+      const counters of journal.flatMap((event) =>
+        event._tag === "MultiInstanceItemCompleted" ||
+          event._tag === "MultiInstanceCompletionConditionEvaluated" ||
+          event._tag === "MultiInstanceGroupCompleted"
+          ? [event.counters]
+          : []
+      )
+    ) {
+      assert.strictEqual(counters.numberOfTerminatedInstances, 0)
+      assert.strictEqual(
+        counters.numberOfInstances,
+        counters.numberOfActiveInstances +
+          counters.numberOfCompletedInstances +
+          counters.numberOfTerminatedInstances
+      )
+    }
+    assertReplay(kernel, journal, state)
+
+    const forgedIdentity = structuredClone(journal)
+    const notGeneratedIndex = forgedIdentity.findIndex((event) => event._tag === "MultiInstanceItemNotGenerated")
+    const notGenerated = forgedIdentity[notGeneratedIndex]
+    if (notGenerated?._tag !== "MultiInstanceItemNotGenerated") {
+      throw new Error("expected non-generation event")
+    }
+    forgedIdentity[notGeneratedIndex] = {
+      _tag: "MultiInstanceItemTerminated",
+      groupId: notGenerated.groupId,
+      activityId: notGenerated.activityId,
+      activation: notGenerated.activation,
+      itemIndex: notGenerated.itemIndex,
+      itemKey: notGenerated.itemKey,
+      reason: notGenerated.reason,
+      terminatedAt: notGenerated.notGeneratedAt
+    }
+    assertReplayFailure(kernel, forgedIdentity)
+
+    const forgedOrder = structuredClone(journal)
+    const forgedNotGenerated = forgedOrder.find((event) => event._tag === "MultiInstanceItemNotGenerated")
+    if (forgedNotGenerated?._tag !== "MultiInstanceItemNotGenerated") {
+      throw new Error("expected non-generation event")
+    }
+    forgedNotGenerated.itemIndex++
+    assertReplayFailure(kernel, forgedOrder)
+  })
+
   it("accepts out-of-order parallel completion while preserving ordered member state and one outgoing route", () => {
     const kernel = compile(multiInstanceModel({
       mode: "parallel",
       cardinality: cardinalityExpression
     }))
     const runtime = services(3)
-    const initialized = success(BpmnKernel.initialize(kernel, runtime))
+    const initialized = success(initializeKernel(kernel, runtime))
     const journal: Array<BpmnKernel.TransitionEvent> = [
       ...initialized.events
     ]
@@ -670,7 +1069,7 @@ describe("BpmnKernel fixed multi-instance execution", () => {
       [taskBinding()]
     )
     const initialized = success(
-      BpmnKernel.initialize(kernel, services(3))
+      initializeKernel(kernel, services(3))
     )
     const coordinates = activeTaskTokens(initialized.state).map((token) =>
       success(BpmnKernel.taskOccurrence(
@@ -706,7 +1105,7 @@ describe("BpmnKernel fixed multi-instance execution", () => {
       (context) => context.runtime.numberOfCompletedInstances >= 2,
       observations
     )
-    const initialized = success(BpmnKernel.initialize(kernel, runtime))
+    const initialized = success(initializeKernel(kernel, runtime))
     const originalTokens = activeTaskTokens(initialized.state)
     const journal: Array<BpmnKernel.TransitionEvent> = [
       ...initialized.events
@@ -821,7 +1220,7 @@ describe("BpmnKernel fixed multi-instance execution", () => {
       cardinality: cardinalityExpression
     }))
     const empty = success(
-      BpmnKernel.initialize(emptyKernel, services(0))
+      initializeKernel(emptyKernel, services(0))
     )
     assert.strictEqual(empty.state.status, "completed")
     assert.deepStrictEqual(
@@ -867,12 +1266,13 @@ describe("BpmnKernel fixed multi-instance execution", () => {
         cardinality: cardinalityExpression
       }),
       {
+        ...limits,
         maxAutomaticTransitions: 1_000,
         maxMultiInstanceCardinality: 2
       }
     )
     const snapshots: Array<number> = []
-    const rejected = BpmnKernel.initialize(boundedKernel, {
+    const rejected = initializeKernel(boundedKernel, {
       now,
       evaluateExpression: (context) => {
         snapshots.push(context.state.multiInstanceGroups.length)
@@ -902,7 +1302,7 @@ describe("BpmnKernel fixed multi-instance execution", () => {
       BigInt(3)
     ]
     for (const value of invalidValues) {
-      const initialized = BpmnKernel.initialize(
+      const initialized = initializeKernel(
         kernel,
         services(value)
       )
@@ -918,13 +1318,698 @@ describe("BpmnKernel fixed multi-instance execution", () => {
       )
     }
 
-    const missing = BpmnKernel.initialize(kernel, { now })
+    const missing = initializeKernel(kernel, { now })
     assert.isTrue(Result.isFailure(missing))
     if (Result.isSuccess(missing)) {
       throw new Error("expected missing evaluator rejection")
     }
     assert(
       missing.failure.diagnostics.some((diagnostic) => diagnostic.code === BpmnKernel.Codes.EvaluationRequired)
+    )
+  })
+
+  it("snapshots a collection once, preserves order and duplicates, exposes each declared inputDataItem, and replays out-of-order completion", () => {
+    const kernel = compileCollection("parallel")
+    const sourceItems = [
+      { id: "first", nested: { value: 1 } },
+      { id: "duplicate", nested: { value: 2 } },
+      { id: "duplicate", nested: { value: 2 } }
+    ]
+    const commandInput = {
+      items: sourceItems,
+      requestId: "request-1"
+    }
+    const observations: Array<EvaluationObservation> = []
+    const runtime = collectionServices((context) => {
+      assert.deepStrictEqual(context.state.input, commandInput)
+      assert.strictEqual(context.dataInputRef, collectionInputRef)
+      assert.strictEqual(context.groupActivation, 0)
+      return sourceItems
+    }, observations)
+    const initialized = success(
+      initializeKernel(kernel, runtime, commandInput)
+    )
+    const expectedItems = structuredClone(sourceItems)
+
+    commandInput.requestId = "mutated"
+    sourceItems[0]!.id = "mutated"
+    sourceItems.push({ id: "late", nested: { value: 4 } })
+
+    assert.deepStrictEqual(observations, [{
+      tag: "MultiInstanceCollection",
+      expectedResult: "json-array"
+    }])
+    assert.deepStrictEqual(initialized.state.input, {
+      items: expectedItems,
+      requestId: "request-1"
+    })
+    assert.deepStrictEqual(
+      initialized.state.multiInstanceGroups[0]?.source,
+      {
+        _tag: "Collection",
+        dataInputRef: collectionInputRef,
+        items: expectedItems
+      }
+    )
+    assert.isTrue(Object.isFrozen(initialized.state))
+    assert.isTrue(Object.isFrozen(
+      initialized.state.multiInstanceGroups[0]?.source
+    ))
+    assert.deepStrictEqual(
+      initialized.events.flatMap((event) =>
+        event._tag === "MultiInstanceCollectionEvaluated"
+          ? [{
+            dataInputRef: event.dataInputRef,
+            expectedItems: event.items,
+            itemCanonicalBytes: event.itemCanonicalBytes
+          }]
+          : []
+      ),
+      [{
+        dataInputRef: collectionInputRef,
+        expectedItems,
+        itemCanonicalBytes: expectedItems.map((item) => new TextEncoder().encode(JSON.stringify(item)).byteLength)
+      }]
+    )
+
+    const initialTokens = activeTaskTokens(initialized.state)
+    assert.strictEqual(initialTokens.length, expectedItems.length)
+    assert.deepStrictEqual(
+      initialTokens.map((token) =>
+        success(BpmnKernel.taskCollectionItem(
+          kernel,
+          initialized.state,
+          target(token)
+        ))
+      ),
+      expectedItems.map((item, itemIndex) => ({
+        dataInputRef: collectionInputRef,
+        itemIndex,
+        itemKey: `item:${itemIndex}`,
+        item
+      }))
+    )
+
+    const journal: Array<BpmnKernel.TransitionEvent> = [
+      ...initialized.events
+    ]
+    let state = initialized.state
+    for (const itemIndex of [2, 0, 1]) {
+      const token = activeTaskTokens(state).find((candidate) =>
+        candidate.invocation.branch?._tag === "MultiInstanceItem" &&
+        candidate.invocation.branch.itemIndex === itemIndex
+      )
+      if (token === undefined) {
+        throw new Error(`expected active collection member ${itemIndex}`)
+      }
+      const completed = success(
+        BpmnKernel.completeTask(kernel, state, target(token), runtime)
+      )
+      journal.push(...completed.events)
+      state = completed.state
+    }
+
+    assert.strictEqual(state.status, "completed")
+    assert.deepStrictEqual(
+      state.multiInstanceGroups[0]?.members.map((member) => ({
+        index: member.index,
+        itemKey: member.itemKey,
+        status: member.status
+      })),
+      [
+        { index: 0, itemKey: "item:0", status: "completed" },
+        { index: 1, itemKey: "item:1", status: "completed" },
+        { index: 2, itemKey: "item:2", status: "completed" }
+      ]
+    )
+    assert.deepStrictEqual(
+      journal.flatMap((event) =>
+        event._tag === "MultiInstanceItemCompleted"
+          ? [event.itemIndex]
+          : []
+      ),
+      [2, 0, 1]
+    )
+    assertReplay(kernel, journal, state)
+  })
+
+  it("keeps taskCollectionItem opt-in and rejects collection output without a scalar outputDataItem or with a partial completion policy", () => {
+    const withoutInputDataItem = compile(
+      collectionModel("parallel", {
+        declareInputDataItem: false
+      }),
+      limits,
+      [],
+      {
+        dataDocument: collectionDataDocument(),
+        collectionBindings: [collectionBinding()]
+      }
+    )
+    const initialized = success(initializeKernel(
+      withoutInputDataItem,
+      collectionServices(() => ["private-item"])
+    ))
+    assert.strictEqual(
+      success(BpmnKernel.taskCollectionItem(
+        withoutInputDataItem,
+        initialized.state,
+        target(activeTaskTokens(initialized.state)[0]!)
+      )),
+      undefined
+    )
+
+    const invalidModels: ReadonlyArray<BpmnModel.BpmnModel> = [
+      multiInstanceModel({
+        mode: "parallel",
+        loopDataInputRef: collectionInputRef,
+        inputDataItem: true,
+        loopDataOutputRef: collectionOutputRef
+      }),
+      multiInstanceModel({
+        mode: "parallel",
+        loopDataInputRef: collectionInputRef,
+        inputDataItem: true,
+        loopDataOutputRef: collectionOutputRef,
+        outputDataItem: true,
+        completionCondition: completionExpression
+      })
+    ]
+    for (const candidate of invalidModels) {
+      const rejected = prepareResult(
+        candidate,
+        limits,
+        [taskBinding()],
+        {
+          dataDocument: collectionDataDocument(true),
+          collectionBindings: [collectionBinding()]
+        }
+      )
+      assert.isTrue(Result.isFailure(rejected))
+      if (Result.isSuccess(rejected)) {
+        throw new Error("expected unsupported collection output policy")
+      }
+      assert(
+        rejected.failure.diagnostics.some((diagnostic) => diagnostic.code === BpmnKernel.Codes.UnsupportedLoop)
+      )
+    }
+  })
+
+  it("executes collection members sequentially and completes an empty collection without creating work", () => {
+    const sequentialKernel = compileCollection("sequential")
+    const sequentialRuntime = collectionServices(() => ["a", "b", "c"])
+    const initialized = success(
+      initializeKernel(sequentialKernel, sequentialRuntime)
+    )
+    let state = initialized.state
+    const journal: Array<BpmnKernel.TransitionEvent> = [
+      ...initialized.events
+    ]
+
+    for (let itemIndex = 0; itemIndex < 3; itemIndex++) {
+      const waiting = activeTaskTokens(state)
+      assert.strictEqual(waiting.length, 1)
+      assert.strictEqual(
+        waiting[0]?.invocation.branch?._tag === "MultiInstanceItem"
+          ? waiting[0].invocation.branch.itemIndex
+          : undefined,
+        itemIndex
+      )
+      assert.deepStrictEqual(
+        success(BpmnKernel.taskCollectionItem(
+          sequentialKernel,
+          state,
+          target(waiting[0]!)
+        )),
+        {
+          dataInputRef: collectionInputRef,
+          itemIndex,
+          itemKey: `item:${itemIndex}`,
+          item: ["a", "b", "c"][itemIndex]
+        }
+      )
+      const completed = success(BpmnKernel.completeTask(
+        sequentialKernel,
+        state,
+        target(waiting[0]!),
+        sequentialRuntime
+      ))
+      journal.push(...completed.events)
+      state = completed.state
+    }
+    assert.strictEqual(state.status, "completed")
+    assert.deepStrictEqual(
+      state.multiInstanceGroups[0]?.source,
+      {
+        _tag: "Collection",
+        dataInputRef: collectionInputRef,
+        items: ["a", "b", "c"]
+      }
+    )
+    assertReplay(sequentialKernel, journal, state)
+
+    const emptyKernel = compileCollection("parallel", { output: true })
+    const empty = success(initializeKernel(
+      emptyKernel,
+      collectionServices(() => [])
+    ))
+    assert.strictEqual(empty.state.status, "completed")
+    assert.deepStrictEqual(
+      empty.state.multiInstanceGroups[0],
+      {
+        ...empty.state.multiInstanceGroups[0],
+        members: [],
+        completedInstanceCount: 0,
+        source: {
+          _tag: "Collection",
+          dataInputRef: collectionInputRef,
+          items: []
+        },
+        output: {
+          dataOutputRef: collectionOutputRef,
+          items: []
+        },
+        status: "completed",
+        completionReason: "empty"
+      }
+    )
+    assert.deepStrictEqual(
+      empty.events.flatMap((event) =>
+        event._tag === "MultiInstanceGroupCompleted"
+          ? [{ reason: event.reason, output: event.output }]
+          : []
+      ),
+      [{
+        reason: "empty",
+        output: {
+          dataOutputRef: collectionOutputRef,
+          items: []
+        }
+      }]
+    )
+    assertReplay(emptyKernel, empty.events, empty.state)
+  })
+
+  it("enforces execution-input, collection-cardinality, collection-byte, and item-byte limits atomically", () => {
+    const cases: ReadonlyArray<{
+      readonly selectedLimits: BpmnKernel.KernelLimits
+      readonly items: ReadonlyArray<Schema.Json>
+      readonly input?: Schema.Json
+      readonly expectedPath: string
+    }> = [
+      {
+        selectedLimits: {
+          ...limits,
+          maxExecutionInputCanonicalBytes: 3
+        },
+        items: [],
+        expectedPath: "input"
+      },
+      {
+        selectedLimits: {
+          ...limits,
+          maxMultiInstanceCardinality: 1
+        },
+        items: ["a", "b"],
+        expectedPath: "limits"
+      },
+      {
+        selectedLimits: {
+          ...limits,
+          maxMultiInstanceCollectionCanonicalBytes: 4
+        },
+        items: ["a"],
+        expectedPath: "limits"
+      },
+      {
+        selectedLimits: {
+          ...limits,
+          maxMultiInstanceItemCanonicalBytes: 4
+        },
+        items: ["oversized"],
+        expectedPath: "maxMultiInstanceItemCanonicalBytes"
+      }
+    ]
+
+    for (const testCase of cases) {
+      let evaluationCount = 0
+      const runtime = collectionServices(() => {
+        evaluationCount++
+        return testCase.items
+      })
+      const kernel = compileCollection("parallel", {
+        limits: testCase.selectedLimits
+      })
+      const rejected = initializeKernel(
+        kernel,
+        runtime,
+        testCase.input ?? null
+      )
+      assert.isTrue(Result.isFailure(rejected))
+      if (Result.isSuccess(rejected)) {
+        throw new Error("expected compiled limit rejection")
+      }
+      assert(
+        rejected.failure.diagnostics.some((diagnostic) =>
+          diagnostic.code === BpmnKernel.Codes.InvalidKernelLimits &&
+          diagnostic.path.includes(testCase.expectedPath)
+        )
+      )
+      assert.strictEqual(
+        evaluationCount,
+        testCase.expectedPath === "input" ? 0 : 1
+      )
+    }
+  })
+
+  it("replays collection evidence and rejects tampered snapshots, measurements, and evaluator usage", () => {
+    const kernel = compileCollection("parallel")
+    const initialized = success(initializeKernel(
+      kernel,
+      collectionServices(() => [{ id: 1 }, { id: 2 }]),
+      { requestId: "collection-replay" }
+    ))
+    assertReplay(kernel, initialized.events, initialized.state)
+
+    const tamper = (
+      mutation: (
+        event: Extract<
+          BpmnKernel.TransitionEvent,
+          { readonly _tag: "MultiInstanceCollectionEvaluated" }
+        >
+      ) => void
+    ): void => {
+      const forged = structuredClone(initialized.events)
+      const event = forged.find((candidate) => candidate._tag === "MultiInstanceCollectionEvaluated")
+      if (event?._tag !== "MultiInstanceCollectionEvaluated") {
+        throw new Error("expected collection-evaluated evidence")
+      }
+      mutation(event)
+      assertReplayFailure(kernel, forged)
+    }
+
+    tamper((event) => {
+      event.items[0] = { id: 99 }
+    })
+    tamper((event) => {
+      event.collectionCanonicalBytes++
+    })
+    tamper((event) => {
+      event.itemCanonicalBytes[0]!++
+    })
+    tamper((event) => {
+      event.usage.steps = event.evaluatorBinding.limits.maxSteps + 1
+    })
+    tamper((event) => {
+      event.usage.contextCanonicalBytes++
+    })
+  })
+
+  it("commits BPMN data and collection bindings to the executable fingerprint", () => {
+    const baseline = compileCollection("parallel")
+    const differentlyBound = compileCollection("parallel", {
+      expression: alternateCollectionExpression
+    })
+    const changedDocument = structuredClone(collectionDataDocument())
+    changedDocument.inputOutputSpecifications[0]!.dataInputs[0]!.name = "Changed collection declaration"
+    const differentlyDeclared = compile(
+      collectionModel("parallel"),
+      limits,
+      [],
+      {
+        dataDocument: changedDocument,
+        collectionBindings: [collectionBinding()]
+      }
+    )
+
+    assert.notStrictEqual(
+      baseline.modelReference.executableFingerprint,
+      differentlyBound.modelReference.executableFingerprint
+    )
+    assert.notStrictEqual(
+      baseline.modelReference.executableFingerprint,
+      differentlyDeclared.modelReference.executableFingerprint
+    )
+
+    const initialized = success(initializeKernel(
+      baseline,
+      collectionServices(() => ["one"])
+    ))
+    assertReplayFailure(
+      differentlyBound,
+      initialized.events,
+      BpmnKernel.Codes.BpmnJournalModelMismatch
+    )
+    assertReplayFailure(
+      differentlyDeclared,
+      initialized.events,
+      BpmnKernel.Codes.BpmnJournalModelMismatch
+    )
+  })
+
+  it("aggregates protocol-v3 member outputs in collection order and enforces output byte limits", () => {
+    const kernel = compileCollection("parallel", { output: true })
+    const runtime = collectionServices(() => [
+      { id: "input-0" },
+      { id: "input-1" },
+      { id: "input-2" }
+    ])
+    const outputs: ReadonlyArray<Schema.Json> = [
+      { id: "output-0" },
+      { id: "output-1" },
+      { id: "output-2" }
+    ]
+    const initialized = success(initializeKernel(kernel, runtime))
+    const journal: Array<BpmnKernel.TransitionEvent> = [
+      ...initialized.events
+    ]
+    let state = initialized.state
+
+    for (const itemIndex of [2, 0, 1]) {
+      const token = activeTaskTokens(state).find((candidate) =>
+        candidate.invocation.branch?._tag === "MultiInstanceItem" &&
+        candidate.invocation.branch.itemIndex === itemIndex
+      )
+      if (token === undefined) {
+        throw new Error(`expected active output member ${itemIndex}`)
+      }
+      const resolved = success(BpmnKernel.resolveTask(
+        kernel,
+        state,
+        {
+          commandVersion: BpmnActivityV3.CommandVersion,
+          ...target(token),
+          outcome: succeededOutcome(outputs[itemIndex]!)
+        },
+        runtime
+      ))
+      journal.push(...resolved.events)
+      state = resolved.state
+    }
+
+    assert.strictEqual(state.status, "completed")
+    assert.deepStrictEqual(
+      state.multiInstanceGroups[0]?.members.map((member) => member.output),
+      outputs
+    )
+    assert.deepStrictEqual(
+      state.multiInstanceGroups[0]?.output,
+      {
+        dataOutputRef: collectionOutputRef,
+        items: outputs
+      }
+    )
+    assert.deepStrictEqual(
+      journal.flatMap((event) =>
+        event._tag === "MultiInstanceGroupCompleted"
+          ? [event.output]
+          : []
+      ),
+      [{
+        dataOutputRef: collectionOutputRef,
+        items: outputs
+      }]
+    )
+    assert.deepStrictEqual(
+      journal.flatMap((event) =>
+        event._tag === "MultiInstanceItemCompleted"
+          ? [event.itemIndex]
+          : []
+      ),
+      [2, 0, 1]
+    )
+    assertReplay(kernel, journal, state)
+
+    const outputLimitCases: ReadonlyArray<{
+      readonly selectedLimits: BpmnKernel.KernelLimits
+      readonly expectedPath: string
+    }> = [
+      {
+        selectedLimits: {
+          ...limits,
+          maxMultiInstanceItemOutputCanonicalBytes: 4
+        },
+        expectedPath: "maxMultiInstanceItemOutputCanonicalBytes"
+      },
+      {
+        selectedLimits: {
+          ...limits,
+          maxMultiInstanceOutputCanonicalBytes: 4
+        },
+        expectedPath: "maxMultiInstanceOutputCanonicalBytes"
+      }
+    ]
+    for (const testCase of outputLimitCases) {
+      const boundedKernel = compileCollection("parallel", {
+        limits: testCase.selectedLimits,
+        output: true
+      })
+      const boundedRuntime = collectionServices(() => ["one"])
+      const bounded = success(initializeKernel(
+        boundedKernel,
+        boundedRuntime
+      ))
+      const token = activeTaskTokens(bounded.state)[0]!
+      const rejected = BpmnKernel.resolveTask(
+        boundedKernel,
+        bounded.state,
+        {
+          commandVersion: BpmnActivityV3.CommandVersion,
+          ...target(token),
+          outcome: succeededOutcome("oversized")
+        },
+        boundedRuntime
+      )
+      assert.isTrue(Result.isFailure(rejected))
+      if (Result.isSuccess(rejected)) {
+        throw new Error("expected output byte limit rejection")
+      }
+      assert(
+        rejected.failure.diagnostics.some((diagnostic) =>
+          diagnostic.code === BpmnKernel.Codes.InvalidKernelLimits &&
+          diagnostic.path.includes(testCase.expectedPath)
+        )
+      )
+    }
+  })
+
+  it("rejects direct-state tampering that removes, oversizes, or over-aggregates collection outputs", () => {
+    const completedState = (
+      kernel: BpmnKernel.CompiledKernel,
+      runtime: BpmnKernel.Services,
+      outputs: ReadonlyArray<Schema.Json>
+    ): BpmnKernel.TransitionBatch["state"] => {
+      let state = success(initializeKernel(kernel, runtime)).state
+      for (let itemIndex = 0; itemIndex < outputs.length; itemIndex++) {
+        const token = activeTaskTokens(state).find((candidate) =>
+          candidate.invocation.branch?._tag === "MultiInstanceItem" &&
+          candidate.invocation.branch.itemIndex === itemIndex
+        )
+        if (token === undefined) {
+          throw new Error(`expected active direct-state member ${itemIndex}`)
+        }
+        state = success(BpmnKernel.resolveTask(
+          kernel,
+          state,
+          {
+            commandVersion: BpmnActivityV3.CommandVersion,
+            ...target(token),
+            outcome: succeededOutcome(outputs[itemIndex]!)
+          },
+          runtime
+        )).state
+      }
+      assert.strictEqual(state.status, "completed")
+      assert(Result.isSuccess(BpmnKernel.advance(kernel, state, runtime)))
+      return state
+    }
+
+    const assertStateRejectedAt = (
+      kernel: BpmnKernel.CompiledKernel,
+      runtime: BpmnKernel.Services,
+      state: unknown,
+      expectedPath: ReadonlyArray<string | number>
+    ): void => {
+      const rejected = BpmnKernel.advance(kernel, state, runtime)
+      assert.isTrue(Result.isFailure(rejected))
+      if (Result.isSuccess(rejected)) {
+        throw new Error("expected direct-state tamper rejection")
+      }
+      assert(
+        rejected.failure.diagnostics.some((diagnostic) =>
+          JSON.stringify(diagnostic.path) === JSON.stringify(expectedPath)
+        )
+      )
+    }
+
+    const memberBoundedLimits: BpmnKernel.KernelLimits = {
+      ...limits,
+      maxMultiInstanceOutputCanonicalBytes: 100,
+      maxMultiInstanceItemOutputCanonicalBytes: 8
+    }
+    const memberKernel = compileCollection("parallel", {
+      limits: memberBoundedLimits,
+      output: true
+    })
+    const memberRuntime = collectionServices(() => ["input-0", "input-1"])
+    const validMemberState = completedState(
+      memberKernel,
+      memberRuntime,
+      ["a", "b"]
+    )
+
+    const missingAggregate = structuredClone(validMemberState)
+    delete (
+      missingAggregate.multiInstanceGroups[0] as unknown as {
+        output?: unknown
+      }
+    ).output
+    assertStateRejectedAt(
+      memberKernel,
+      memberRuntime,
+      missingAggregate,
+      ["multiInstanceGroups", 0, "output"]
+    )
+
+    const oversizedMember = structuredClone(validMemberState)
+    oversizedMember.multiInstanceGroups[0]!.members[0]!.output = "123456789"
+    oversizedMember.multiInstanceGroups[0]!.output!.items[0] = "123456789"
+    assertStateRejectedAt(
+      memberKernel,
+      memberRuntime,
+      oversizedMember,
+      ["multiInstanceGroups", 0, "members", 0, "output"]
+    )
+
+    const aggregateBoundedLimits: BpmnKernel.KernelLimits = {
+      ...limits,
+      maxMultiInstanceOutputCanonicalBytes: 10,
+      maxMultiInstanceItemOutputCanonicalBytes: 10
+    }
+    const aggregateKernel = compileCollection("parallel", {
+      limits: aggregateBoundedLimits,
+      output: true
+    })
+    const aggregateRuntime = collectionServices(() => [
+      "input-0",
+      "input-1"
+    ])
+    const oversizedAggregate = structuredClone(completedState(
+      aggregateKernel,
+      aggregateRuntime,
+      ["a", "b"]
+    ))
+    for (const member of oversizedAggregate.multiInstanceGroups[0]!.members) {
+      member.output = "aaa"
+    }
+    oversizedAggregate.multiInstanceGroups[0]!.output!.items = [
+      "aaa",
+      "aaa"
+    ]
+    assertStateRejectedAt(
+      aggregateKernel,
+      aggregateRuntime,
+      oversizedAggregate,
+      ["multiInstanceGroups", 0, "output", "items"]
     )
   })
 
@@ -1013,7 +2098,7 @@ describe("BpmnKernel fixed multi-instance execution", () => {
       }])]
     )
     const runtime = services(3)
-    const initialized = success(BpmnKernel.initialize(kernel, runtime))
+    const initialized = success(initializeKernel(kernel, runtime))
     const tokens = activeTaskTokens(initialized.state)
     const failed = success(BpmnKernel.resolveTask(
       kernel,
@@ -1098,7 +2183,7 @@ describe("BpmnKernel fixed multi-instance execution", () => {
       [taskBinding()]
     )
     const runtime = services(3)
-    const initialized = success(BpmnKernel.initialize(kernel, runtime))
+    const initialized = success(initializeKernel(kernel, runtime))
     const token = activeTaskTokens(initialized.state)[0]!
     const failed = success(BpmnKernel.resolveTask(
       kernel,
@@ -1169,7 +2254,7 @@ describe("BpmnKernel fixed multi-instance execution", () => {
       3,
       (context) => context.runtime.numberOfCompletedInstances >= 2
     )
-    const initialized = success(BpmnKernel.initialize(kernel, runtime))
+    const initialized = success(initializeKernel(kernel, runtime))
     const tokens = activeTaskTokens(initialized.state)
     const first = success(
       BpmnKernel.completeTask(
@@ -1278,6 +2363,7 @@ describe("BpmnKernel fixed multi-instance execution", () => {
     )
 
     const differentlyBounded = compile(definition, {
+      ...limits,
       maxAutomaticTransitions: limits.maxAutomaticTransitions,
       maxMultiInstanceCardinality: limits.maxMultiInstanceCardinality - 1
     })

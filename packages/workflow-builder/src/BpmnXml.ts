@@ -51,7 +51,7 @@ const Path = Schema.Array(Diagnostic.PathSegment)
  * @category constants
  * @since 4.0.0
  */
-export const CoreProcessDiProfileId = "bpmn-2.0.2-core-process-di-v4" as const
+export const CoreProcessDiProfileId = "bpmn-2.0.2-core-process-di-v5" as const
 
 /**
  * Normalized metadata carried by one BPMN `definitions` element.
@@ -896,6 +896,83 @@ const parseReferenceChild = (
     owner
   )
 
+type MultiInstanceDataItemElementName = "inputDataItem" | "outputDataItem"
+
+const parseMultiInstanceDataItem = (
+  element: BpmnXmlAst.XmlElement,
+  context: NamespaceContext,
+  state: ParserState,
+  elementName: MultiInstanceDataItemElementName
+): BpmnModel.MultiInstanceDataItem => {
+  if (!isElementNamed(element, ModelNamespace, elementName)) {
+    abort(
+      element.name.namespaceUri === ModelNamespace
+        ? Codes.UnsupportedElement
+        : Codes.UnsupportedNamespace,
+      `Expected BPMN ${elementName}, received '${element.name.localName}'`,
+      xmlPath(element)
+    )
+  }
+  const owner = `multiInstanceLoopCharacteristics ${elementName}`
+  const attributes = readAttributes(
+    element,
+    new Set(["id", "name", "itemSubjectRef", "isCollection"])
+  )
+  const id = readId(
+    unqualifiedAttribute(attributes, "id"),
+    true,
+    state.report,
+    xmlPath(element, ["attributes", "id"]),
+    owner
+  )!
+  const name = unqualifiedAttribute(attributes, "name")
+  const itemSubjectLexical = unqualifiedAttribute(attributes, "itemSubjectRef")
+  const itemSubjectRef = itemSubjectLexical === undefined
+    ? undefined
+    : readQName(
+      itemSubjectLexical,
+      context,
+      state.report,
+      xmlPath(element, ["attributes", "itemSubjectRef"]),
+      `${owner} itemSubjectRef`
+    )
+  const collectionLexical = unqualifiedAttribute(attributes, "isCollection")
+  const isCollection = collectionLexical === undefined
+    ? false
+    : readBoolean(
+      collectionLexical,
+      state.report,
+      xmlPath(element, ["attributes", "isCollection"]),
+      `${owner} isCollection`
+    )
+  if (collectionLexical === undefined) {
+    notice(
+      state.report.defaultsApplied,
+      elementName === "inputDataItem"
+        ? "MultiInstanceInputDataItemCollectionDefault"
+        : "MultiInstanceOutputDataItemCollectionDefault",
+      `Absent ${elementName} isCollection defaults to false`,
+      xmlPath(element, ["attributes", "isCollection"])
+    )
+  }
+  for (const child of structuralChildren(element)) {
+    abort(
+      child.name.namespaceUri === ModelNamespace
+        ? Codes.UnsupportedElement
+        : Codes.UnsupportedNamespace,
+      `Element '${child.name.localName}' is not represented inside ${elementName}`,
+      xmlPath(child)
+    )
+  }
+  return {
+    id,
+    ...(name === undefined ? undefined : { name }),
+    ...(itemSubjectRef === undefined ? undefined : { itemSubjectRef }),
+    isCollection,
+    extensionElements: []
+  }
+}
+
 const integerPattern = /^[+-]?\d+$/
 
 const readPositiveSafeInteger = (
@@ -1071,6 +1148,8 @@ const parseMultiInstanceCharacteristics = (
   let cardinality: BpmnModel.Expression | undefined
   let loopDataInputRef: string | undefined
   let loopDataOutputRef: string | undefined
+  let inputDataItem: BpmnModel.MultiInstanceDataItem | undefined
+  let outputDataItem: BpmnModel.MultiInstanceDataItem | undefined
   let completionCondition: BpmnModel.Expression | undefined
   let stage = 0
   for (const child of structuralChildren(element)) {
@@ -1126,15 +1205,39 @@ const parseMultiInstanceCharacteristics = (
       )
       continue
     }
-    if (
-      isElementNamed(child, ModelNamespace, "inputDataItem") ||
-      isElementNamed(child, ModelNamespace, "outputDataItem")
-    ) {
-      abort(
-        Codes.UnsupportedElement,
-        `${child.name.localName} is not represented by BpmnModel.MultiInstanceCharacteristics`,
-        xmlPath(child)
+    if (isElementNamed(child, ModelNamespace, "inputDataItem")) {
+      if (stage > 3 || inputDataItem !== undefined) {
+        abort(
+          Codes.InvalidStructure,
+          "inputDataItem must follow the loop-data references and occur at most once",
+          xmlPath(child)
+        )
+      }
+      stage = 4
+      inputDataItem = parseMultiInstanceDataItem(
+        child,
+        childContext,
+        state,
+        "inputDataItem"
       )
+      continue
+    }
+    if (isElementNamed(child, ModelNamespace, "outputDataItem")) {
+      if (stage > 4 || outputDataItem !== undefined) {
+        abort(
+          Codes.InvalidStructure,
+          "outputDataItem must follow the loop-data references and optional inputDataItem, and occur at most once",
+          xmlPath(child)
+        )
+      }
+      stage = 5
+      outputDataItem = parseMultiInstanceDataItem(
+        child,
+        childContext,
+        state,
+        "outputDataItem"
+      )
+      continue
     }
     if (isElementNamed(child, ModelNamespace, "complexBehaviorDefinition")) {
       abort(
@@ -1144,20 +1247,20 @@ const parseMultiInstanceCharacteristics = (
       )
     }
     if (isElementNamed(child, ModelNamespace, "completionCondition")) {
-      if (stage > 3 || completionCondition !== undefined) {
+      if (stage > 5 || completionCondition !== undefined) {
         abort(
           Codes.InvalidStructure,
           "completionCondition must follow the multi-instance data children and occur at most once",
           xmlPath(child)
         )
       }
-      stage = 4
       completionCondition = formalExpression(
         child,
         childContext,
         state,
         "completionCondition"
       )
+      stage = 6
       continue
     }
     abort(
@@ -1184,6 +1287,8 @@ const parseMultiInstanceCharacteristics = (
     ...(cardinality === undefined ? undefined : { cardinality }),
     ...(loopDataInputRef === undefined ? undefined : { loopDataInputRef }),
     ...(loopDataOutputRef === undefined ? undefined : { loopDataOutputRef }),
+    ...(inputDataItem === undefined ? undefined : { inputDataItem }),
+    ...(outputDataItem === undefined ? undefined : { outputDataItem }),
     ...(completionCondition === undefined ? undefined : { completionCondition }),
     ...(behavior === undefined ? undefined : { behavior }),
     ...(oneBehaviorEventRef === undefined ? undefined : { oneBehaviorEventRef }),
@@ -2718,6 +2823,40 @@ const assertExpression = (
   }
 }
 
+const assertMultiInstanceDataItem = (
+  item: BpmnModel.MultiInstanceDataItem,
+  path: ReadonlyArray<Diagnostic.PathSegment>,
+  owner: string
+): void => {
+  assertNcName(item.id, [...path, "id"], `${owner} id`)
+  assertEmptyExtensions(
+    item.extensionElements,
+    [...path, "extensionElements"],
+    owner
+  )
+  if (item.isCollection) {
+    abort(
+      Codes.UnsupportedModel,
+      `${owner} must be scalar in this executable profile`,
+      [...path, "isCollection"]
+    )
+  }
+  if (item.itemSubjectRef !== undefined) {
+    if (item.itemSubjectRef.namespaceUri.length > 0) {
+      assertNormalizedAnyUri(
+        item.itemSubjectRef.namespaceUri,
+        [...path, "itemSubjectRef", "namespaceUri"],
+        `${owner} itemSubjectRef namespace`
+      )
+    }
+    assertQNameLocalName(
+      item.itemSubjectRef.localName,
+      [...path, "itemSubjectRef", "localName"],
+      `${owner} itemSubjectRef local name`
+    )
+  }
+}
+
 const assertModelProfile = (
   document: InterchangeDocument,
   bindings: BindingTable
@@ -2890,6 +3029,20 @@ const assertModelProfile = (
                   `Task '${node.id}' multi-instance ${field}`
                 )
               }
+            }
+            if (loop.inputDataItem !== undefined) {
+              assertMultiInstanceDataItem(
+                loop.inputDataItem,
+                [...path, "loopCharacteristics", "inputDataItem"],
+                `Task '${node.id}' multi-instance inputDataItem`
+              )
+            }
+            if (loop.outputDataItem !== undefined) {
+              assertMultiInstanceDataItem(
+                loop.outputDataItem,
+                [...path, "loopCharacteristics", "outputDataItem"],
+                `Task '${node.id}' multi-instance outputDataItem`
+              )
             }
           }
         }
@@ -3229,7 +3382,25 @@ const assertGlobalIds = (document: InterchangeDocument): void => {
     register(document.model.processes[index]!.id, ["model", "processes", index, "id"])
   }
   for (let index = 0; index < document.model.flowNodes.length; index++) {
-    register(document.model.flowNodes[index]!.id, ["model", "flowNodes", index, "id"])
+    const node = document.model.flowNodes[index]!
+    register(node.id, ["model", "flowNodes", index, "id"])
+    if (
+      "loopCharacteristics" in node &&
+      node.loopCharacteristics?._tag === "MultiInstanceCharacteristics"
+    ) {
+      if (node.loopCharacteristics.inputDataItem !== undefined) {
+        register(
+          node.loopCharacteristics.inputDataItem.id,
+          ["model", "flowNodes", index, "loopCharacteristics", "inputDataItem", "id"]
+        )
+      }
+      if (node.loopCharacteristics.outputDataItem !== undefined) {
+        register(
+          node.loopCharacteristics.outputDataItem.id,
+          ["model", "flowNodes", index, "loopCharacteristics", "outputDataItem", "id"]
+        )
+      }
+    }
   }
   for (let index = 0; index < document.model.sequenceFlows.length; index++) {
     register(document.model.sequenceFlows[index]!.id, ["model", "sequenceFlows", index, "id"])
@@ -3769,10 +3940,53 @@ const exportStandardLoopCharacteristics = (
   )
 }
 
+const expandedQNameLexical = (
+  value: BpmnModel.ExpandedQName,
+  namespacePrefixes: ReadonlyMap<string, string>,
+  path: ReadonlyArray<Diagnostic.PathSegment>,
+  owner: string
+): string => {
+  if (value.namespaceUri.length === 0) {
+    return value.localName
+  }
+  const prefix = namespacePrefixes.get(value.namespaceUri)
+  if (prefix === undefined) {
+    return abort(
+      Codes.InvalidReference,
+      `No deterministic namespace prefix exists for ${owner} '{${value.namespaceUri}}${value.localName}'`,
+      path
+    )
+  }
+  return `${prefix}:${value.localName}`
+}
+
+const exportMultiInstanceDataItem = (
+  elementName: MultiInstanceDataItemElementName,
+  value: BpmnModel.MultiInstanceDataItem,
+  context: ExportContext
+): BpmnXmlAst.XmlElement => {
+  const attributes = [xmlAttribute("id", value.id)]
+  addOptionalAttribute(attributes, "name", value.name)
+  if (value.itemSubjectRef !== undefined) {
+    attributes.push(xmlAttribute(
+      "itemSubjectRef",
+      expandedQNameLexical(
+        value.itemSubjectRef,
+        context.qNameNamespacePrefixes,
+        ["model", "flowNodes", "loopCharacteristics", elementName, "itemSubjectRef"],
+        `multi-instance ${elementName} itemSubjectRef`
+      )
+    ))
+  }
+  attributes.push(xmlAttribute("isCollection", boolLexical(value.isCollection)))
+  return bpmnElement(elementName, attributes, [])
+}
+
 const exportMultiInstanceCharacteristics = (
   value: BpmnModel.MultiInstanceCharacteristics,
-  definitions: DefinitionsMetadata
+  context: ExportContext
 ): BpmnXmlAst.XmlElement => {
+  const definitions = context.document.definitions
   const behaviors = {
     all: "All",
     one: "One",
@@ -3819,6 +4033,20 @@ const exportMultiInstanceCharacteristics = (
       "loopDataOutputRef",
       [],
       [xmlText(`tns:${value.loopDataOutputRef}`)]
+    ))
+  }
+  if (value.inputDataItem !== undefined) {
+    children.push(exportMultiInstanceDataItem(
+      "inputDataItem",
+      value.inputDataItem,
+      context
+    ))
+  }
+  if (value.outputDataItem !== undefined) {
+    children.push(exportMultiInstanceDataItem(
+      "outputDataItem",
+      value.outputDataItem,
+      context
     ))
   }
   if (value.completionCondition !== undefined) {
@@ -3873,13 +4101,14 @@ interface ExportContext {
   readonly document: InterchangeDocument
   readonly nodesByScope: ReadonlyMap<string, ReadonlyArray<BpmnModel.FlowNode>>
   readonly flowsByScope: ReadonlyMap<string, ReadonlyArray<BpmnModel.SequenceFlow>>
-  readonly callableNamespacePrefixes: ReadonlyMap<string, string>
+  readonly qNameNamespacePrefixes: ReadonlyMap<string, string>
 }
 
 const exportContext = (document: InterchangeDocument): ExportContext => {
   const nodesByScope = new Map<string, Array<BpmnModel.FlowNode>>()
   const flowsByScope = new Map<string, Array<BpmnModel.SequenceFlow>>()
   const callableNamespaceUris = new Set<string>()
+  const dataItemNamespaceUris = new Set<string>()
   for (const node of document.model.flowNodes) {
     const key = scopeKey(node.processId, node.parentScopeId)
     const values = nodesByScope.get(key)
@@ -3897,6 +4126,27 @@ const exportContext = (document: InterchangeDocument): ExportContext => {
     ) {
       callableNamespaceUris.add(node.calledElement.namespaceUri)
     }
+    if (
+      "loopCharacteristics" in node &&
+      node.loopCharacteristics?._tag === "MultiInstanceCharacteristics"
+    ) {
+      for (
+        const item of [
+          node.loopCharacteristics.inputDataItem,
+          node.loopCharacteristics.outputDataItem
+        ]
+      ) {
+        const namespaceUri = item?.itemSubjectRef?.namespaceUri
+        if (
+          namespaceUri !== undefined &&
+          namespaceUri.length > 0 &&
+          namespaceUri !== document.definitions.targetNamespace &&
+          namespaceUri !== XmlNamespace
+        ) {
+          dataItemNamespaceUris.add(namespaceUri)
+        }
+      }
+    }
   }
   for (const flow of document.model.sequenceFlows) {
     const key = scopeKey(flow.processId, flow.parentScopeId)
@@ -3907,34 +4157,34 @@ const exportContext = (document: InterchangeDocument): ExportContext => {
       values.push(flow)
     }
   }
-  const callableNamespacePrefixes = new Map<string, string>([
+  const qNameNamespacePrefixes = new Map<string, string>([
     [document.definitions.targetNamespace, "tns"],
     [XmlNamespace, "xml"]
   ])
   const sortedCallableNamespaces = [...callableNamespaceUris].sort(compareCodeUnits)
   for (let index = 0; index < sortedCallableNamespaces.length; index++) {
-    callableNamespacePrefixes.set(sortedCallableNamespaces[index]!, `call${index}`)
+    qNameNamespacePrefixes.set(sortedCallableNamespaces[index]!, `call${index}`)
   }
-  return { document, nodesByScope, flowsByScope, callableNamespacePrefixes }
+  let dataItemIndex = 0
+  for (const namespaceUri of [...dataItemNamespaceUris].sort(compareCodeUnits)) {
+    if (!qNameNamespacePrefixes.has(namespaceUri)) {
+      qNameNamespacePrefixes.set(namespaceUri, `item${dataItemIndex}`)
+      dataItemIndex++
+    }
+  }
+  return { document, nodesByScope, flowsByScope, qNameNamespacePrefixes }
 }
 
 const callableElementLexical = (
   value: BpmnModel.ExpandedQName,
   context: ExportContext
-): string => {
-  if (value.namespaceUri.length === 0) {
-    return value.localName
-  }
-  const prefix = context.callableNamespacePrefixes.get(value.namespaceUri)
-  if (prefix === undefined) {
-    return abort(
-      Codes.InvalidReference,
-      `No deterministic namespace prefix exists for callable element '{${value.namespaceUri}}${value.localName}'`,
-      ["model", "flowNodes"]
-    )
-  }
-  return `${prefix}:${value.localName}`
-}
+): string =>
+  expandedQNameLexical(
+    value,
+    context.qNameNamespacePrefixes,
+    ["model", "flowNodes"],
+    "callable element"
+  )
 
 const exportSequenceFlow = (
   flow: BpmnModel.SequenceFlow,
@@ -3982,7 +4232,7 @@ const exportNode = (
                 )
                 : exportMultiInstanceCharacteristics(
                   node.loopCharacteristics,
-                  context.document.definitions
+                  context
                 )
             ])
         ]
@@ -4240,7 +4490,7 @@ const exportAst = (document: InterchangeDocument): BpmnXmlAst.XmlDocument => {
       declaration("dc", DcNamespace),
       declaration("xsi", XsiNamespace),
       declaration("tns", document.definitions.targetNamespace),
-      ...[...context.callableNamespacePrefixes.entries()]
+      ...[...context.qNameNamespacePrefixes.entries()]
         .filter(([namespaceUri]) =>
           namespaceUri !== document.definitions.targetNamespace &&
           namespaceUri !== XmlNamespace

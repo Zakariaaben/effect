@@ -250,6 +250,34 @@ export const ImportProvenance = Schema.Struct({
 export type ImportProvenance = Schema.Schema.Type<typeof ImportProvenance>
 
 /**
+ * Namespace-expanded form of an XML Schema QName.
+ *
+ * **Details**
+ *
+ * Prefix spellings are an XML serialization concern and are intentionally not
+ * retained. This value identifies source-level BPMN references; executable
+ * workflow targets must still be resolved and pinned by a durable compiler.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const ExpandedQName = Schema.Struct({
+  namespaceUri: Schema.String,
+  localName: Identifier
+}).annotate({
+  identifier: "WorkflowBpmnExpandedQName",
+  parseOptions: strictParseOptions
+})
+
+/**
+ * The decoded type of {@link ExpandedQName}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type ExpandedQName = Schema.Schema.Type<typeof ExpandedQName>
+
+/**
  * Standard BPMN loop characteristics.
  *
  * @category schemas
@@ -273,6 +301,39 @@ export const StandardLoopCharacteristics = Schema.TaggedStruct("StandardLoopChar
 export type StandardLoopCharacteristics = Schema.Schema.Type<typeof StandardLoopCharacteristics>
 
 /**
+ * One scalar data item bound to a generated BPMN multi-instance Activity.
+ *
+ * **Details**
+ *
+ * BPMN models the input and output bindings with distinct `DataInput` and
+ * `DataOutput` elements, but the portable fields retained by this profile are
+ * identical. `itemSubjectRef` is namespace-expanded so prefix spelling never
+ * affects semantic identity. The structural schema can represent a collection
+ * value; semantic validation requires the per-instance item to be scalar.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const MultiInstanceDataItem = Schema.Struct({
+  id: Identifier,
+  name: Schema.optionalKey(Schema.String),
+  itemSubjectRef: Schema.optionalKey(ExpandedQName),
+  isCollection: Schema.Boolean,
+  extensionElements: Schema.Array(ExtensionElement)
+}).annotate({
+  identifier: "WorkflowBpmnMultiInstanceDataItem",
+  parseOptions: strictParseOptions
+})
+
+/**
+ * The decoded type of {@link MultiInstanceDataItem}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type MultiInstanceDataItem = Schema.Schema.Type<typeof MultiInstanceDataItem>
+
+/**
  * Standard BPMN sequential or parallel multi-instance characteristics.
  *
  * @category schemas
@@ -283,6 +344,8 @@ export const MultiInstanceCharacteristics = Schema.TaggedStruct("MultiInstanceCh
   cardinality: Schema.optionalKey(Expression),
   loopDataInputRef: Schema.optionalKey(Identifier),
   loopDataOutputRef: Schema.optionalKey(Identifier),
+  inputDataItem: Schema.optionalKey(MultiInstanceDataItem),
+  outputDataItem: Schema.optionalKey(MultiInstanceDataItem),
   completionCondition: Schema.optionalKey(Expression),
   behavior: Schema.optionalKey(Schema.Literals(["all", "one", "none", "complex"])),
   oneBehaviorEventRef: Schema.optionalKey(Identifier),
@@ -560,34 +623,6 @@ const ActivityFields = {
   startQuantity: Schema.optionalKey(PositiveInt),
   completionQuantity: Schema.optionalKey(PositiveInt)
 } as const
-
-/**
- * Namespace-expanded form of an XML Schema QName.
- *
- * **Details**
- *
- * Prefix spellings are an XML serialization concern and are intentionally not
- * retained. This value identifies source-level BPMN references; executable
- * workflow targets must still be resolved and pinned by a durable compiler.
- *
- * @category schemas
- * @since 4.0.0
- */
-export const ExpandedQName = Schema.Struct({
-  namespaceUri: Schema.String,
-  localName: Identifier
-}).annotate({
-  identifier: "WorkflowBpmnExpandedQName",
-  parseOptions: strictParseOptions
-})
-
-/**
- * The decoded type of {@link ExpandedQName}.
- *
- * @category models
- * @since 4.0.0
- */
-export type ExpandedQName = Schema.Schema.Type<typeof ExpandedQName>
 
 /**
  * A concrete BPMN task subtype.
@@ -1623,6 +1658,67 @@ const validateLoopCharacteristics = (
     ))
   }
 
+  const validateDataItem = (
+    field: "inputDataItem" | "outputDataItem",
+    item: MultiInstanceDataItem | undefined
+  ): void => {
+    if (item === undefined) {
+      return
+    }
+    const itemPath = [...path, field] as const
+    if (item.isCollection) {
+      diagnostics.push(error(
+        Codes.InvalidLoopCharacteristics,
+        `Multi-instance activity '${node.id}' ${field} must represent one scalar collection item`,
+        [...itemPath, "isCollection"]
+      ))
+    }
+    if (item.itemSubjectRef !== undefined) {
+      if (!isNcName(item.itemSubjectRef.localName)) {
+        diagnostics.push(error(
+          Codes.InvalidLoopCharacteristics,
+          `Multi-instance activity '${node.id}' ${field} itemSubjectRef local name is not an XML Schema NCName`,
+          [...itemPath, "itemSubjectRef", "localName"]
+        ))
+      }
+      if (
+        item.itemSubjectRef.namespaceUri.length > 0 &&
+        !isCollapsedUri(item.itemSubjectRef.namespaceUri)
+      ) {
+        diagnostics.push(error(
+          Codes.InvalidLoopCharacteristics,
+          `Multi-instance activity '${node.id}' ${field} itemSubjectRef namespace must be a whitespace-collapsed XML Schema anyURI`,
+          [...itemPath, "itemSubjectRef", "namespaceUri"]
+        ))
+      }
+    }
+  }
+
+  validateDataItem("inputDataItem", characteristics.inputDataItem)
+  validateDataItem("outputDataItem", characteristics.outputDataItem)
+
+  if (
+    characteristics.inputDataItem !== undefined &&
+    characteristics.loopDataInputRef === undefined
+  ) {
+    diagnostics.push(error(
+      Codes.InvalidLoopCharacteristics,
+      `Multi-instance activity '${node.id}' inputDataItem requires loopDataInputRef`,
+      [...path, "inputDataItem"]
+    ))
+  }
+
+  if (
+    characteristics.outputDataItem !== undefined &&
+    characteristics.loopDataOutputRef === undefined
+  ) {
+    diagnostics.push(error(
+      Codes.InvalidLoopCharacteristics,
+      `Multi-instance activity '${node.id}' outputDataItem requires loopDataOutputRef`,
+      [...path, "outputDataItem"]
+    ))
+  }
+
   if (
     characteristics.oneBehaviorEventRef !== undefined &&
     characteristics.behavior !== "one"
@@ -1866,6 +1962,23 @@ export const validate = (
   for (let index = 0; index < model.flowNodes.length; index++) {
     const node = model.flowNodes[index]!
     registerId(node.id, ["flowNodes", index, "id"])
+    if (
+      "loopCharacteristics" in node &&
+      node.loopCharacteristics?._tag === "MultiInstanceCharacteristics"
+    ) {
+      if (node.loopCharacteristics.inputDataItem !== undefined) {
+        registerId(
+          node.loopCharacteristics.inputDataItem.id,
+          ["flowNodes", index, "loopCharacteristics", "inputDataItem", "id"]
+        )
+      }
+      if (node.loopCharacteristics.outputDataItem !== undefined) {
+        registerId(
+          node.loopCharacteristics.outputDataItem.id,
+          ["flowNodes", index, "loopCharacteristics", "outputDataItem", "id"]
+        )
+      }
+    }
     nodeById.set(node.id, node)
     if (scopeCarrierTags.has(node._tag)) {
       scopeOwners.set(node.id, node)
