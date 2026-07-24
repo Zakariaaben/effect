@@ -29,7 +29,7 @@ const services = (
   decisions: Readonly<Record<string, boolean>> = {}
 ): BpmnKernel.Services => ({
   now,
-  evaluateCondition: ({ expression }) =>
+  evaluateExpression: ({ expression }) =>
     Result.succeed({
       result: decisions[expression.source] ?? false,
       steps: 1
@@ -37,7 +37,8 @@ const services = (
 })
 
 const limits: BpmnKernel.KernelLimits = {
-  maxAutomaticTransitions: 1_000
+  maxAutomaticTransitions: 1_000,
+  maxMultiInstanceCardinality: 128
 }
 
 const testCrypto = Crypto.make({
@@ -1590,7 +1591,7 @@ describe("BpmnKernel", () => {
       },
       {
         now,
-        evaluateCondition: ({ state }) => {
+        evaluateExpression: ({ state }) => {
           ;(state.tokens as Array<unknown>).push({})
           return Result.succeed({ result: true, steps: 1 })
         }
@@ -1744,7 +1745,8 @@ describe("BpmnKernel", () => {
       "different-profile-v1"
     )
     const changedLimits = prepareResult(baselineModel, {
-      maxAutomaticTransitions: limits.maxAutomaticTransitions + 1
+      maxAutomaticTransitions: limits.maxAutomaticTransitions + 1,
+      maxMultiInstanceCardinality: limits.maxMultiInstanceCardinality
     })
     const alternateBuildDigest = Schema.decodeUnknownSync(
       ProtocolV2Wire.BuildDigest
@@ -2043,7 +2045,8 @@ describe("BpmnKernel", () => {
       ]
     )
     const bounded = prepareResult(automaticCycle, {
-      maxAutomaticTransitions: 8
+      maxAutomaticTransitions: 8,
+      maxMultiInstanceCardinality: limits.maxMultiInstanceCardinality
     })
     assert(
       Result.isSuccess(bounded),
@@ -2249,7 +2252,7 @@ describe("BpmnKernel", () => {
     )
   })
 
-  it("admits only bounded explicit Standard Loop characteristics on generic tasks", () => {
+  it("requires bounded explicit Standard Loop characteristics on generic tasks", () => {
     const withoutCondition = prepareResult(
       standardLoopModel(true, 3, null),
       limits,
@@ -2262,28 +2265,10 @@ describe("BpmnKernel", () => {
       "loop-without-maximum",
       []
     )
-    const multiInstance = standardLoopModel(true, 3)
-    const loopTask = multiInstance.flowNodes.find((node) => node.id === "task-loop")
-    if (loopTask?._tag !== "Task") {
-      throw new Error("expected loop task fixture")
-    }
-    loopTask.loopCharacteristics = {
-      _tag: "MultiInstanceCharacteristics",
-      mode: "sequential",
-      cardinality: expression("3")
-    }
-    const unsupportedMultiInstance = prepareResult(
-      multiInstance,
-      limits,
-      "loop-multi-instance",
-      []
-    )
-
     for (
       const result of [
         withoutCondition,
-        withoutMaximum,
-        unsupportedMultiInstance
+        withoutMaximum
       ]
     ) {
       assert.isTrue(Result.isFailure(result))
@@ -2356,8 +2341,11 @@ describe("BpmnKernel", () => {
       throw new Error("expected first loop iteration")
     }
     const frameId = initialized.success.state.loopFrames[0]?.frameId
-    assert.strictEqual(firstToken.invocation.branchId, frameId)
-    assert.strictEqual(firstToken.invocation.loopIteration, 0)
+    assert.deepStrictEqual(firstToken.invocation.branch, {
+      _tag: "StandardLoopIteration",
+      frameId,
+      iteration: 0
+    })
 
     const firstCompletion = BpmnKernel.completeTask(
       compiled,
@@ -2381,8 +2369,11 @@ describe("BpmnKernel", () => {
     if (secondToken === undefined) {
       throw new Error("expected second loop iteration")
     }
-    assert.strictEqual(secondToken.invocation.branchId, frameId)
-    assert.strictEqual(secondToken.invocation.loopIteration, 1)
+    assert.deepStrictEqual(secondToken.invocation.branch, {
+      _tag: "StandardLoopIteration",
+      frameId,
+      iteration: 1
+    })
     assert.strictEqual(
       firstCompletion.success.state.loopFrames[0]?.completedIterations,
       1
@@ -2456,7 +2447,7 @@ describe("BpmnKernel", () => {
     let evaluations = 0
     const loopServices: BpmnKernel.Services = {
       now,
-      evaluateCondition: () => {
+      evaluateExpression: () => {
         evaluations++
         return Result.succeed({ result: true, steps: 1 })
       }

@@ -51,7 +51,7 @@ const Path = Schema.Array(Diagnostic.PathSegment)
  * @category constants
  * @since 4.0.0
  */
-export const CoreProcessDiProfileId = "bpmn-2.0.2-core-process-di-v3" as const
+export const CoreProcessDiProfileId = "bpmn-2.0.2-core-process-di-v4" as const
 
 /**
  * Normalized metadata carried by one BPMN `definitions` element.
@@ -784,7 +784,11 @@ interface ParsedNode {
   readonly path: ReadonlyArray<Diagnostic.PathSegment>
 }
 
-type FormalExpressionElementName = "conditionExpression" | "loopCondition"
+type FormalExpressionElementName =
+  | "conditionExpression"
+  | "loopCondition"
+  | "loopCardinality"
+  | "completionCondition"
 
 const formalExpression = (
   element: BpmnXmlAst.XmlElement,
@@ -995,11 +999,203 @@ const parseStandardLoopCharacteristics = (
   }
 }
 
+const parseMultiInstanceCharacteristics = (
+  element: BpmnXmlAst.XmlElement,
+  context: NamespaceContext,
+  state: ParserState
+): BpmnModel.MultiInstanceCharacteristics => {
+  const attributes = readAttributes(
+    element,
+    new Set([
+      "isSequential",
+      "behavior",
+      "oneBehaviorEventRef",
+      "noneBehaviorEventRef"
+    ])
+  )
+  const sequentialLexical = unqualifiedAttribute(attributes, "isSequential")
+  const mode = sequentialLexical === undefined
+    ? "parallel"
+    : readBoolean(
+        sequentialLexical,
+        state.report,
+        xmlPath(element, ["attributes", "isSequential"]),
+        "multiInstanceLoopCharacteristics isSequential"
+      )
+    ? "sequential"
+    : "parallel"
+  if (sequentialLexical === undefined) {
+    notice(
+      state.report.defaultsApplied,
+      "MultiInstanceSequentialDefault",
+      "Absent multiInstanceLoopCharacteristics isSequential defaults to false (parallel)",
+      xmlPath(element, ["attributes", "isSequential"])
+    )
+  }
+
+  const behaviorLexical = unqualifiedAttribute(attributes, "behavior")
+  const behaviors = {
+    All: "all",
+    One: "one",
+    None: "none",
+    Complex: "complex"
+  } as const
+  let behavior: BpmnModel.MultiInstanceCharacteristics["behavior"]
+  if (behaviorLexical !== undefined) {
+    if (!(behaviorLexical in behaviors)) {
+      abort(
+        Codes.InvalidLexicalValue,
+        `Unsupported BPMN multi-instance behavior '${behaviorLexical}'`,
+        xmlPath(element, ["attributes", "behavior"])
+      )
+    }
+    behavior = behaviors[behaviorLexical as keyof typeof behaviors]
+  }
+
+  const readEventReference = (
+    attributeName: "oneBehaviorEventRef" | "noneBehaviorEventRef"
+  ): string | undefined => {
+    const lexical = unqualifiedAttribute(attributes, attributeName)
+    return lexical === undefined
+      ? undefined
+      : readModelQNameRef(
+        lexical,
+        context,
+        state.metadata.targetNamespace,
+        state.report,
+        xmlPath(element, ["attributes", attributeName]),
+        `multiInstanceLoopCharacteristics ${attributeName}`
+      )
+  }
+
+  let cardinality: BpmnModel.Expression | undefined
+  let loopDataInputRef: string | undefined
+  let loopDataOutputRef: string | undefined
+  let completionCondition: BpmnModel.Expression | undefined
+  let stage = 0
+  for (const child of structuralChildren(element)) {
+    const childContext = namespaceContext(context, child)
+    if (isElementNamed(child, ModelNamespace, "loopCardinality")) {
+      if (stage > 0 || cardinality !== undefined) {
+        abort(
+          Codes.InvalidStructure,
+          "multiInstanceLoopCharacteristics permits one loopCardinality as its first child",
+          xmlPath(child)
+        )
+      }
+      stage = 1
+      cardinality = formalExpression(
+        child,
+        childContext,
+        state,
+        "loopCardinality"
+      )
+      continue
+    }
+    if (isElementNamed(child, ModelNamespace, "loopDataInputRef")) {
+      if (stage > 1 || loopDataInputRef !== undefined) {
+        abort(
+          Codes.InvalidStructure,
+          "loopDataInputRef must follow loopCardinality and occur at most once",
+          xmlPath(child)
+        )
+      }
+      stage = 2
+      loopDataInputRef = parseReferenceChild(
+        child,
+        childContext,
+        state,
+        "multiInstanceLoopCharacteristics loopDataInputRef"
+      )
+      continue
+    }
+    if (isElementNamed(child, ModelNamespace, "loopDataOutputRef")) {
+      if (stage > 2 || loopDataOutputRef !== undefined) {
+        abort(
+          Codes.InvalidStructure,
+          "loopDataOutputRef must follow loopDataInputRef and occur at most once",
+          xmlPath(child)
+        )
+      }
+      stage = 3
+      loopDataOutputRef = parseReferenceChild(
+        child,
+        childContext,
+        state,
+        "multiInstanceLoopCharacteristics loopDataOutputRef"
+      )
+      continue
+    }
+    if (
+      isElementNamed(child, ModelNamespace, "inputDataItem") ||
+      isElementNamed(child, ModelNamespace, "outputDataItem")
+    ) {
+      abort(
+        Codes.UnsupportedElement,
+        `${child.name.localName} is not represented by BpmnModel.MultiInstanceCharacteristics`,
+        xmlPath(child)
+      )
+    }
+    if (isElementNamed(child, ModelNamespace, "complexBehaviorDefinition")) {
+      abort(
+        Codes.UnsupportedElement,
+        "complexBehaviorDefinition is not represented by BpmnModel.MultiInstanceCharacteristics",
+        xmlPath(child)
+      )
+    }
+    if (isElementNamed(child, ModelNamespace, "completionCondition")) {
+      if (stage > 3 || completionCondition !== undefined) {
+        abort(
+          Codes.InvalidStructure,
+          "completionCondition must follow the multi-instance data children and occur at most once",
+          xmlPath(child)
+        )
+      }
+      stage = 4
+      completionCondition = formalExpression(
+        child,
+        childContext,
+        state,
+        "completionCondition"
+      )
+      continue
+    }
+    abort(
+      child.name.namespaceUri === ModelNamespace
+        ? Codes.UnsupportedElement
+        : Codes.UnsupportedNamespace,
+      `Element '${child.name.localName}' is not represented inside multiInstanceLoopCharacteristics`,
+      xmlPath(child)
+    )
+  }
+  if (cardinality === undefined && loopDataInputRef === undefined) {
+    abort(
+      Codes.InvalidStructure,
+      "multiInstanceLoopCharacteristics requires loopCardinality or loopDataInputRef",
+      xmlPath(element, ["children"])
+    )
+  }
+
+  const oneBehaviorEventRef = readEventReference("oneBehaviorEventRef")
+  const noneBehaviorEventRef = readEventReference("noneBehaviorEventRef")
+  return {
+    _tag: "MultiInstanceCharacteristics",
+    mode,
+    ...(cardinality === undefined ? undefined : { cardinality }),
+    ...(loopDataInputRef === undefined ? undefined : { loopDataInputRef }),
+    ...(loopDataOutputRef === undefined ? undefined : { loopDataOutputRef }),
+    ...(completionCondition === undefined ? undefined : { completionCondition }),
+    ...(behavior === undefined ? undefined : { behavior }),
+    ...(oneBehaviorEventRef === undefined ? undefined : { oneBehaviorEventRef }),
+    ...(noneBehaviorEventRef === undefined ? undefined : { noneBehaviorEventRef })
+  }
+}
+
 interface NodeChildren {
   readonly supplied: boolean
   readonly incoming: ReadonlyArray<string>
   readonly outgoing: ReadonlyArray<string>
-  readonly loopCharacteristics: BpmnModel.StandardLoopCharacteristics | undefined
+  readonly loopCharacteristics: BpmnModel.LoopCharacteristics | undefined
   readonly contained: ReadonlyArray<BpmnXmlAst.XmlElement>
 }
 
@@ -1008,12 +1204,12 @@ const parseNodeChildren = (
   context: NamespaceContext,
   state: ParserState,
   allowContained: boolean,
-  allowStandardLoop: boolean
+  allowLoopCharacteristics: boolean
 ): NodeChildren => {
   const incoming: Array<string> = []
   const outgoing: Array<string> = []
   const contained: Array<BpmnXmlAst.XmlElement> = []
-  let loopCharacteristics: BpmnModel.StandardLoopCharacteristics | undefined
+  let loopCharacteristics: BpmnModel.LoopCharacteristics | undefined
   let stage = 0
   let supplied = false
   for (const child of structuralChildren(element)) {
@@ -1053,7 +1249,7 @@ const parseNodeChildren = (
       continue
     }
     if (isElementNamed(child, ModelNamespace, "standardLoopCharacteristics")) {
-      if (!allowStandardLoop) {
+      if (!allowLoopCharacteristics) {
         abort(
           Codes.UnsupportedElement,
           `standardLoopCharacteristics is only represented on BPMN task elements`,
@@ -1069,6 +1265,29 @@ const parseNodeChildren = (
       }
       stage = 2
       loopCharacteristics = parseStandardLoopCharacteristics(
+        child,
+        namespaceContext(context, child),
+        state
+      )
+      continue
+    }
+    if (isElementNamed(child, ModelNamespace, "multiInstanceLoopCharacteristics")) {
+      if (!allowLoopCharacteristics) {
+        abort(
+          Codes.UnsupportedElement,
+          "multiInstanceLoopCharacteristics is only represented on BPMN task elements",
+          xmlPath(child)
+        )
+      }
+      if (stage > 1 || loopCharacteristics !== undefined) {
+        abort(
+          Codes.InvalidStructure,
+          "BPMN task permits exactly one loop characteristics element after incoming and outgoing",
+          xmlPath(child)
+        )
+      }
+      stage = 2
+      loopCharacteristics = parseMultiInstanceCharacteristics(
         child,
         namespaceContext(context, child),
         state
@@ -2632,11 +2851,46 @@ const assertModelProfile = (
               [...path, "loopCharacteristics", "condition"]
             )
           } else {
-            abort(
-              Codes.UnsupportedModel,
-              `Task '${node.id}' only permits StandardLoopCharacteristics in this executable profile`,
-              [...path, "loopCharacteristics"]
-            )
+            if (
+              loop.cardinality === undefined &&
+              loop.loopDataInputRef === undefined
+            ) {
+              abort(
+                Codes.UnsupportedModel,
+                `Task '${node.id}' multi-instance characteristics require cardinality or loopDataInputRef`,
+                [...path, "loopCharacteristics"]
+              )
+            }
+            if (loop.cardinality !== undefined) {
+              assertExpression(
+                loop.cardinality,
+                bindings,
+                [...path, "loopCharacteristics", "cardinality"]
+              )
+            }
+            if (loop.completionCondition !== undefined) {
+              assertExpression(
+                loop.completionCondition,
+                bindings,
+                [...path, "loopCharacteristics", "completionCondition"]
+              )
+            }
+            for (
+              const [field, value] of [
+                ["loopDataInputRef", loop.loopDataInputRef],
+                ["loopDataOutputRef", loop.loopDataOutputRef],
+                ["oneBehaviorEventRef", loop.oneBehaviorEventRef],
+                ["noneBehaviorEventRef", loop.noneBehaviorEventRef]
+              ] as const
+            ) {
+              if (value !== undefined) {
+                assertNcName(
+                  value,
+                  [...path, "loopCharacteristics", field],
+                  `Task '${node.id}' multi-instance ${field}`
+                )
+              }
+            }
           }
         }
         break
@@ -3515,6 +3769,68 @@ const exportStandardLoopCharacteristics = (
   )
 }
 
+const exportMultiInstanceCharacteristics = (
+  value: BpmnModel.MultiInstanceCharacteristics,
+  definitions: DefinitionsMetadata
+): BpmnXmlAst.XmlElement => {
+  const behaviors = {
+    all: "All",
+    one: "One",
+    none: "None",
+    complex: "Complex"
+  } as const
+  const attributes = [
+    xmlAttribute("isSequential", boolLexical(value.mode === "sequential"))
+  ]
+  if (value.behavior !== undefined) {
+    attributes.push(xmlAttribute("behavior", behaviors[value.behavior]))
+  }
+  addOptionalAttribute(
+    attributes,
+    "oneBehaviorEventRef",
+    value.oneBehaviorEventRef === undefined
+      ? undefined
+      : `tns:${value.oneBehaviorEventRef}`
+  )
+  addOptionalAttribute(
+    attributes,
+    "noneBehaviorEventRef",
+    value.noneBehaviorEventRef === undefined
+      ? undefined
+      : `tns:${value.noneBehaviorEventRef}`
+  )
+  const children: Array<BpmnXmlAst.XmlElement> = []
+  if (value.cardinality !== undefined) {
+    children.push(exportFormalExpression(
+      "loopCardinality",
+      value.cardinality,
+      definitions
+    ))
+  }
+  if (value.loopDataInputRef !== undefined) {
+    children.push(bpmnElement(
+      "loopDataInputRef",
+      [],
+      [xmlText(`tns:${value.loopDataInputRef}`)]
+    ))
+  }
+  if (value.loopDataOutputRef !== undefined) {
+    children.push(bpmnElement(
+      "loopDataOutputRef",
+      [],
+      [xmlText(`tns:${value.loopDataOutputRef}`)]
+    ))
+  }
+  if (value.completionCondition !== undefined) {
+    children.push(exportFormalExpression(
+      "completionCondition",
+      value.completionCondition,
+      definitions
+    ))
+  }
+  return bpmnElement("multiInstanceLoopCharacteristics", attributes, children)
+}
+
 const flowReferenceChildren = (
   node: BpmnModel.FlowNode
 ): ReadonlyArray<BpmnXmlAst.XmlElement> => [
@@ -3659,10 +3975,15 @@ const exportNode = (
           ...(node.loopCharacteristics === undefined
             ? []
             : [
-              exportStandardLoopCharacteristics(
-                node.loopCharacteristics as BpmnModel.StandardLoopCharacteristics,
-                context.document.definitions
-              )
+              node.loopCharacteristics._tag === "StandardLoopCharacteristics"
+                ? exportStandardLoopCharacteristics(
+                  node.loopCharacteristics,
+                  context.document.definitions
+                )
+                : exportMultiInstanceCharacteristics(
+                  node.loopCharacteristics,
+                  context.document.definitions
+                )
             ])
         ]
       )

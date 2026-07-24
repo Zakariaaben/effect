@@ -69,7 +69,8 @@ describe("BpmnExpressionEvaluator", () => {
 
       const evaluation = yield* resolved.evaluate({
         source: "approved",
-        context: { amount: 42 }
+        context: { amount: 42 },
+        expectedResult: "boolean"
       })
       assert.deepStrictEqual(evaluation, { result: true, steps: 7 })
 
@@ -201,16 +202,88 @@ describe("BpmnExpressionEvaluator", () => {
       assert.instanceOf(result.failure, Evaluator.InvalidEvaluatorConfiguration)
     }))
 
-  it("retains invalid result shapes as schema failures", () => {
-    const decode = Schema.decodeUnknownResult(
+  it("accepts exact JSON results for conditions, cardinalities, and collections", () => {
+    const decodeRequest = Schema.decodeUnknownResult(
+      Evaluator.EvaluationRequest,
+      { onExcessProperty: "error" }
+    )
+    const decodeResult = Schema.decodeUnknownResult(
       Evaluator.EvaluationResult,
       { onExcessProperty: "error" }
     )
 
-    assert.isTrue(Result.isSuccess(decode({ result: false, steps: 0 })))
-    assert.isTrue(Result.isFailure(decode({ result: false, steps: -1 })))
+    for (
+      const expectedResult of [
+        "boolean",
+        "non-negative-integer",
+        "json-array",
+        "json"
+      ] as const
+    ) {
+      assert.isTrue(Result.isSuccess(decodeRequest({
+        source: "expression",
+        context: { input: [1, 2, 3] },
+        expectedResult
+      })))
+    }
+
+    assert.isTrue(Result.isSuccess(decodeResult({ result: false, steps: 0 })))
+    assert.isTrue(Result.isSuccess(decodeResult({ result: 42, steps: 1 })))
     assert.isTrue(
-      Result.isFailure(decode({ result: false, steps: 0, extra: true }))
+      Result.isSuccess(decodeResult({
+        result: [{ item: "one" }, { item: "two" }],
+        steps: 2
+      }))
+    )
+    assert.isTrue(
+      Result.isSuccess(decodeResult({
+        result: { mapped: null, nested: ["exact", true] },
+        steps: 3
+      }))
+    )
+  })
+
+  it("rejects non-JSON values, unknown expectations, and excess properties", () => {
+    const decodeRequest = Schema.decodeUnknownResult(
+      Evaluator.EvaluationRequest,
+      { onExcessProperty: "error" }
+    )
+    const decodeResult = Schema.decodeUnknownResult(
+      Evaluator.EvaluationResult,
+      { onExcessProperty: "error" }
+    )
+
+    assert.isTrue(
+      Result.isFailure(decodeRequest({
+        source: "expression",
+        context: {},
+        expectedResult: "number"
+      }))
+    )
+    assert.isTrue(
+      Result.isFailure(decodeRequest({
+        source: "expression",
+        context: { invalid: undefined },
+        expectedResult: "json"
+      }))
+    )
+    assert.isTrue(
+      Result.isFailure(decodeRequest({
+        source: "expression",
+        context: {},
+        expectedResult: "json",
+        extra: true
+      }))
+    )
+    assert.isTrue(
+      Result.isFailure(decodeResult({ result: undefined, steps: 0 }))
+    )
+    assert.isTrue(
+      Result.isFailure(decodeResult({ result: () => true, steps: 0 }))
+    )
+    assert.isTrue(Result.isFailure(decodeResult({ result: false, steps: -1 })))
+    assert.isTrue(
+      Result.isFailure(decodeResult({ result: false, steps: 0, extra: true }))
     )
   })
 })

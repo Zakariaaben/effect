@@ -1,7 +1,7 @@
 {
   "formatVersion": 1,
   "catalogId": "effect-workflow-builder-bpmn-2.0.2",
-  "catalogRevision": 8,
+  "catalogRevision": 9,
   "implementation": "@effect/workflow-builder",
   "implementationVersion": "4.0.0-beta.100",
   "reviewedAt": "2026-07-24",
@@ -77,7 +77,7 @@
     {
       "requirementId": "BPMN-EXECUTION-BASIC-TOKEN-KERNEL",
       "supportLevel": "executable",
-      "summary": "A deliberately bounded executable subset covers root and embedded subprocess scopes, none start/end events, generic tasks, normal/conditional/default sequence flows, exclusive routing, parallel split/join epochs, and Standard Loops on generic Tasks. Standard Loop execution persists exact iteration and condition evidence, honors pre-test or post-test behavior, and enforces a mandatory positive loopMaximum. Combined pre/post-test loops, SubProcess loops, arbitrary cycles, and multi-instance activities are rejected. Deterministic journals and causal replay cover the admitted subset.",
+      "summary": "A deliberately bounded executable subset covers root and embedded subprocess scopes, none start/end events, generic tasks, normal/conditional/default sequence flows, exclusive routing, parallel split/join epochs, Standard Loops, and FixedMultiInstance/1 on generic Tasks. Fixed multi-instance execution freezes one bounded cardinality, records stable member identity and exact counters, runs sequentially or in parallel, joins all members or terminates the remainder on the first true completionCondition, fences late completion, and causally replays failure cleanup. Collection mapping, SubProcess or CallActivity multi-instance execution, progressive behavior events, output aggregation, and open or draining groups remain unsupported.",
       "evidence": [
         {
           "kind": "source",
@@ -103,6 +103,113 @@
           "kind": "replay-test",
           "path": "test/BpmnKernel.test.ts",
           "testName": "persists exact test-before iterations, replays them, and makes old completion idempotent"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/BpmnMultiInstanceKernel.test.ts",
+          "testName": "freezes one cardinality and executes three sequential members with exact replay boundaries"
+        },
+        {
+          "kind": "replay-test",
+          "path": "test/BpmnMultiInstanceKernel.test.ts",
+          "testName": "accepts out-of-order parallel completion while preserving ordered member state and one outgoing route"
+        }
+      ]
+    },
+    {
+      "requirementId": "BPMN-EXECUTION-FIXED-MULTI-INSTANCE-TASK",
+      "supportLevel": "executable",
+      "summary": "FixedMultiInstance/1 executes a bounded cardinality-based generic Task profile. It evaluates loopCardinality exactly once at activation, freezes stable item:index identities, supports sequential and parallel scheduling, records exact active/completed/terminated counters, and routes once after an all join or the first true completionCondition. Remaining members are terminated before continuation; stale completeTask commands are fenced and idempotent. Boundary Error and terminal business-failure paths cancel the group before routing or failing, and the journal replays every transition exactly. XML v4 represents broader collection and behavior metadata but executable admission rejects collection sources and behavior other than All.",
+      "evidence": [
+        {
+          "kind": "source",
+          "path": "src/BpmnExecutionState.ts",
+          "symbol": "MultiInstanceGroup"
+        },
+        {
+          "kind": "source",
+          "path": "src/BpmnKernel.ts",
+          "symbol": "MultiInstanceCardinalityEvaluationContext"
+        },
+        {
+          "kind": "source",
+          "path": "src/BpmnExpressionRuntime.ts",
+          "symbol": "completeTask"
+        },
+        {
+          "kind": "source",
+          "path": "src/BpmnXml.ts",
+          "symbol": "CoreProcessDiProfileId"
+        },
+        {
+          "kind": "source",
+          "path": "src/EffectWorkflowBpmnV3.ts",
+          "symbol": "executeTask"
+        },
+        {
+          "kind": "state-test",
+          "path": "test/BpmnExecutionState.test.ts",
+          "testName": "admits exact parallel, sequential, and completion-condition multi-instance state"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/BpmnExpressionRuntime.test.ts",
+          "testName": "keeps one asynchronous multi-instance cardinality decision stable across reruns"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/BpmnExpressionRuntime.test.ts",
+          "testName": "uses collision-free completion decisions for distinct multi-instance items"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/BpmnMultiInstanceKernel.test.ts",
+          "testName": "freezes one cardinality and executes three sequential members with exact replay boundaries"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/BpmnMultiInstanceKernel.test.ts",
+          "testName": "accepts out-of-order parallel completion while preserving ordered member state and one outgoing route"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/BpmnMultiInstanceKernel.test.ts",
+          "testName": "derives distinct bound task occurrences from the group activation and member index"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/BpmnMultiInstanceKernel.test.ts",
+          "testName": "evaluates completion after each commit, terminates remaining members on the first true result, and idempotently rejects late work"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/BpmnMultiInstanceKernel.test.ts",
+          "testName": "cancels every parallel member before routing one mapped Boundary Error and replays it exactly"
+        },
+        {
+          "kind": "replay-test",
+          "path": "test/BpmnMultiInstanceKernel.test.ts",
+          "testName": "rejects tampered cardinality, item identity, ordering, counters, completion result, model fingerprint, and limits"
+        },
+        {
+          "kind": "import-test",
+          "path": "test/BpmnXml.test.ts",
+          "testName": "imports sequential Multi-Instance cardinality and completion semantics exactly"
+        },
+        {
+          "kind": "roundtrip-test",
+          "path": "test/BpmnXml.test.ts",
+          "testName": "exports Multi-Instance children in BPMN schema order at a canonical fixed point"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/BpmnExecutable.test.ts",
+          "testName": "imports, compiles, executes, replays, and canonically recompiles a sequential Multi-Instance task"
+        },
+        {
+          "kind": "replay-test",
+          "path": "test/BpmnExecutable.test.ts",
+          "testName": "preserves deterministic member identity across out-of-order parallel Multi-Instance completion and canonical replay"
         }
       ]
     },
@@ -166,7 +273,7 @@
     {
       "requirementId": "BPMN-EXECUTION-CORE-PROCESS-XML-SLICE",
       "supportLevel": "executable",
-      "summary": "A strict facade composes named profile bpmn-2.0.2-core-process-di-v3 with the bounded token kernel without projection or inference. The intersection includes conditional/default routing, parallel split/join, ordinary subprocesses, and the bounded generic-Task Standard Loop subset with version-bound formal conditions and mandatory loopMaximum. Explicit external taskBindings may be supplied through CompileXmlOptions and are fingerprinted; they are not read from BPMN XML. Exact journal replay, canonical export, re-import, recompilation, and replay equivalence remain part of the boundary.",
+      "summary": "A strict facade composes named profile bpmn-2.0.2-core-process-di-v4 with the bounded token kernel without projection or inference. The intersection includes conditional/default routing, parallel split/join, ordinary subprocesses, bounded generic-Task Standard Loops, and FixedMultiInstance/1 with cardinality, sequential/parallel behavior All, and optional completionCondition. Explicit external taskBindings may be supplied through CompileXmlOptions and are fingerprinted; they are not read from BPMN XML. Exact journal replay, canonical export, re-import, recompilation, and replay equivalence remain part of the boundary.",
       "evidence": [
         {
           "kind": "source",
@@ -202,6 +309,21 @@
           "kind": "roundtrip-test",
           "path": "test/BpmnExecutable.test.ts",
           "testName": "imports, binds, executes, and replays a bounded Standard Loop through the Effect runtime"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/BpmnExecutable.test.ts",
+          "testName": "imports, compiles, executes, replays, and canonically recompiles a sequential Multi-Instance task"
+        },
+        {
+          "kind": "replay-test",
+          "path": "test/BpmnExecutable.test.ts",
+          "testName": "preserves deterministic member identity across out-of-order parallel Multi-Instance completion and canonical replay"
+        },
+        {
+          "kind": "roundtrip-test",
+          "path": "test/BpmnExecutable.test.ts",
+          "testName": "round-trips collection and progressive Multi-Instance mapping while executable admission fails closed"
         }
       ]
     },
@@ -230,7 +352,7 @@
     {
       "requirementId": "BPMN-INTERCHANGE-CORE-PROCESS-XML-SLICE",
       "supportLevel": "modeled",
-      "summary": "Named profile bpmn-2.0.2-core-process-di-v3 performs fail-closed namespace-expanded import, validation, canonical-prefix export, and normalized round-trip for its explicitly bounded process/control-flow slice, including Standard Loop characteristics on generic Tasks. It requires a version-bound formal loopCondition and positive loopMaximum while materializing the testBefore=false default. BPMN's broader optional maximum and tExpression condition forms remain outside this profile. Modeled records implementation maturity here because normative XSD validation, general Standard Loop or multi-instance mapping, and an OMG conformance subclass are not claimed.",
+      "summary": "Named profile bpmn-2.0.2-core-process-di-v4 performs fail-closed namespace-expanded import, validation, canonical-prefix export, and normalized round-trip for its explicitly bounded process/control-flow slice, including Standard Loop and represented Multi-Instance characteristics on generic Tasks. Multi-Instance cardinality, collection references, mode, completionCondition, behavior, and One/None event references round-trip in schema order, while input/output data items and complex behavior definitions remain outside the slice. The executable FixedMultiInstance/1 intersection is narrower than interchange. Modeled records implementation maturity because normative XSD validation, complete semantic mapping, and an OMG conformance subclass are not claimed.",
       "evidence": [
         {
           "kind": "source",
@@ -363,7 +485,7 @@
     {
       "requirementId": "WFP-CONTROL-FLOW-CATALOG",
       "supportLevel": "unsupported",
-      "summary": "The control-flow family is analyzed in prose, while only five separately listed atomic patterns have executable evidence.",
+      "summary": "The control-flow family is analyzed in prose, while only eight separately listed atomic patterns have executable evidence.",
       "evidence": [
         {
           "kind": "specification",
@@ -461,9 +583,105 @@
       ]
     },
     {
+      "requirementId": "WFP-WCP13-MULTI-INSTANCE-DESIGN-TIME",
+      "supportLevel": "executable",
+      "summary": "FixedMultiInstance/1 supports WCP13 when the pinned cardinality expression is a design-time fixed model value. Parallel mode freezes a closed, stably identified independent member set and emits exactly one continuation only after the all join. Sequential mode is supported by the BPMN profile but is not evidence for the pattern's concurrent form. The kernel deliberately does not infer whether an expression is literal or activation-derived; that distinction belongs to the pinned evaluator and model profile.",
+      "evidence": [
+        {
+          "kind": "source",
+          "path": "src/BpmnKernel.ts",
+          "symbol": "MultiInstanceCardinalityEvaluationContext"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/BpmnMultiInstanceKernel.test.ts",
+          "testName": "freezes one cardinality and executes three sequential members with exact replay boundaries"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/BpmnMultiInstanceKernel.test.ts",
+          "testName": "accepts out-of-order parallel completion while preserving ordered member state and one outgoing route"
+        },
+        {
+          "kind": "replay-test",
+          "path": "test/BpmnMultiInstanceKernel.test.ts",
+          "testName": "accepts out-of-order parallel completion while preserving ordered member state and one outgoing route"
+        },
+        {
+          "kind": "roundtrip-test",
+          "path": "test/BpmnXml.test.ts",
+          "testName": "exports Multi-Instance children in BPMN schema order at a canonical fixed point"
+        }
+      ]
+    },
+    {
+      "requirementId": "WFP-WCP14-MULTI-INSTANCE-RUNTIME",
+      "supportLevel": "executable",
+      "summary": "FixedMultiInstance/1 evaluates a runtime cardinality exactly once before member creation, freezes that closed set under maxMultiInstanceCardinality, and waits for all members before one continuation. Parallel mode supplies the WCP14 concurrent form: members may complete in any order without changing stable identity or ordered durable state. Sequential mode is an additional BPMN execution form. No later source mutation can add a member.",
+      "evidence": [
+        {
+          "kind": "source",
+          "path": "src/BpmnKernel.ts",
+          "symbol": "openMultiInstance"
+        },
+        {
+          "kind": "source",
+          "path": "src/BpmnExpressionRuntime.ts",
+          "symbol": "completeTask"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/BpmnMultiInstanceKernel.test.ts",
+          "testName": "freezes one cardinality and executes three sequential members with exact replay boundaries"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/BpmnMultiInstanceKernel.test.ts",
+          "testName": "completes cardinality zero immediately and rejects an over-limit cardinality atomically"
+        },
+        {
+          "kind": "replay-test",
+          "path": "test/BpmnExecutable.test.ts",
+          "testName": "preserves deterministic member identity across out-of-order parallel Multi-Instance completion and canonical replay"
+        }
+      ]
+    },
+    {
+      "requirementId": "WFP-WCP35-CANCELLING-PARTIAL-MI-JOIN",
+      "supportLevel": "executable",
+      "summary": "The admitted WCP35 subset evaluates one pinned completionCondition after each committed member completion. Its first true result records exact counters, terminates every remaining active or pending member, emits one continuation, and fences late completeTask commands. The member set was frozen before execution; WCP15 open creation and WCP34/WCP36 draining behavior are not claimed and require OpenForEachGroup/1.",
+      "evidence": [
+        {
+          "kind": "source",
+          "path": "src/BpmnKernel.ts",
+          "symbol": "MultiInstanceCompletionEvaluationContext"
+        },
+        {
+          "kind": "source",
+          "path": "src/BpmnExecutionState.ts",
+          "symbol": "MultiInstanceGroup"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/BpmnMultiInstanceKernel.test.ts",
+          "testName": "evaluates completion after each commit, terminates remaining members on the first true result, and idempotently rejects late work"
+        },
+        {
+          "kind": "replay-test",
+          "path": "test/BpmnMultiInstanceKernel.test.ts",
+          "testName": "rejects tampered cardinality, item identity, ordering, counters, completion result, model fingerprint, and limits"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/BpmnExecutable.test.ts",
+          "testName": "imports, compiles, executes, replays, and canonically recompiles a sequential Multi-Instance task"
+        }
+      ]
+    },
+    {
       "requirementId": "WFP-WCP21-STRUCTURED-LOOP",
       "supportLevel": "executable",
-      "summary": "The admitted WCP21 slice executes while-style pre-test and BPMN post-tested Standard Loops on one generic Task. It records exact iteration and version-bound condition evidence, interprets a true condition as continue, materializes BPMN's testBefore=false default at XML import, and enforces a mandatory positive loopMaximum. Combined pre/post-test loops, Standard Loops on SubProcesses, arbitrary cycles, and multi-instance activities remain unsupported.",
+      "summary": "The admitted WCP21 slice executes while-style pre-test and BPMN post-tested Standard Loops on one generic Task. It records exact iteration and version-bound condition evidence, interprets a true condition as continue, materializes BPMN's testBefore=false default at XML import, and enforces a mandatory positive loopMaximum. Combined pre/post-test loops, Standard Loops on SubProcesses, and arbitrary cycles remain unsupported; fixed Task Multi-Instance execution is tracked separately by WCP13, WCP14, and WCP35.",
       "evidence": [
         {
           "kind": "source",
@@ -618,7 +836,7 @@
     {
       "requirementId": "WFP-ATOMIC-CATALOG-COMPLETE",
       "supportLevel": "unsupported",
-      "summary": "Family-level traceability and five executable atomic control patterns exist; the complete per-pattern requirement catalogue remains intentionally incomplete.",
+      "summary": "Family-level traceability and eight executable atomic control patterns exist; the complete per-pattern requirement catalogue remains intentionally incomplete.",
       "evidence": [
         {
           "kind": "specification",

@@ -157,6 +157,43 @@ const standardLoopXml = (
   </${prefixes.model}:process>
 </${prefixes.model}:definitions>`
 
+const multiInstanceOptions: BpmnXml.ImportOptions = {
+  importId: "multi-instance",
+  expressionLanguageBindings: [{
+    language: "urn:expression:multi-instance",
+    version: "2.0.0"
+  }]
+}
+
+const multiInstanceXml = (
+  characteristics: string = `<mi:multiInstanceLoopCharacteristics isSequential="true">
+        <mi:loopCardinality xsi:type="mi:tFormalExpression">items.length</mi:loopCardinality>
+        <mi:completionCondition xsi:type="mi:tFormalExpression">completed >= required</mi:completionCondition>
+      </mi:multiInstanceLoopCharacteristics>`
+): string =>
+  `<mi:definitions
+  xmlns:mi="${modelNamespace}"
+  xmlns:xsi="${xsiNamespace}"
+  xmlns:tns="urn:workflow:multi-instance"
+  targetNamespace="urn:workflow:multi-instance"
+  expressionLanguage="urn:expression:multi-instance">
+  <mi:process id="mi_process" isExecutable="true">
+    <mi:startEvent id="start">
+      <mi:outgoing>tns:to_task</mi:outgoing>
+    </mi:startEvent>
+    <mi:task id="process_item">
+      <mi:incoming>tns:to_task</mi:incoming>
+      <mi:outgoing>tns:to_end</mi:outgoing>
+      ${characteristics}
+    </mi:task>
+    <mi:endEvent id="end">
+      <mi:incoming>tns:to_end</mi:incoming>
+    </mi:endEvent>
+    <mi:sequenceFlow id="to_task" sourceRef="start" targetRef="process_item"/>
+    <mi:sequenceFlow id="to_end" sourceRef="process_item" targetRef="end"/>
+  </mi:process>
+</mi:definitions>`
+
 describe("BpmnXml", () => {
   it("imports the complete named semantic and DI slice independent of prefix spelling", () => {
     const first = success(BpmnXml.importXml(xml(), options))
@@ -227,7 +264,7 @@ describe("BpmnXml", () => {
     ))
     assert.strictEqual(
       explicit.profileId,
-      "bpmn-2.0.2-core-process-di-v3"
+      "bpmn-2.0.2-core-process-di-v4"
     )
     const explicitTask = explicit.model.flowNodes[1]!
     assert.strictEqual(explicitTask._tag, "Task")
@@ -520,6 +557,333 @@ ${condition}
     )
   })
 
+  it("imports sequential Multi-Instance cardinality and completion semantics exactly", () => {
+    const imported = success(BpmnXml.importXml(
+      multiInstanceXml(),
+      multiInstanceOptions
+    ))
+    assert.strictEqual(imported.profileId, BpmnXml.CoreProcessDiProfileId)
+    const task = imported.model.flowNodes[1]!
+    if (
+      task._tag !== "Task" ||
+      task.loopCharacteristics?._tag !== "MultiInstanceCharacteristics"
+    ) {
+      throw new Error("expected imported multi-instance task")
+    }
+    assert.deepStrictEqual(task.loopCharacteristics, {
+      _tag: "MultiInstanceCharacteristics",
+      mode: "sequential",
+      cardinality: {
+        language: "urn:expression:multi-instance",
+        version: "2.0.0",
+        source: "items.length"
+      },
+      completionCondition: {
+        language: "urn:expression:multi-instance",
+        version: "2.0.0",
+        source: "completed >= required"
+      }
+    })
+  })
+
+  it("preserves the parallel and behavior defaults without inventing behavior", () => {
+    const imported = success(BpmnXml.importXml(
+      multiInstanceXml(
+        `<mi:multiInstanceLoopCharacteristics>
+        <mi:loopCardinality xsi:type="mi:tFormalExpression">items.length</mi:loopCardinality>
+      </mi:multiInstanceLoopCharacteristics>`
+      ),
+      multiInstanceOptions
+    ))
+    const task = imported.model.flowNodes[1]!
+    if (
+      task._tag !== "Task" ||
+      task.loopCharacteristics?._tag !== "MultiInstanceCharacteristics"
+    ) {
+      throw new Error("expected imported multi-instance task")
+    }
+    assert.strictEqual(task.loopCharacteristics.mode, "parallel")
+    assert.strictEqual(task.loopCharacteristics.behavior, undefined)
+    assert.isTrue(
+      imported.mappingReport.defaultsApplied.some(
+        (entry) => entry.code === "MultiInstanceSequentialDefault"
+      )
+    )
+
+    const serialized = success(BpmnXml.exportXml(imported, {
+      format: "compact"
+    }))
+    assert.include(
+      serialized,
+      `<bpmn:multiInstanceLoopCharacteristics isSequential="false">`
+    )
+    assert.notInclude(serialized, ` behavior=`)
+    const reimported = success(BpmnXml.importXml(
+      serialized,
+      multiInstanceOptions
+    ))
+    assert.deepStrictEqual(reimported.model, imported.model)
+  })
+
+  it("round-trips collection and behavior references as target-namespace QNames", () => {
+    for (
+      const behavior of [
+        {
+          lexical: "One",
+          model: "one",
+          referenceAttribute: "oneBehaviorEventRef",
+          referenceId: "first_done"
+        },
+        {
+          lexical: "None",
+          model: "none",
+          referenceAttribute: "noneBehaviorEventRef",
+          referenceId: "each_done"
+        }
+      ] as const
+    ) {
+      const imported = success(BpmnXml.importXml(
+        multiInstanceXml(
+          `<mi:multiInstanceLoopCharacteristics
+            isSequential="false"
+            behavior="${behavior.lexical}"
+            ${behavior.referenceAttribute}="tns:${behavior.referenceId}">
+          <mi:loopDataInputRef>tns:items_input</mi:loopDataInputRef>
+          <mi:loopDataOutputRef>items_output</mi:loopDataOutputRef>
+          <mi:completionCondition xsi:type="mi:tFormalExpression">accepted</mi:completionCondition>
+        </mi:multiInstanceLoopCharacteristics>`
+        ),
+        multiInstanceOptions
+      ))
+      const task = imported.model.flowNodes[1]!
+      if (
+        task._tag !== "Task" ||
+        task.loopCharacteristics?._tag !== "MultiInstanceCharacteristics"
+      ) {
+        throw new Error("expected imported multi-instance task")
+      }
+      assert.deepStrictEqual(task.loopCharacteristics, {
+        _tag: "MultiInstanceCharacteristics",
+        mode: "parallel",
+        loopDataInputRef: "items_input",
+        loopDataOutputRef: "items_output",
+        completionCondition: {
+          language: "urn:expression:multi-instance",
+          version: "2.0.0",
+          source: "accepted"
+        },
+        behavior: behavior.model,
+        [behavior.referenceAttribute]: behavior.referenceId
+      })
+
+      for (const format of ["compact", "pretty"] as const) {
+        const serialized = success(BpmnXml.exportXml(imported, { format }))
+        assert.include(
+          serialized,
+          `behavior="${behavior.lexical}" ${behavior.referenceAttribute}="tns:${behavior.referenceId}"`
+        )
+        assert.include(
+          serialized,
+          `<bpmn:loopDataInputRef>tns:items_input</bpmn:loopDataInputRef>`
+        )
+        assert.include(
+          serialized,
+          `<bpmn:loopDataOutputRef>tns:items_output</bpmn:loopDataOutputRef>`
+        )
+        const inputIndex = serialized.indexOf("<bpmn:loopDataInputRef>")
+        const outputIndex = serialized.indexOf("<bpmn:loopDataOutputRef>")
+        const completionIndex = serialized.indexOf("<bpmn:completionCondition")
+        assert.isAbove(outputIndex, inputIndex)
+        assert.isAbove(completionIndex, outputIndex)
+
+        const reimported = success(BpmnXml.importXml(
+          serialized,
+          multiInstanceOptions
+        ))
+        assert.deepStrictEqual(reimported.model, imported.model)
+        assert.strictEqual(
+          success(BpmnXml.exportXml(reimported, { format })),
+          serialized
+        )
+      }
+    }
+  })
+
+  it("exports Multi-Instance children in BPMN schema order at a canonical fixed point", () => {
+    for (
+      const fixture of [
+        {
+          body: `<mi:loopCardinality xsi:type="mi:tFormalExpression">10</mi:loopCardinality>
+            <mi:completionCondition xsi:type="mi:tFormalExpression">completed == 10</mi:completionCondition>`,
+          orderedChildren: [
+            "<bpmn:loopCardinality",
+            "<bpmn:completionCondition"
+          ]
+        },
+        {
+          body: `<mi:loopDataInputRef>tns:items_input</mi:loopDataInputRef>
+            <mi:loopDataOutputRef>tns:items_output</mi:loopDataOutputRef>
+            <mi:completionCondition xsi:type="mi:tFormalExpression">completed == 10</mi:completionCondition>`,
+          orderedChildren: [
+            "<bpmn:loopDataInputRef>",
+            "<bpmn:loopDataOutputRef>",
+            "<bpmn:completionCondition"
+          ]
+        }
+      ]
+    ) {
+      const imported = success(BpmnXml.importXml(
+        multiInstanceXml(
+          `<mi:multiInstanceLoopCharacteristics isSequential="true" behavior="All">
+            ${fixture.body}
+          </mi:multiInstanceLoopCharacteristics>`
+        ),
+        multiInstanceOptions
+      ))
+      const serialized = success(BpmnXml.exportXml(imported, {
+        format: "compact"
+      }))
+      const indexes = fixture.orderedChildren.map((child) => serialized.indexOf(child))
+      assert.isAtLeast(indexes[0]!, 0)
+      for (let index = 1; index < indexes.length; index++) {
+        assert.isAbove(indexes[index]!, indexes[index - 1]!)
+      }
+      const reimported = success(BpmnXml.importXml(
+        serialized,
+        multiInstanceOptions
+      ))
+      assert.deepStrictEqual(reimported.model, imported.model)
+      assert.strictEqual(
+        success(BpmnXml.exportXml(reimported, { format: "compact" })),
+        serialized
+      )
+    }
+  })
+
+  it("rejects malformed, duplicate, out-of-order, and unsupported Multi-Instance content", () => {
+    const cardinality = `<mi:loopCardinality xsi:type="mi:tFormalExpression">items.length</mi:loopCardinality>`
+    const completion = `<mi:completionCondition xsi:type="mi:tFormalExpression">done</mi:completionCondition>`
+    const wrap = (children: string, attributes = "") =>
+      multiInstanceXml(
+        `<mi:multiInstanceLoopCharacteristics${attributes}>${children}</mi:multiInstanceLoopCharacteristics>`
+      )
+    for (
+      const candidate of [
+        wrap(`${cardinality}${cardinality}`),
+        wrap(`${completion}<mi:loopDataInputRef>items</mi:loopDataInputRef>`),
+        wrap(
+          `<mi:loopDataInputRef>items</mi:loopDataInputRef><mi:loopCardinality xsi:type="mi:tFormalExpression">2</mi:loopCardinality>`
+        ),
+        multiInstanceXml().replace(
+          `</mi:multiInstanceLoopCharacteristics>`,
+          `</mi:multiInstanceLoopCharacteristics><mi:multiInstanceLoopCharacteristics isSequential="true">${cardinality}</mi:multiInstanceLoopCharacteristics>`
+        )
+      ]
+    ) {
+      assert.include(
+        failureCodes(BpmnXml.importXml(candidate, multiInstanceOptions)),
+        BpmnXml.Codes.InvalidStructure
+      )
+    }
+    assert.include(
+      failureCodes(BpmnXml.importXml(
+        wrap("", ` isSequential="true"`),
+        multiInstanceOptions
+      )),
+      BpmnXml.Codes.InvalidStructure
+    )
+
+    for (
+      const unsupported of [
+        "<mi:inputDataItem id=\"item\"/>",
+        "<mi:outputDataItem id=\"item\"/>",
+        "<mi:complexBehaviorDefinition/>",
+        "<mi:vendorSpecific/>"
+      ]
+    ) {
+      assert.include(
+        failureCodes(BpmnXml.importXml(
+          wrap(`${cardinality}${unsupported}`),
+          multiInstanceOptions
+        )),
+        BpmnXml.Codes.UnsupportedElement
+      )
+    }
+  })
+
+  it("rejects invalid Multi-Instance lexical values, references, ownership, and oversized expressions", () => {
+    const valid = multiInstanceXml()
+    const cardinality = `<mi:loopCardinality xsi:type="mi:tFormalExpression">items.length</mi:loopCardinality>`
+    for (
+      const candidate of [
+        valid.replace(`isSequential="true"`, `isSequential="sometimes"`),
+        valid.replace(`isSequential="true"`, `isSequential="true" behavior="all"`)
+      ]
+    ) {
+      assert.include(
+        failureCodes(BpmnXml.importXml(candidate, multiInstanceOptions)),
+        BpmnXml.Codes.InvalidLexicalValue
+      )
+    }
+    assert.include(
+      failureCodes(BpmnXml.importXml(
+        valid.replace(
+          `isSequential="true"`,
+          `isSequential="true" oneBehaviorEventRef="missing:event"`
+        ),
+        multiInstanceOptions
+      )),
+      BpmnXml.Codes.UnknownPrefix
+    )
+    const foreignRef = valid
+      .replace(
+        `xmlns:tns="urn:workflow:multi-instance"`,
+        `xmlns:tns="urn:workflow:multi-instance" xmlns:foreign="urn:foreign"`
+      )
+      .replace(
+        `isSequential="true"`,
+        `isSequential="true" oneBehaviorEventRef="foreign:event"`
+      )
+    assert.include(
+      failureCodes(BpmnXml.importXml(foreignRef, multiInstanceOptions)),
+      BpmnXml.Codes.InvalidReference
+    )
+
+    for (
+      const candidate of [
+        valid
+          .replace(`<mi:task id="process_item">`, `<mi:callActivity id="process_item">`)
+          .replace(`</mi:task>`, `</mi:callActivity>`),
+        valid
+          .replace(`<mi:task id="process_item">`, `<mi:subProcess id="process_item">`)
+          .replace(`</mi:task>`, `</mi:subProcess>`)
+      ]
+    ) {
+      assert.include(
+        failureCodes(BpmnXml.importXml(candidate, multiInstanceOptions)),
+        BpmnXml.Codes.UnsupportedElement
+      )
+    }
+
+    assert.include(
+      failureCodes(BpmnXml.importXml(
+        multiInstanceXml(
+          `<mi:multiInstanceLoopCharacteristics isSequential="true">${
+            cardinality.replace(
+              "items.length",
+              "expression-too-long"
+            )
+          }</mi:multiInstanceLoopCharacteristics>`
+        ),
+        {
+          ...multiInstanceOptions,
+          limits: { maxTextCharactersPerNode: 8 }
+        }
+      )),
+      BpmnXmlAst.Codes.TextLimitExceeded
+    )
+  })
+
   it("validates only complete StandardLoop characteristics on normalized Task models", () => {
     const imported = success(BpmnXml.importXml(
       standardLoopXml(),
@@ -554,13 +918,6 @@ ${condition}
       const candidate of [
         withNode({ ...task, loopCharacteristics: withoutCondition }),
         withNode({ ...task, loopCharacteristics: withoutMaximum }),
-        withNode({
-          ...task,
-          loopCharacteristics: {
-            _tag: "MultiInstanceCharacteristics",
-            mode: "sequential"
-          }
-        }),
         withNode({ ...activity, _tag: "CallActivity" }),
         withNode({ ...activity, _tag: "SubProcess" })
       ]

@@ -24,8 +24,7 @@ const getOrThrow = <A, E>(result: Result.Result<A, E>): A => {
 }
 
 const crypto = Crypto.make({
-  randomBytes: (size) =>
-    globalThis.crypto.getRandomValues(new Uint8Array(size)),
+  randomBytes: (size) => globalThis.crypto.getRandomValues(new Uint8Array(size)),
   digest: (algorithm, bytes) =>
     Effect.promise(async () => {
       const copy = new ArrayBuffer(bytes.byteLength)
@@ -44,7 +43,8 @@ const program = Effect.gen(function*() {
     },
     rootProcessId: "approval",
     limits: {
-      maxAutomaticTransitions: 1_000
+      maxAutomaticTransitions: 1_000,
+      maxMultiInstanceCardinality: 128
     },
     evaluatorBindings: []
   })

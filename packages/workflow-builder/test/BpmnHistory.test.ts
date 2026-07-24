@@ -12,10 +12,7 @@ const processId = "process-history"
 
 const testCrypto = Crypto.make({
   randomBytes: (size) => new Uint8Array(size),
-  digest: (_algorithm, data) =>
-    Effect.sync(() =>
-      new Uint8Array(createHash("sha256").update(data).digest())
-    )
+  digest: (_algorithm, data) => Effect.sync(() => new Uint8Array(createHash("sha256").update(data).digest()))
 })
 
 const model = (taskName?: string): BpmnModel.BpmnModel => ({
@@ -92,15 +89,17 @@ const prepare = (input: BpmnModel.BpmnModel): BpmnKernel.CompiledKernel =>
     BpmnKernel.prepare(input, {
       profileId: "history-test-v1",
       rootProcessId: processId,
-      limits: { maxAutomaticTransitions: 100 },
+      limits: {
+        maxAutomaticTransitions: 100,
+        maxMultiInstanceCardinality: 128
+      },
       evaluatorBindings: []
     }).pipe(Effect.provideService(Crypto.Crypto, testCrypto))
   )
 
 const withCrypto = <A, E, R>(
   effect: Effect.Effect<A, E, R>
-): Effect.Effect<A, E, Exclude<R, Crypto.Crypto>> =>
-  effect.pipe(Effect.provideService(Crypto.Crypto, testCrypto))
+): Effect.Effect<A, E, Exclude<R, Crypto.Crypto>> => effect.pipe(Effect.provideService(Crypto.Crypto, testCrypto))
 
 describe("BpmnHistory", () => {
   it.effect("seals and verifies a complete exact-model journal", () =>
@@ -136,17 +135,14 @@ describe("BpmnHistory", () => {
       )
 
       const changedEvent = structuredClone(sealed)
-      const emitted = changedEvent.events.find((event) =>
-        event._tag === "TokenEmitted"
-      )
+      const emitted = changedEvent.events.find((event) => event._tag === "TokenEmitted")
       if (emitted?._tag !== "TokenEmitted") {
         throw new Error("expected token emission")
       }
       emitted.tokenId = "token:forged"
 
       const changedDigest = structuredClone(sealed)
-      changedDigest.historyDigest =
-        `sha256:${"f".repeat(64)}` as typeof changedDigest.historyDigest
+      changedDigest.historyDigest = `sha256:${"f".repeat(64)}` as typeof changedDigest.historyDigest
 
       for (const candidate of [changedEvent, changedDigest]) {
         const result = yield* BpmnHistory.replay(
@@ -180,9 +176,9 @@ describe("BpmnHistory", () => {
       assert(Result.isFailure(crossed))
       assert(
         "diagnostics" in crossed.failure &&
-        crossed.failure.diagnostics.some((diagnostic) =>
-          diagnostic.code === BpmnKernel.Codes.BpmnJournalModelMismatch
-        )
+          crossed.failure.diagnostics.some((diagnostic) =>
+            diagnostic.code === BpmnKernel.Codes.BpmnJournalModelMismatch
+          )
       )
 
       const headerless = yield* BpmnHistory.seal(

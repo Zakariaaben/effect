@@ -381,7 +381,6 @@ const state = (): BpmnExecutionState.BpmnExecutionState => ({
       parentScopeInstanceId: "scope-root",
       invocation: {
         activationId: "activation-1",
-        loopIteration: 0,
         generation: 1
       },
       status: "active",
@@ -419,13 +418,71 @@ const state = (): BpmnExecutionState.BpmnExecutionState => ({
       scopeInstanceId: "scope-sub-pack",
       invocation: {
         activationId: "activation-1",
-        branchId: "frame-loop",
-        loopIteration: 0,
+        branch: {
+          _tag: "StandardLoopIteration",
+          frameId: "frame-loop",
+          iteration: 0
+        },
         generation: 1
       },
       status: "active",
       position: { _tag: "AtNode", nodeId: "activity-pack" },
       createdAt: "2026-07-23T10:00:03.000Z"
+    },
+    {
+      tokenId: "token-review-0",
+      processId: "process-main",
+      scopeInstanceId: "scope-root",
+      invocation: {
+        activationId: "activation-1",
+        branch: {
+          _tag: "MultiInstanceItem",
+          groupId: "group-review",
+          itemIndex: 0,
+          itemKey: "review-0"
+        },
+        generation: 1
+      },
+      status: "consumed",
+      position: { _tag: "AtNode", nodeId: "task-review" },
+      createdAt: "2026-07-23T10:00:03.100Z",
+      consumedAt: "2026-07-23T10:00:03.500Z"
+    },
+    {
+      tokenId: "token-review-1",
+      processId: "process-main",
+      scopeInstanceId: "scope-root",
+      invocation: {
+        activationId: "activation-1",
+        branch: {
+          _tag: "MultiInstanceItem",
+          groupId: "group-review",
+          itemIndex: 1,
+          itemKey: "review-1"
+        },
+        generation: 1
+      },
+      status: "active",
+      position: { _tag: "AtNode", nodeId: "task-review" },
+      createdAt: "2026-07-23T10:00:03.100Z"
+    },
+    {
+      tokenId: "token-review-2",
+      processId: "process-main",
+      scopeInstanceId: "scope-root",
+      invocation: {
+        activationId: "activation-1",
+        branch: {
+          _tag: "MultiInstanceItem",
+          groupId: "group-review",
+          itemIndex: 2,
+          itemKey: "review-2"
+        },
+        generation: 1
+      },
+      status: "active",
+      position: { _tag: "AtNode", nodeId: "task-review" },
+      createdAt: "2026-07-23T10:00:03.100Z"
     }
   ],
   activityResolutions: [],
@@ -448,7 +505,6 @@ const state = (): BpmnExecutionState.BpmnExecutionState => ({
     activation: 0,
     completedIterations: 0,
     activeIteration: 0,
-    mode: "standard",
     status: "active",
     openedAt: "2026-07-23T10:00:02.000Z"
   }],
@@ -457,10 +513,32 @@ const state = (): BpmnExecutionState.BpmnExecutionState => ({
     activityId: "task-review",
     processId: "process-main",
     scopeInstanceId: "scope-root",
+    activation: 0,
     mode: "parallel",
+    source: { _tag: "Cardinality", value: 3 },
+    members: [{
+      index: 0,
+      itemKey: "review-0",
+      status: "completed",
+      tokenId: "token-review-0",
+      startedAt: "2026-07-23T10:00:03.100Z",
+      endedAt: "2026-07-23T10:00:03.500Z"
+    }, {
+      index: 1,
+      itemKey: "review-1",
+      status: "active",
+      tokenId: "token-review-1",
+      startedAt: "2026-07-23T10:00:03.100Z"
+    }, {
+      index: 2,
+      itemKey: "review-2",
+      status: "active",
+      tokenId: "token-review-2",
+      startedAt: "2026-07-23T10:00:03.100Z"
+    }],
     status: "active",
-    cardinality: 3,
-    completedInstanceCount: 1
+    completedInstanceCount: 1,
+    openedAt: "2026-07-23T10:00:03.000Z"
   }],
   callFrames: [{
     callFrameId: "callframe-child",
@@ -532,7 +610,10 @@ const state = (): BpmnExecutionState.BpmnExecutionState => ({
 const completedStandardLoopState = (): BpmnExecutionState.BpmnExecutionState => {
   const input = state()
   const frame = input.loopFrames[0]!
-  const tokenTemplate = input.tokens.find((token) => token.invocation.branchId === frame.frameId)!
+  const tokenTemplate = input.tokens.find((token) =>
+    token.invocation.branch?._tag === "StandardLoopIteration" &&
+    token.invocation.branch.frameId === frame.frameId
+  )!
   input.tokens = input.tokens.filter((token) => token !== tokenTemplate)
   frame.completedIterations = 3
   delete frame.activeIteration
@@ -547,12 +628,68 @@ const completedStandardLoopState = (): BpmnExecutionState.BpmnExecutionState => 
   for (let iteration = 0; iteration < timestamps.length; iteration++) {
     const history = structuredClone(tokenTemplate)
     history.tokenId = `token-loop-history-${iteration}`
-    history.invocation.loopIteration = iteration
+    if (history.invocation.branch?._tag !== "StandardLoopIteration") {
+      throw new Error("missing standard loop branch")
+    }
+    history.invocation.branch.iteration = iteration
     history.status = "consumed"
     history.createdAt = timestamps[iteration]![0]
     history.consumedAt = timestamps[iteration]![1]
     input.tokens.push(history)
   }
+  return input
+}
+
+const sequentialMultiInstanceFixture = (): {
+  readonly model: BpmnModel.BpmnModel
+  readonly state: BpmnExecutionState.BpmnExecutionState
+} => {
+  const inputModel = model()
+  const activity = inputModel.flowNodes.find((node) => node.id === "task-review")
+  if (
+    activity?._tag !== "Task" ||
+    activity.loopCharacteristics?._tag !== "MultiInstanceCharacteristics"
+  ) {
+    throw new Error("missing multi-instance task fixture")
+  }
+  activity.loopCharacteristics.mode = "sequential"
+
+  const inputState = state()
+  const group = inputState.multiInstanceGroups[0]!
+  group.mode = "sequential"
+  const pending = group.members[2]!
+  pending.status = "pending"
+  delete pending.tokenId
+  delete pending.startedAt
+  inputState.tokens = inputState.tokens.filter((token) => token.tokenId !== "token-review-2")
+
+  return { model: inputModel, state: inputState }
+}
+
+const completedByConditionMultiInstanceState = (): BpmnExecutionState.BpmnExecutionState => {
+  const input = state()
+  const group = input.multiInstanceGroups[0]!
+  const close = "2026-07-23T10:00:04.000Z"
+  group.status = "completed"
+  group.completionReason = "completion-condition"
+  group.closedAt = close
+
+  const activeMember = group.members[1]!
+  activeMember.status = "terminated"
+  activeMember.terminationReason = "completion-condition"
+  activeMember.endedAt = close
+  const activeToken = input.tokens.find((token) => token.tokenId === activeMember.tokenId)!
+  activeToken.status = "withdrawn"
+  activeToken.consumedAt = close
+
+  const otherActiveMember = group.members[2]!
+  otherActiveMember.status = "terminated"
+  otherActiveMember.terminationReason = "completion-condition"
+  otherActiveMember.endedAt = close
+  const otherActiveToken = input.tokens.find((token) => token.tokenId === otherActiveMember.tokenId)!
+  otherActiveToken.status = "withdrawn"
+  otherActiveToken.consumedAt = close
+
   return input
 }
 
@@ -582,8 +719,9 @@ describe("BpmnExecutionState", () => {
   it("admits a durable BPMN execution-state snapshot against a validated model", () => {
     const result = BpmnExecutionState.validate(model(), state())
 
-    assert.strictEqual(BpmnExecutionState.BpmnExecutionStateVersion, 4)
-    assert.strictEqual(BpmnExecutionState.BpmnKernelSemanticVersion, "3")
+    assert.strictEqual(BpmnExecutionState.BpmnExecutionStateVersion, 5)
+    assert.strictEqual(BpmnExecutionState.BpmnExecutableFingerprintVersion, 3)
+    assert.strictEqual(BpmnExecutionState.BpmnKernelSemanticVersion, "4")
     assert.isTrue(Result.isSuccess(result))
     if (Result.isFailure(result)) {
       throw result.failure
@@ -597,17 +735,23 @@ describe("BpmnExecutionState", () => {
     assert.strictEqual(({} as { readonly polluted?: boolean }).polluted, undefined)
   })
 
-  it("admits advanced and terminal standard loops while leaving multi-instance token authority for later", () => {
+  it("admits advanced, completed, and cancelled standard-loop authority", () => {
     const advanced = state()
     const advancedFrame = advanced.loopFrames[0]!
-    const currentIteration = advanced.tokens.find((token) => token.invocation.branchId === advancedFrame.frameId)!
+    const currentIteration = advanced.tokens.find((token) =>
+      token.invocation.branch?._tag === "StandardLoopIteration" &&
+      token.invocation.branch.frameId === advancedFrame.frameId
+    )!
     const previousIteration = structuredClone(currentIteration)
     previousIteration.tokenId = "token-loop-history-0"
     previousIteration.status = "consumed"
     previousIteration.createdAt = "2026-07-23T10:00:02.500Z"
     previousIteration.consumedAt = "2026-07-23T10:00:03.100Z"
     advanced.tokens.push(previousIteration)
-    currentIteration.invocation.loopIteration = 1
+    if (currentIteration.invocation.branch?._tag !== "StandardLoopIteration") {
+      throw new Error("missing standard loop branch")
+    }
+    currentIteration.invocation.branch.iteration = 1
     currentIteration.createdAt = "2026-07-23T10:00:03.200Z"
     advancedFrame.completedIterations = 1
     advancedFrame.activeIteration = 1
@@ -619,14 +763,20 @@ describe("BpmnExecutionState", () => {
 
     const cancelled = state()
     const cancelledFrame = cancelled.loopFrames[0]!
-    const withdrawn = cancelled.tokens.find((token) => token.invocation.branchId === cancelledFrame.frameId)!
+    const withdrawn = cancelled.tokens.find((token) =>
+      token.invocation.branch?._tag === "StandardLoopIteration" &&
+      token.invocation.branch.frameId === cancelledFrame.frameId
+    )!
     const completed = structuredClone(withdrawn)
     completed.tokenId = "token-loop-completed-before-cancel"
     completed.status = "consumed"
     completed.consumedAt = "2026-07-23T10:00:03.200Z"
     cancelled.tokens.push(completed)
     withdrawn.tokenId = "token-loop-cancelled-iteration"
-    withdrawn.invocation.loopIteration = 1
+    if (withdrawn.invocation.branch?._tag !== "StandardLoopIteration") {
+      throw new Error("missing standard loop branch")
+    }
+    withdrawn.invocation.branch.iteration = 1
     withdrawn.status = "withdrawn"
     withdrawn.createdAt = "2026-07-23T10:00:03.300Z"
     withdrawn.consumedAt = "2026-07-23T10:00:04.000Z"
@@ -636,79 +786,286 @@ describe("BpmnExecutionState", () => {
     cancelledFrame.closedAt = withdrawn.consumedAt
 
     assert(Result.isSuccess(BpmnExecutionState.validate(model(), cancelled)))
+  })
 
-    const withMultiInstanceFrame = state()
-    withMultiInstanceFrame.loopFrames.push({
-      frameId: "frame-review-mi",
-      activityId: "task-review",
-      processId: "process-main",
-      scopeInstanceId: "scope-root",
-      activation: 0,
-      completedIterations: 0,
-      activeIteration: 0,
-      mode: "multi-instance",
-      status: "active",
-      openedAt: "2026-07-23T10:00:03.000Z"
-    })
+  it("admits exact parallel, sequential, and completion-condition multi-instance state", () => {
+    assert(Result.isSuccess(BpmnExecutionState.validate(model(), state())))
 
-    assert(Result.isSuccess(BpmnExecutionState.validate(model(), withMultiInstanceFrame)))
+    const sequential = sequentialMultiInstanceFixture()
+    assert(Result.isSuccess(BpmnExecutionState.validate(sequential.model, sequential.state)))
+
+    const sequentialCondition = sequentialMultiInstanceFixture()
+    const sequentialGroup = sequentialCondition.state.multiInstanceGroups[0]!
+    const sequentialClose = "2026-07-23T10:00:04.000Z"
+    const sequentialTrigger = sequentialGroup.members[1]!
+    sequentialTrigger.status = "completed"
+    sequentialTrigger.endedAt = sequentialClose
+    const sequentialTriggerToken = sequentialCondition.state.tokens.find((token) =>
+      token.tokenId === sequentialTrigger.tokenId
+    )!
+    sequentialTriggerToken.status = "consumed"
+    sequentialTriggerToken.consumedAt = sequentialClose
+    const sequentialTail = sequentialGroup.members[2]!
+    sequentialTail.status = "terminated"
+    sequentialTail.terminationReason = "completion-condition"
+    sequentialGroup.completedInstanceCount = 2
+    sequentialGroup.status = "completed"
+    sequentialGroup.completionReason = "completion-condition"
+    sequentialGroup.closedAt = sequentialClose
+    assert(Result.isSuccess(
+      BpmnExecutionState.validate(sequentialCondition.model, sequentialCondition.state)
+    ))
+
+    const collectionModel = model()
+    const collectionActivity = collectionModel.flowNodes.find((node) => node.id === "task-review")
+    if (
+      collectionActivity?._tag !== "Task" ||
+      collectionActivity.loopCharacteristics?._tag !== "MultiInstanceCharacteristics"
+    ) {
+      throw new Error("missing multi-instance task fixture")
+    }
+    delete collectionActivity.loopCharacteristics.cardinality
+    collectionActivity.loopCharacteristics.loopDataInputRef = "review-items"
+    const collectionState = state()
+    collectionState.multiInstanceGroups[0]!.source = {
+      _tag: "Collection",
+      dataInputRef: "review-items",
+      items: [{ documentId: "doc-1" }, { documentId: "doc-2" }, { documentId: "doc-3" }]
+    }
+    assert(Result.isSuccess(BpmnExecutionState.validate(collectionModel, collectionState)))
+
+    assert(Result.isSuccess(
+      BpmnExecutionState.validate(model(), completedByConditionMultiInstanceState())
+    ))
+  })
+
+  it("rejects corrupt multi-instance source, ordering, counts, lifecycle, and activation authority", () => {
+    const wrongSourceCount = state()
+    const wrongSource = wrongSourceCount.multiInstanceGroups[0]!.source
+    if (wrongSource._tag !== "Cardinality") {
+      throw new Error("missing cardinality fixture")
+    }
+    wrongSource.value = 4
+    assertDiagnostic(
+      BpmnExecutionState.validate(model(), wrongSourceCount),
+      BpmnExecutionState.Codes.InvalidMultiInstanceGroup,
+      { path: "multiInstanceGroups/0/members", message: "source count" }
+    )
+
+    const duplicateKey = state()
+    duplicateKey.multiInstanceGroups[0]!.members[2]!.itemKey = "review-1"
+    assertDiagnostic(
+      BpmnExecutionState.validate(model(), duplicateKey),
+      BpmnExecutionState.Codes.InvalidMultiInstanceGroup,
+      { path: "multiInstanceGroups/0/members/2/itemKey", message: "duplicate itemKey" }
+    )
+
+    const nonContiguous = state()
+    nonContiguous.multiInstanceGroups[0]!.members[1]!.index = 2
+    assertDiagnostic(
+      BpmnExecutionState.validate(model(), nonContiguous),
+      BpmnExecutionState.Codes.InvalidMultiInstanceGroup,
+      { path: "multiInstanceGroups/0/members/1/index", message: "ordered position" }
+    )
+
+    const wrongCompletedCount = state()
+    wrongCompletedCount.multiInstanceGroups[0]!.completedInstanceCount = 2
+    assertDiagnostic(
+      BpmnExecutionState.validate(model(), wrongCompletedCount),
+      BpmnExecutionState.Codes.InvalidMultiInstanceGroup,
+      { path: "multiInstanceGroups/0/completedInstanceCount", message: "exact completed member count" }
+    )
+
+    const malformedLifecycle = state()
+    malformedLifecycle.multiInstanceGroups[0]!.members[1]!.endedAt = "2026-07-23T10:00:04.000Z"
+    assertDiagnostic(
+      BpmnExecutionState.validate(model(), malformedLifecycle),
+      BpmnExecutionState.Codes.InvalidMultiInstanceGroup,
+      { path: "multiInstanceGroups/0/members/1", message: "startedAt only" }
+    )
+
+    const duplicateActivation = state()
+    const duplicateGroup = structuredClone(duplicateActivation.multiInstanceGroups[0]!)
+    duplicateGroup.groupId = "group-review-duplicate"
+    duplicateGroup.status = "completed"
+    duplicateGroup.completionReason = "all-completed"
+    duplicateGroup.closedAt = "2026-07-23T10:00:04.000Z"
+    for (const member of duplicateGroup.members) {
+      member.status = "completed"
+      member.endedAt ??= duplicateGroup.closedAt
+    }
+    duplicateGroup.completedInstanceCount = duplicateGroup.members.length
+    duplicateActivation.multiInstanceGroups.push(duplicateGroup)
+    assertDiagnostic(
+      BpmnExecutionState.validate(model(), duplicateActivation),
+      BpmnExecutionState.Codes.InvalidMultiInstanceGroup,
+      { path: "multiInstanceGroups/1/activation", message: "more than one group for activation" }
+    )
+  })
+
+  it("enforces multi-instance token authority and terminal reasons fail-closed", () => {
+    const forgedBranch = state()
+    const forgedToken = forgedBranch.tokens.find((token) => token.tokenId === "token-review-1")!
+    if (forgedToken.invocation.branch?._tag !== "MultiInstanceItem") {
+      throw new Error("missing multi-instance token branch")
+    }
+    forgedToken.invocation.branch.itemKey = "forged-item"
+    const forgedResult = BpmnExecutionState.validate(model(), forgedBranch)
+    assertDiagnostic(
+      forgedResult,
+      BpmnExecutionState.Codes.InvalidTokenInvocation,
+      { path: "tokens/3/invocation/branch", message: "exact member" }
+    )
+    assertDiagnostic(
+      forgedResult,
+      BpmnExecutionState.Codes.InvalidMultiInstanceGroup,
+      { path: "multiInstanceGroups/0/members/1/tokenId", message: "exact group, index, and itemKey" }
+    )
+
+    const missingToken = state()
+    missingToken.tokens = missingToken.tokens.filter((token) => token.tokenId !== "token-review-2")
+    assertDiagnostic(
+      BpmnExecutionState.validate(model(), missingToken),
+      BpmnExecutionState.Codes.InvalidMultiInstanceGroup,
+      { path: "multiInstanceGroups/0/members/2/tokenId", message: "unknown token" }
+    )
+
+    const sequential = sequentialMultiInstanceFixture()
+    sequential.state.multiInstanceGroups[0]!.members[0]!.status = "active"
+    assertDiagnostic(
+      BpmnExecutionState.validate(sequential.model, sequential.state),
+      BpmnExecutionState.Codes.InvalidMultiInstanceGroup,
+      { path: "multiInstanceGroups/0/members", message: "exactly one active" }
+    )
+
+    const wrongReason = completedByConditionMultiInstanceState()
+    wrongReason.multiInstanceGroups[0]!.members[1]!.terminationReason = "execution-cancelled"
+    assertDiagnostic(
+      BpmnExecutionState.validate(model(), wrongReason),
+      BpmnExecutionState.Codes.InvalidMultiInstanceGroup,
+      {
+        path: "multiInstanceGroups/0/members/1/terminationReason",
+        message: "reason must match"
+      }
+    )
+
+    const unactivatedParallelMember = completedByConditionMultiInstanceState()
+    const parallelMember = unactivatedParallelMember.multiInstanceGroups[0]!.members[2]!
+    unactivatedParallelMember.tokens = unactivatedParallelMember.tokens.filter((token) =>
+      token.tokenId !== parallelMember.tokenId
+    )
+    delete parallelMember.tokenId
+    delete parallelMember.startedAt
+    delete parallelMember.endedAt
+    assertDiagnostic(
+      BpmnExecutionState.validate(model(), unactivatedParallelMember),
+      BpmnExecutionState.Codes.InvalidMultiInstanceGroup,
+      {
+        path: "multiInstanceGroups/0/members/2",
+        message: "parallel multi-instance member"
+      }
+    )
+  })
+
+  it("uses a strict discriminated invocation branch union", () => {
+    const decodeInvocation = Schema.decodeUnknownSync(BpmnExecutionState.InvocationIdentity)
+
+    assert.throws(() =>
+      decodeInvocation({
+        activationId: "activation-1",
+        branchId: "frame-loop",
+        loopIteration: 0,
+        generation: 1
+      })
+    )
+    assert.throws(() =>
+      decodeInvocation({
+        activationId: "activation-1",
+        branch: {
+          _tag: "StandardLoopIteration",
+          frameId: "frame-loop",
+          iteration: 0,
+          itemKey: "forbidden"
+        },
+        generation: 1
+      })
+    )
+    assert.throws(() =>
+      decodeInvocation({
+        activationId: "activation-1",
+        branch: {
+          _tag: "MultiInstanceItem",
+          groupId: "group-review",
+          itemKey: "review-0"
+        },
+        generation: 1
+      })
+    )
   })
 
   it("cross-validates consumed and withdrawn standard-loop token history", () => {
     const impossibleCompletedIteration = completedStandardLoopState()
-    impossibleCompletedIteration.tokens[3]!.invocation.loopIteration = 3
+    const impossibleBranch = impossibleCompletedIteration.tokens[6]!.invocation.branch
+    if (impossibleBranch?._tag !== "StandardLoopIteration") {
+      throw new Error("missing standard loop history branch")
+    }
+    impossibleBranch.iteration = 3
     assertDiagnostic(
       BpmnExecutionState.validate(model(), impossibleCompletedIteration),
       BpmnExecutionState.Codes.InvalidTokenInvocation,
       {
-        path: "tokens/3/invocation/loopIteration",
+        path: "tokens/6/invocation/branch/iteration",
         message: "iteration completed"
       }
     )
 
     const lateHistory = completedStandardLoopState()
-    lateHistory.tokens[1]!.consumedAt = "2026-07-23T10:00:05.000Z"
+    lateHistory.tokens[4]!.consumedAt = "2026-07-23T10:00:05.000Z"
     assertDiagnostic(
       BpmnExecutionState.validate(model(), lateHistory),
       BpmnExecutionState.Codes.InvalidTokenInvocation,
       {
-        path: "tokens/1/consumedAt",
+        path: "tokens/4/consumedAt",
         message: "after frame"
       }
     )
 
     const earlyHistory = completedStandardLoopState()
-    earlyHistory.tokens[1]!.createdAt = "2026-07-23T10:00:01.500Z"
-    earlyHistory.tokens[1]!.consumedAt = "2026-07-23T10:00:01.600Z"
+    earlyHistory.tokens[4]!.createdAt = "2026-07-23T10:00:01.500Z"
+    earlyHistory.tokens[4]!.consumedAt = "2026-07-23T10:00:01.600Z"
     assertDiagnostic(
       BpmnExecutionState.validate(model(), earlyHistory),
       BpmnExecutionState.Codes.InvalidTokenInvocation,
       {
-        path: "tokens/1/createdAt",
+        path: "tokens/4/createdAt",
         message: "before frame"
       }
     )
 
     const withdrawnWithoutCancellation = completedStandardLoopState()
-    withdrawnWithoutCancellation.tokens[3]!.status = "withdrawn"
-    withdrawnWithoutCancellation.tokens[3]!.invocation.loopIteration = 3
+    withdrawnWithoutCancellation.tokens[6]!.status = "withdrawn"
+    const withdrawnBranch = withdrawnWithoutCancellation.tokens[6]!.invocation.branch
+    if (withdrawnBranch?._tag !== "StandardLoopIteration") {
+      throw new Error("missing standard loop history branch")
+    }
+    withdrawnBranch.iteration = 3
     assertDiagnostic(
       BpmnExecutionState.validate(model(), withdrawnWithoutCancellation),
       BpmnExecutionState.Codes.InvalidTokenInvocation,
       {
-        path: "tokens/3/status",
+        path: "tokens/6/status",
         message: "requires cancelled"
       }
     )
 
     const wrongCancelledIteration = completedStandardLoopState()
     wrongCancelledIteration.loopFrames[0]!.status = "cancelled"
-    wrongCancelledIteration.tokens[3]!.status = "withdrawn"
+    wrongCancelledIteration.tokens[6]!.status = "withdrawn"
     assertDiagnostic(
       BpmnExecutionState.validate(model(), wrongCancelledIteration),
       BpmnExecutionState.Codes.InvalidTokenInvocation,
       {
-        path: "tokens/3/invocation/loopIteration",
+        path: "tokens/6/invocation/branch/iteration",
         message: "iteration cancelled"
       }
     )
@@ -723,7 +1080,6 @@ describe("BpmnExecutionState", () => {
       scopeInstanceId: "scope-sub-pack",
       activation: 0,
       completedIterations: 1,
-      mode: "standard",
       status: "completed",
       openedAt: "2026-07-23T10:00:02.000Z",
       closedAt: "2026-07-23T10:00:04.000Z"
@@ -770,17 +1126,6 @@ describe("BpmnExecutionState", () => {
       {
         path: "loopFrames/0/scopeInstanceId",
         message: "does not own activity"
-      }
-    )
-
-    const wrongMode = state()
-    wrongMode.loopFrames[0]!.mode = "multi-instance"
-    assertDiagnostic(
-      BpmnExecutionState.validate(model(), wrongMode),
-      BpmnExecutionState.Codes.InvalidLoopFrame,
-      {
-        path: "loopFrames/0/mode",
-        message: "does not match activity"
       }
     )
   })
@@ -837,7 +1182,8 @@ describe("BpmnExecutionState", () => {
 
     const terminalWithoutClose = state()
     terminalWithoutClose.tokens = terminalWithoutClose.tokens.filter((token) =>
-      token.invocation.branchId !== "frame-loop"
+      token.invocation.branch?._tag !== "StandardLoopIteration" ||
+      token.invocation.branch.frameId !== "frame-loop"
     )
     terminalWithoutClose.loopFrames[0]!.status = "completed"
     delete terminalWithoutClose.loopFrames[0]!.activeIteration
@@ -888,7 +1234,10 @@ describe("BpmnExecutionState", () => {
 
   it("enforces the Standard Loop loopMaximum boundary", () => {
     const tooManyCompleted = state()
-    tooManyCompleted.tokens = tooManyCompleted.tokens.filter((token) => token.invocation.branchId !== "frame-loop")
+    tooManyCompleted.tokens = tooManyCompleted.tokens.filter((token) =>
+      token.invocation.branch?._tag !== "StandardLoopIteration" ||
+      token.invocation.branch.frameId !== "frame-loop"
+    )
     tooManyCompleted.loopFrames[0]!.completedIterations = 4
     delete tooManyCompleted.loopFrames[0]!.activeIteration
     tooManyCompleted.loopFrames[0]!.status = "completed"
@@ -917,7 +1266,10 @@ describe("BpmnExecutionState", () => {
 
   it("requires exactly one active AtNode token for an active standard loop frame", () => {
     const missing = state()
-    missing.tokens = missing.tokens.filter((token) => token.invocation.branchId !== "frame-loop")
+    missing.tokens = missing.tokens.filter((token) =>
+      token.invocation.branch?._tag !== "StandardLoopIteration" ||
+      token.invocation.branch.frameId !== "frame-loop"
+    )
     assertDiagnostic(
       BpmnExecutionState.validate(model(), missing),
       BpmnExecutionState.Codes.InvalidLoopFrame,
@@ -947,8 +1299,10 @@ describe("BpmnExecutionState", () => {
     loopToken.processId = "process-child"
     loopToken.scopeInstanceId = "scope-root"
     loopToken.invocation.activationId = "activation-forged"
-    loopToken.invocation.loopIteration = 1
-    loopToken.invocation.multiInstanceItemKey = "item-forged"
+    if (loopToken.invocation.branch?._tag !== "StandardLoopIteration") {
+      throw new Error("missing standard loop branch")
+    }
+    loopToken.invocation.branch.iteration = 1
     loopToken.invocation.generation = 2
     loopToken.status = "consumed"
     loopToken.position = { _tag: "AtNode", nodeId: "gateway-main" }
@@ -960,10 +1314,9 @@ describe("BpmnExecutionState", () => {
         "tokens/1/processId",
         "tokens/1/scopeInstanceId",
         "tokens/1/position",
-        "tokens/1/invocation/loopIteration",
+        "tokens/1/invocation/branch/iteration",
         "tokens/1/invocation/activationId",
-        "tokens/1/invocation/generation",
-        "tokens/1/invocation/multiInstanceItemKey"
+        "tokens/1/invocation/generation"
       ]
     ) {
       assertDiagnostic(
@@ -1271,7 +1624,6 @@ describe("BpmnExecutionState", () => {
       activation: 0,
       completedIterations: 0,
       activeIteration: 0,
-      mode: "standard",
       status: "active",
       openedAt: "2026-07-23T10:00:03.000Z"
     })
@@ -1280,8 +1632,15 @@ describe("BpmnExecutionState", () => {
       activityId: "sub-pack",
       processId: "process-main",
       scopeInstanceId: "scope-root",
+      activation: 0,
       mode: "parallel",
-      status: "active"
+      source: { _tag: "Cardinality", value: 0 },
+      members: [],
+      completedInstanceCount: 0,
+      status: "completed",
+      completionReason: "empty",
+      openedAt: "2026-07-23T10:00:03.000Z",
+      closedAt: "2026-07-23T10:00:03.000Z"
     })
     invalidState.callFrames.push({
       callFrameId: "callframe-bad",

@@ -796,7 +796,7 @@ const bpmnEvaluatorBuildDigest = digest("9") as WireV2.BuildDigest
 
 const bpmnServices = (): BpmnKernel.Services => ({
   now: bpmnNow,
-  evaluateCondition: () =>
+  evaluateExpression: () =>
     Result.succeed({
       result: false,
       steps: 1
@@ -988,7 +988,8 @@ const prepareBridgeKernel = (
         profileId: "retry-bridge-profile-v1",
         rootProcessId: bpmnProcessId,
         limits: {
-          maxAutomaticTransitions: 100
+          maxAutomaticTransitions: 100,
+          maxMultiInstanceCardinality: 128
         },
         evaluatorBindings: bindingOverrides.standardLoop === true
           ? [{

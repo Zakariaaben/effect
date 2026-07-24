@@ -1,7 +1,7 @@
 {
   "formatVersion": 1,
   "catalogId": "effect-workflow-builder-bpmn-2.0.2",
-  "catalogRevision": 8,
+  "catalogRevision": 9,
   "standard": {
     "name": "Business Process Model and Notation",
     "version": "2.0.2",
@@ -78,7 +78,23 @@
       "dependsOn": [
         "BPMN-FOUNDATION-DURABLE-MARKING"
       ],
-      "notes": "The executable Standard Loop portion is deliberately bounded to one generic Task with an explicit version-bound formal condition and a mandatory positive loopMaximum. testBefore selects pre-test or post-test evaluation. Combined pre/post-test loops, Standard Loops on SubProcesses, arbitrary cycles, and multi-instance activities remain outside this kernel subset."
+      "notes": "The executable subset includes Standard Loops and FixedMultiInstance/1 on generic Tasks. FixedMultiInstance/1 evaluates one cardinality expression at activation, freezes a bounded non-negative member set, runs it sequentially or in parallel with stable item identity, and either joins all members or terminates the remainder when a completionCondition first becomes true. Collection data mapping, SubProcess and CallActivity multi-instance execution, progressive behavior events, output collections, and open or draining groups remain outside this kernel subset."
+    },
+    {
+      "id": "BPMN-EXECUTION-FIXED-MULTI-INSTANCE-TASK",
+      "title": "FixedMultiInstance/1 bounded generic Task execution",
+      "facet": "execution",
+      "source": {
+        "authority": "OMG",
+        "document": "Business Process Model and Notation 2.0.2",
+        "section": "10.3.8 and 13.3.7",
+        "url": "https://www.omg.org/spec/BPMN/2.0.2"
+      },
+      "dependsOn": [
+        "BPMN-FOUNDATION-DURABLE-MARKING",
+        "BPMN-EXECUTION-BASIC-TOKEN-KERNEL"
+      ],
+      "notes": "This atomic executable profile is restricted to one generic Task with a version-bound formal loopCardinality, behavior absent or All, sequential or parallel execution, an optional version-bound formal completionCondition, and a compiled maximum cardinality. Cardinality is evaluated once before member creation. Durable group/member state records stable index and item identity, exact active/completed/terminated counters, first-true completion cancellation, Boundary Error or failure cleanup, late-completion fencing, and causal journal replay. XML v4 can represent collection references and One/None/Complex behavior metadata, but this executable profile rejects those broader forms. It does not claim collection input/output mapping, SubProcess or CallActivity multi-instance execution, progressive behavior events, output aggregation, open WCP15 groups, draining WCP34/WCP36 joins, or a complete BPMN Activity lifecycle."
     },
     {
       "id": "BPMN-EXECUTION-TASK-BOUNDARY-ERROR-SLICE",
@@ -109,7 +125,7 @@
         "BPMN-EXECUTION-BASIC-TOKEN-KERNEL",
         "BPMN-INTERCHANGE-CORE-PROCESS-XML-SLICE"
       ],
-      "notes": "This is a deliberately narrower executable admission profile, not Process Execution Conformance. Profile bpmn-2.0.2-core-process-di-v3 admits while-style pre-test and BPMN post-tested Standard Loops only on a generic Task with an exact version-bound formal condition whose true result means continue and a mandatory positive loopMaximum. It rejects rather than infers unsupported process, gateway, event, activity, combined-loop, SubProcess-loop, multi-instance, and implicit-activation semantics."
+      "notes": "This is a deliberately narrower executable admission profile, not Process Execution Conformance. Profile bpmn-2.0.2-core-process-di-v4 admits while-style pre-test and BPMN post-tested Standard Loops plus FixedMultiInstance/1 only on generic Tasks. FixedMultiInstance/1 requires a version-bound loopCardinality, freezes it at activation under a compiled cap, supports sequential or parallel behavior All, and optionally evaluates a version-bound completionCondition after each committed member completion. It rejects rather than infers unsupported process, gateway, event, activity, combined-loop, SubProcess-loop, collection-mapping, progressive behavior, open-group, and implicit-activation semantics."
     },
     {
       "id": "BPMN-INTERCHANGE-BOUNDED-XML-INFOSET",
@@ -129,7 +145,7 @@
       "source": {
         "authority": "OMG",
         "document": "BPMN20.xsd and Semantic.xsd",
-        "section": "tDefinitions, tProcess, tActivity, tStandardLoopCharacteristics, flow nodes, and tSequenceFlow",
+        "section": "tDefinitions, tProcess, tActivity, tStandardLoopCharacteristics, tMultiInstanceLoopCharacteristics, flow nodes, and tSequenceFlow",
         "url": "https://www.omg.org/spec/BPMN/2.0.2"
       },
       "dependsOn": [
@@ -137,7 +153,7 @@
         "BPMN-FOUNDATION-SEMANTIC-VALIDATION",
         "BPMN-INTERCHANGE-BOUNDED-XML-INFOSET"
       ],
-      "notes": "Profile bpmn-2.0.2-core-process-di-v3 covers ordinary processes and recursive subprocesses, generic tasks, source-level callActivity callable-element QNames, none start/end events, exclusive/parallel gateways, sequence flows, conditions, defaults, definitions metadata, explicit expression-version bindings, and Standard Loop characteristics on generic Tasks. Its loop mapping requires one version-bound tFormalExpression loopCondition, materializes the BPMN testBefore=false default, and requires a positive loopMaximum. BPMN 2.0.2 permits loopMaximum to be absent and loopCondition to be absent or use the more permissive tExpression form; v3 rejects those broader forms instead of inventing executable behavior. Call activities are interchange-only until immutable child-target resolution and durable parent/child execution exist. This is a fail-closed implementation slice, not an OMG conformance subclass, complete semantic mapping, general Standard Loop profile, or multi-instance profile."
+      "notes": "Profile bpmn-2.0.2-core-process-di-v4 covers ordinary processes and recursive subprocesses, generic tasks, source-level callActivity callable-element QNames, none start/end events, exclusive/parallel gateways, sequence flows, conditions, defaults, definitions metadata, explicit expression-version bindings, Standard Loop characteristics, and the represented tMultiInstanceLoopCharacteristics fields on generic Tasks. Multi-instance XML can round-trip cardinality, collection references, sequential/parallel mode, completionCondition, behavior, and One/None event references in BPMN schema order; inputDataItem, outputDataItem, and complexBehaviorDefinition remain outside the normalized XML slice. The executable FixedMultiInstance/1 intersection is deliberately narrower: cardinality only, behavior All, no collection mapping, and generic Tasks only. Call activities are interchange-only until immutable child-target resolution and durable parent/child execution exist. This is a fail-closed implementation slice, not an OMG conformance subclass, complete semantic mapping, or general multi-instance profile."
     },
     {
       "id": "BPMN-INTERCHANGE-SEMANTIC-MAPPING",
@@ -192,7 +208,7 @@
         "BPMN-DI-SEMANTIC-MODEL",
         "BPMN-INTERCHANGE-CORE-PROCESS-XML-SLICE"
       ],
-      "notes": "Profile bpmn-2.0.2-core-process-di-v3 maps the package's complete current normalized DI slice with global XML-ID and semantic reference-kind checks. It is not the complete BPMN DI interchange surface and has no normative XSD evidence yet."
+      "notes": "Profile bpmn-2.0.2-core-process-di-v4 maps the package's complete current normalized DI slice with global XML-ID and semantic reference-kind checks. It is not the complete BPMN DI interchange surface and has no normative XSD evidence yet."
     },
     {
       "id": "BPMN-DI-XML-ROUNDTRIP",
@@ -326,6 +342,57 @@
         "WFP-CONTROL-FLOW-CATALOG",
         "BPMN-EXECUTION-BASIC-TOKEN-KERNEL"
       ]
+    },
+    {
+      "id": "WFP-WCP13-MULTI-INSTANCE-DESIGN-TIME",
+      "title": "WCP13 Multiple Instances with a Priori Design-Time Knowledge - fixed Task subset",
+      "facet": "execution",
+      "source": {
+        "authority": "WorkflowPatterns",
+        "document": "Workflow Patterns: The Definitive Guide",
+        "section": "4.5",
+        "pages": "155-157",
+        "url": "https://www.workflowpatterns.com/patterns/control/"
+      },
+      "dependsOn": [
+        "WFP-CONTROL-FLOW-CATALOG",
+        "BPMN-EXECUTION-FIXED-MULTI-INSTANCE-TASK"
+      ],
+      "notes": "FixedMultiInstance/1 covers the design-time-known case when the pinned cardinality expression represents a fixed model value: parallel mode creates the closed set of independent, stably identified members and produces one continuation only after every member has completed. Sequential mode is supported by the BPMN profile but is not used as evidence for the pattern's concurrent form. The same runtime primitive also admits WCP14 when the expression obtains its value from activation data."
+    },
+    {
+      "id": "WFP-WCP14-MULTI-INSTANCE-RUNTIME",
+      "title": "WCP14 Multiple Instances with a Priori Run-Time Knowledge - frozen Task subset",
+      "facet": "execution",
+      "source": {
+        "authority": "WorkflowPatterns",
+        "document": "Workflow Patterns: The Definitive Guide",
+        "section": "4.5",
+        "pages": "158-159",
+        "url": "https://www.workflowpatterns.com/patterns/control/"
+      },
+      "dependsOn": [
+        "WFP-CONTROL-FLOW-CATALOG",
+        "BPMN-EXECUTION-FIXED-MULTI-INSTANCE-TASK"
+      ],
+      "notes": "FixedMultiInstance/1 evaluates one runtime cardinality before creating any member, freezes the closed member set under a compiled cap, and joins all members before one continuation. Parallel mode is the WCP14 evidence; sequential mode is an additional BPMN execution form. It does not admit new members after activation and therefore does not claim WCP15."
+    },
+    {
+      "id": "WFP-WCP35-CANCELLING-PARTIAL-MI-JOIN",
+      "title": "WCP35 Cancelling Partial Join for Multiple Instances - completionCondition subset",
+      "facet": "execution",
+      "source": {
+        "authority": "WorkflowPatterns",
+        "document": "Workflow Patterns: The Definitive Guide",
+        "section": "4.5",
+        "pages": "162-164",
+        "url": "https://www.workflowpatterns.com/patterns/control/"
+      },
+      "dependsOn": [
+        "WFP-CONTROL-FLOW-CATALOG",
+        "BPMN-EXECUTION-FIXED-MULTI-INSTANCE-TASK"
+      ],
+      "notes": "The admitted subset evaluates a pinned BPMN completionCondition after every committed logical member completion. The first true result produces one continuation and terminates every remaining active or pending member; late completion is fenced and idempotent. The group is closed before member creation, so this does not claim WCP15 open creation, WCP34 remainder draining, or WCP36 dynamic creation/draining. Those require a separate OpenForEachGroup/1 profile."
     },
     {
       "id": "WFP-WCP21-STRUCTURED-LOOP",

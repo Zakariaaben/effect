@@ -31,14 +31,50 @@ const decodeBinding = Schema.decodeUnknownResult(
 )
 
 /**
+ * Semantic result shape requested by the BPMN execution authority.
+ *
+ * **Details**
+ *
+ * This is an evaluator dispatch contract, not a coercion instruction. An
+ * evaluator returns the exact JSON value it computed. The consuming kernel
+ * validates that value against this expectation and applies domain-specific
+ * bounds such as the configured maximum multi-instance cardinality.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const ExpectedResult = Schema.Literals([
+  "boolean",
+  "non-negative-integer",
+  "json-array",
+  "json"
+]).annotate({
+  identifier: "WorkflowBpmnExpectedEvaluationResult"
+})
+
+/**
+ * The decoded type of {@link ExpectedResult}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type ExpectedResult = Schema.Schema.Type<typeof ExpectedResult>
+
+/**
  * Strict JSON input supplied to one evaluator invocation.
+ *
+ * **Details**
+ *
+ * `expectedResult` makes the consumer's semantic expectation explicit. The
+ * evaluator registry neither converts nor coerces results.
  *
  * @category schemas
  * @since 4.0.0
  */
 export const EvaluationRequest = Schema.Struct({
   source: Schema.String,
-  context: Schema.Json
+  context: Schema.Json,
+  expectedResult: ExpectedResult
 }).annotate({
   identifier: "WorkflowBpmnEvaluationRequest",
   parseOptions: strictParseOptions
@@ -55,11 +91,18 @@ export type EvaluationRequest = Schema.Schema.Type<typeof EvaluationRequest>
 /**
  * Exact successful output returned by an evaluator.
  *
+ * **Details**
+ *
+ * The result remains an exact JSON value so the same evaluator infrastructure
+ * can serve conditions, cardinalities, collections, and data mappings. The
+ * consuming kernel checks the requested semantic type and its own bounds.
+ * Registry implementations must not coerce evaluator output.
+ *
  * @category schemas
  * @since 4.0.0
  */
 export const EvaluationResult = Schema.Struct({
-  result: Schema.Boolean,
+  result: Schema.Json,
   steps: ProtocolV2Wire.NonNegativeSafeInt
 }).annotate({
   identifier: "WorkflowBpmnEvaluationResult",

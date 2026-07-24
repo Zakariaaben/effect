@@ -2,6 +2,7 @@ import { assert, describe, it } from "@effect/vitest"
 import * as Result from "effect/Result"
 import * as Schema from "effect/Schema"
 import * as BpmnModel from "../src/BpmnModel.ts"
+import type * as Diagnostic from "../src/Diagnostic.ts"
 
 const emptyExtensions = (): Array<BpmnModel.ExtensionElement> => []
 
@@ -240,7 +241,8 @@ const validModel = (): BpmnModel.BpmnModel => ({
       name: "Fulfill",
       loopCharacteristics: {
         _tag: "MultiInstanceCharacteristics",
-        mode: "parallel"
+        mode: "parallel",
+        cardinality: expression("3")
       },
       incomingSequenceFlowIds: [],
       outgoingSequenceFlowIds: [],
@@ -361,6 +363,31 @@ describe("BpmnModel", () => {
     }
     assert.strictEqual(getterCalls, 0)
     assert.strictEqual(result.failure.diagnostics[0]!.code, BpmnModel.Codes.InvalidJson)
+
+    const nested = validModel()
+    const call = nested.flowNodes.find((node) => node.id === "call-fulfillment")
+    if (call === undefined || call._tag !== "CallActivity") {
+      throw new Error("expected seeded call activity")
+    }
+    Object.defineProperty(call, "loopCharacteristics", {
+      enumerable: true,
+      get: () => {
+        getterCalls++
+        return {
+          _tag: "MultiInstanceCharacteristics",
+          mode: "parallel",
+          cardinality: expression("3")
+        }
+      }
+    })
+
+    const nestedResult = BpmnModel.validate(nested)
+    assert.isTrue(Result.isFailure(nestedResult))
+    if (Result.isSuccess(nestedResult)) {
+      throw new Error("expected nested hostile validation failure")
+    }
+    assert.strictEqual(getterCalls, 0)
+    assert.strictEqual(nestedResult.failure.diagnostics[0]!.code, BpmnModel.Codes.InvalidJson)
   })
 
   it("strictly rejects excess properties at the schema boundary", () => {
@@ -497,13 +524,118 @@ describe("BpmnModel", () => {
     )
   })
 
-  it("accepts optional standard-loop conditions and multi-instance cardinality or collection absence", () => {
-    const result = BpmnModel.validate(validModel())
+  it("accepts cardinality and collection multi-instance sources with BPMN behavior defaults", () => {
+    const variants: ReadonlyArray<BpmnModel.MultiInstanceCharacteristics> = [
+      {
+        _tag: "MultiInstanceCharacteristics",
+        mode: "parallel",
+        cardinality: expression("orders.length"),
+        behavior: "one"
+      },
+      {
+        _tag: "MultiInstanceCharacteristics",
+        mode: "sequential",
+        loopDataInputRef: "orders",
+        loopDataOutputRef: "processed-orders",
+        behavior: "none"
+      },
+      {
+        _tag: "MultiInstanceCharacteristics",
+        mode: "parallel",
+        cardinality: expression("workers"),
+        behavior: "complex"
+      }
+    ]
 
-    assert.isTrue(Result.isSuccess(result))
-    if (Result.isFailure(result)) {
-      throw result.failure
+    for (const loopCharacteristics of variants) {
+      const model = validModel()
+      const call = model.flowNodes.find((node) => node.id === "call-fulfillment")
+      if (call === undefined || call._tag !== "CallActivity") {
+        throw new Error("expected seeded call activity")
+      }
+      call.loopCharacteristics = loopCharacteristics
+
+      const result = BpmnModel.validate(model)
+      assert.isTrue(Result.isSuccess(result))
+      if (Result.isFailure(result)) {
+        throw result.failure
+      }
     }
+  })
+
+  it("rejects missing, competing, and inconsistent multi-instance characteristics", () => {
+    const diagnosticsFor = (
+      loopCharacteristics: BpmnModel.MultiInstanceCharacteristics
+    ): ReadonlyArray<Diagnostic.Diagnostic> => {
+      const model = validModel()
+      const call = model.flowNodes.find((node) => node.id === "call-fulfillment")
+      if (call === undefined || call._tag !== "CallActivity") {
+        throw new Error("expected seeded call activity")
+      }
+      call.loopCharacteristics = loopCharacteristics
+      const result = BpmnModel.validate(model)
+      assert.isTrue(Result.isFailure(result))
+      if (Result.isSuccess(result)) {
+        throw new Error("expected invalid multi-instance characteristics")
+      }
+      return result.failure.diagnostics
+    }
+
+    const missing = diagnosticsFor({
+      _tag: "MultiInstanceCharacteristics",
+      mode: "parallel"
+    })
+    assert.deepStrictEqual(
+      missing.map(({ code, path }) => ({ code, path })),
+      [{
+        code: BpmnModel.Codes.InvalidLoopCharacteristics,
+        path: ["flowNodes", 12, "loopCharacteristics"]
+      }]
+    )
+
+    const competing = diagnosticsFor({
+      _tag: "MultiInstanceCharacteristics",
+      mode: "parallel",
+      cardinality: expression("3"),
+      loopDataInputRef: "orders"
+    })
+    assert.deepStrictEqual(
+      competing.map(({ code, path }) => ({ code, path })),
+      [{
+        code: BpmnModel.Codes.InvalidLoopCharacteristics,
+        path: ["flowNodes", 12, "loopCharacteristics", "loopDataInputRef"]
+      }]
+    )
+
+    const aggregated = diagnosticsFor({
+      _tag: "MultiInstanceCharacteristics",
+      mode: "sequential",
+      loopDataOutputRef: "processed-orders",
+      behavior: "all",
+      oneBehaviorEventRef: "one-event",
+      noneBehaviorEventRef: "none-event"
+    })
+    assert.deepStrictEqual(
+      aggregated.map(({ code, path }) => ({ code, path })),
+      [
+        {
+          code: BpmnModel.Codes.InvalidLoopCharacteristics,
+          path: ["flowNodes", 12, "loopCharacteristics"]
+        },
+        {
+          code: BpmnModel.Codes.InvalidLoopCharacteristics,
+          path: ["flowNodes", 12, "loopCharacteristics", "loopDataOutputRef"]
+        },
+        {
+          code: BpmnModel.Codes.InvalidLoopCharacteristics,
+          path: ["flowNodes", 12, "loopCharacteristics", "noneBehaviorEventRef"]
+        },
+        {
+          code: BpmnModel.Codes.InvalidLoopCharacteristics,
+          path: ["flowNodes", 12, "loopCharacteristics", "oneBehaviorEventRef"]
+        }
+      ]
+    )
   })
 
   it("rejects invalid timer definitions, non-transaction cancel ends, and root error starts", () => {

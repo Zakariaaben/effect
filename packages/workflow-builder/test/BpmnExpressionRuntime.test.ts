@@ -283,6 +283,32 @@ const standardLoopModel = (
     ]
   )
 
+const multiInstanceModel = (
+  mode: "sequential" | "parallel",
+  completionCondition?: BpmnModel.Expression
+): BpmnModel.BpmnModel =>
+  makeModel(
+    [
+      start(["flow-start"]),
+      {
+        ...task("multi", ["flow-start"], ["flow-end"]),
+        loopCharacteristics: {
+          _tag: "MultiInstanceCharacteristics",
+          mode,
+          cardinality: expression("items-count"),
+          ...(completionCondition === undefined
+            ? undefined
+            : { completionCondition })
+        }
+      },
+      end(["flow-end"])
+    ],
+    [
+      flow("flow-start", "start", "multi", "normal"),
+      flow("flow-end", "multi", "end", "normal")
+    ]
+  )
+
 const routedStandardLoopModel = (): BpmnModel.BpmnModel =>
   makeModel(
     [
@@ -328,12 +354,26 @@ const prepare = (
   BpmnKernel.prepare(model, {
     profileId: "runtime-test-v1",
     rootProcessId: processId,
-    limits: { maxAutomaticTransitions: 1_000 },
+    limits: {
+      maxAutomaticTransitions: 1_000,
+      maxMultiInstanceCardinality: 100
+    },
     evaluatorBindings: model.sequenceFlows.some((candidate) => candidate.condition !== undefined) ||
         model.flowNodes.some((candidate) =>
           candidate._tag === "Task" &&
-          candidate.loopCharacteristics?._tag === "StandardLoopCharacteristics" &&
-          candidate.loopCharacteristics.condition !== undefined
+          (
+            (
+              candidate.loopCharacteristics?._tag === "StandardLoopCharacteristics" &&
+              candidate.loopCharacteristics.condition !== undefined
+            ) ||
+            (
+              candidate.loopCharacteristics?._tag === "MultiInstanceCharacteristics" &&
+              (
+                candidate.loopCharacteristics.cardinality !== undefined ||
+                candidate.loopCharacteristics.completionCondition !== undefined
+              )
+            )
+          )
         )
       ? [evaluatorBinding]
       : [],
@@ -373,6 +413,25 @@ describe("BpmnExpressionRuntime", () => {
       loopPhase: "before",
       loopIteration: 0
     })))
+    assert.isTrue(Result.isSuccess(decode({
+      ...base,
+      multiInstanceActivityId: "multi",
+      multiInstanceGroupId: "multi-instance-group:1",
+      multiInstanceGroupActivation: 0
+    })))
+    assert.isTrue(Result.isSuccess(decode({
+      ...base,
+      multiInstanceActivityId: "multi",
+      multiInstanceGroupId: "multi-instance-group:1",
+      multiInstanceGroupActivation: 0,
+      multiInstanceCompletedItemIndex: 1,
+      multiInstanceCompletedItemKey: "item:1",
+      multiInstanceLoopCounter: 1,
+      multiInstanceNumberOfInstances: 3,
+      multiInstanceNumberOfActiveInstances: 2,
+      multiInstanceNumberOfCompletedInstances: 1,
+      multiInstanceNumberOfTerminatedInstances: 0
+    })))
     assert.isTrue(Result.isFailure(decode({
       ...base,
       sequenceFlowId: "flow-one",
@@ -387,6 +446,20 @@ describe("BpmnExpressionRuntime", () => {
       loopActivityId: "loop",
       loopFrameId: "loop-frame:1"
     })))
+    assert.isTrue(Result.isFailure(decode({
+      ...base,
+      sequenceFlowId: "flow-one",
+      multiInstanceActivityId: "multi",
+      multiInstanceGroupId: "multi-instance-group:1",
+      multiInstanceGroupActivation: 0
+    })))
+    assert.isTrue(Result.isFailure(decode({
+      ...base,
+      multiInstanceActivityId: "multi",
+      multiInstanceGroupId: "multi-instance-group:1",
+      multiInstanceGroupActivation: 0,
+      multiInstanceCompletedItemIndex: 1
+    })))
   })
 
   it.effect("resolves the exact binding and evaluates an asynchronous condition", () =>
@@ -400,6 +473,7 @@ describe("BpmnExpressionRuntime", () => {
         evaluate: (request) =>
           Effect.gen(function*() {
             requests++
+            assert.strictEqual(request.expectedResult, "boolean")
             ;(services as { now: string }).now = "2026-07-23T11:00:00.000Z"
             yield* Effect.yieldNow
             return {
@@ -474,6 +548,307 @@ describe("BpmnExpressionRuntime", () => {
         batch.events.filter((event) => event._tag === "ConditionEvaluated")
           .length,
         1
+      )
+    }))
+
+  it.effect("keeps one asynchronous multi-instance cardinality decision stable across reruns", () =>
+    Effect.gen(function*() {
+      const exactBinding = binding({ deploymentId: "multi-cardinality-reruns" })
+      const kernel = yield* prepare(
+        multiInstanceModel("parallel"),
+        exactBinding
+      )
+      const requests: Array<Evaluator.EvaluationRequest> = []
+      const registry = yield* Evaluator.makeMemory([
+        Evaluator.makeDefinition({
+          binding: exactBinding,
+          evaluate: (request) =>
+            Effect.gen(function*() {
+              requests.push(request)
+              yield* Effect.yieldNow
+              return { result: 3, steps: 4 }
+            })
+        })
+      ])
+      const batch = yield* provideRegistry(
+        Runtime.initialize(kernel, { now }),
+        registry
+      )
+
+      assert.strictEqual(requests.length, 1)
+      assert.strictEqual(requests[0]?.source, "items-count")
+      assert.strictEqual(
+        requests[0]?.expectedResult,
+        "non-negative-integer"
+      )
+      const group = batch.state.multiInstanceGroups[0]
+      assert.strictEqual(group?.groupId, "multi-instance-group:1")
+      assert.strictEqual(group?.activityId, "multi")
+      assert.strictEqual(group?.activation, 0)
+      assert.strictEqual(group?.source._tag, "Cardinality")
+      if (group?.source._tag === "Cardinality") {
+        assert.strictEqual(group.source.value, 3)
+      }
+      assert.deepStrictEqual(
+        group?.members.map((member) => member.itemKey),
+        ["item:0", "item:1", "item:2"]
+      )
+      assert.strictEqual(
+        batch.events.filter(
+          (event) => event._tag === "MultiInstanceCardinalityEvaluated"
+        ).length,
+        1
+      )
+      assert.strictEqual(
+        batch.events.filter(
+          (event) => event._tag === "MultiInstanceGroupOpened"
+        ).length,
+        1
+      )
+    }))
+
+  it.effect("uses collision-free completion decisions for distinct multi-instance items", () =>
+    Effect.gen(function*() {
+      const exactBinding = binding({ deploymentId: "multi-completion-items" })
+      const requests: Array<Evaluator.EvaluationRequest> = []
+      const registry = yield* Evaluator.makeMemory([
+        Evaluator.makeDefinition({
+          binding: exactBinding,
+          evaluate: (request) =>
+            Effect.gen(function*() {
+              requests.push(request)
+              yield* Effect.yieldNow
+              return request.expectedResult === "non-negative-integer"
+                ? { result: 2, steps: 1 }
+                : { result: false, steps: requests.length }
+            })
+        })
+      ])
+      const kernel = yield* prepare(
+        multiInstanceModel("parallel", expression("done-enough")),
+        exactBinding
+      )
+      const initialized = yield* provideRegistry(
+        Runtime.initialize(kernel, { now }),
+        registry
+      )
+      const members = initialized.state.tokens
+        .filter((candidate) =>
+          candidate.status === "active" &&
+          candidate.position._tag === "AtNode" &&
+          candidate.position.nodeId === "multi" &&
+          candidate.invocation.branch?._tag === "MultiInstanceItem"
+        )
+        .sort((left, right) => {
+          const leftBranch = left.invocation.branch
+          const rightBranch = right.invocation.branch
+          return leftBranch?._tag === "MultiInstanceItem" &&
+              rightBranch?._tag === "MultiInstanceItem"
+            ? leftBranch.itemIndex - rightBranch.itemIndex
+            : 0
+        })
+      assert.strictEqual(members.length, 2)
+      const first = members[0]
+      const second = members[1]
+      if (first === undefined || second === undefined) {
+        throw new Error("expected two parallel multi-instance members")
+      }
+      const firstCompleted = yield* provideRegistry(
+        Runtime.completeTask(
+          kernel,
+          initialized.state,
+          {
+            scopeInstanceId: first.scopeInstanceId,
+            taskNodeId: "multi",
+            tokenId: first.tokenId
+          },
+          { now }
+        ),
+        registry
+      )
+      const secondCompleted = yield* provideRegistry(
+        Runtime.completeTask(
+          kernel,
+          firstCompleted.state,
+          {
+            scopeInstanceId: second.scopeInstanceId,
+            taskNodeId: "multi",
+            tokenId: second.tokenId
+          },
+          { now }
+        ),
+        registry
+      )
+
+      const completionRequests = requests.filter(
+        (request) => request.source === "done-enough"
+      )
+      assert.strictEqual(completionRequests.length, 2)
+      assert.deepStrictEqual(
+        completionRequests.map((request) => request.expectedResult),
+        ["boolean", "boolean"]
+      )
+      const canonicalContexts = completionRequests.map((request) => JSON.stringify(request.context))
+      assert.notStrictEqual(canonicalContexts[0], canonicalContexts[1])
+      assert.include(canonicalContexts[0] ?? "", "\"itemKey\":\"item:0\"")
+      assert.include(canonicalContexts[1] ?? "", "\"itemKey\":\"item:1\"")
+      assert.strictEqual(secondCompleted.state.status, "completed")
+      assert.strictEqual(
+        secondCompleted.state.multiInstanceGroups[0]?.completionReason,
+        "all-completed"
+      )
+    }))
+
+  it.effect("reports exact cardinality and per-item completion coordinates", () =>
+    Effect.gen(function*() {
+      const cardinalityBinding = binding({
+        deploymentId: "multi-cardinality-failure"
+      })
+      const cardinalityKernel = yield* prepare(
+        multiInstanceModel("parallel"),
+        cardinalityBinding
+      )
+      const cardinalityRegistry = yield* Evaluator.makeMemory([
+        Evaluator.makeDefinition({
+          binding: cardinalityBinding,
+          evaluate: () => Effect.fail("private-cardinality-error")
+        })
+      ])
+      const cardinalityResult = yield* provideRegistry(
+        Runtime.initialize(cardinalityKernel, { now }),
+        cardinalityRegistry
+      ).pipe(Effect.result)
+      assert.isTrue(Result.isFailure(cardinalityResult))
+      if (
+        Result.isSuccess(cardinalityResult) ||
+        !(cardinalityResult.failure instanceof Runtime.RuntimeError)
+      ) {
+        throw new Error("expected multi-instance cardinality runtime error")
+      }
+      assert.strictEqual(
+        cardinalityResult.failure.code,
+        Runtime.Codes.EvaluatorFailed
+      )
+      assert.strictEqual(
+        cardinalityResult.failure.multiInstanceActivityId,
+        "multi"
+      )
+      assert.strictEqual(
+        cardinalityResult.failure.multiInstanceGroupId,
+        "multi-instance-group:1"
+      )
+      assert.strictEqual(
+        cardinalityResult.failure.multiInstanceGroupActivation,
+        0
+      )
+      assert.isFalse(
+        Object.prototype.hasOwnProperty.call(
+          cardinalityResult.failure,
+          "multiInstanceCompletedItemIndex"
+        )
+      )
+      assert.notInclude(
+        JSON.stringify(cardinalityResult.failure),
+        "private-cardinality-error"
+      )
+
+      const completionBinding = binding({
+        deploymentId: "multi-completion-failure"
+      })
+      const completionKernel = yield* prepare(
+        multiInstanceModel("parallel", expression("done-enough")),
+        completionBinding
+      )
+      const completionRegistry = yield* Evaluator.makeMemory([
+        Evaluator.makeDefinition({
+          binding: completionBinding,
+          evaluate: (request) =>
+            request.expectedResult === "non-negative-integer"
+              ? Effect.succeed({ result: 2, steps: 1 })
+              : Effect.fail("private-completion-error")
+        })
+      ])
+      const initialized = yield* provideRegistry(
+        Runtime.initialize(completionKernel, { now }),
+        completionRegistry
+      )
+      const token = initialized.state.tokens.find((candidate) =>
+        candidate.status === "active" &&
+        candidate.position._tag === "AtNode" &&
+        candidate.position.nodeId === "multi" &&
+        candidate.invocation.branch?._tag === "MultiInstanceItem" &&
+        candidate.invocation.branch.itemIndex === 0
+      )
+      if (token === undefined) {
+        throw new Error("expected first multi-instance member")
+      }
+      const completionResult = yield* provideRegistry(
+        Runtime.completeTask(
+          completionKernel,
+          initialized.state,
+          {
+            scopeInstanceId: token.scopeInstanceId,
+            taskNodeId: "multi",
+            tokenId: token.tokenId
+          },
+          { now }
+        ),
+        completionRegistry
+      ).pipe(Effect.result)
+      assert.isTrue(Result.isFailure(completionResult))
+      if (
+        Result.isSuccess(completionResult) ||
+        !(completionResult.failure instanceof Runtime.RuntimeError)
+      ) {
+        throw new Error("expected multi-instance completion runtime error")
+      }
+      assert.strictEqual(
+        completionResult.failure.code,
+        Runtime.Codes.EvaluatorFailed
+      )
+      assert.strictEqual(
+        completionResult.failure.multiInstanceActivityId,
+        "multi"
+      )
+      assert.strictEqual(
+        completionResult.failure.multiInstanceGroupId,
+        "multi-instance-group:1"
+      )
+      assert.strictEqual(
+        completionResult.failure.multiInstanceGroupActivation,
+        0
+      )
+      assert.strictEqual(
+        completionResult.failure.multiInstanceCompletedItemIndex,
+        0
+      )
+      assert.strictEqual(
+        completionResult.failure.multiInstanceCompletedItemKey,
+        "item:0"
+      )
+      assert.strictEqual(
+        completionResult.failure.multiInstanceLoopCounter,
+        0
+      )
+      assert.strictEqual(
+        completionResult.failure.multiInstanceNumberOfInstances,
+        2
+      )
+      assert.strictEqual(
+        completionResult.failure.multiInstanceNumberOfActiveInstances,
+        1
+      )
+      assert.strictEqual(
+        completionResult.failure.multiInstanceNumberOfCompletedInstances,
+        1
+      )
+      assert.strictEqual(
+        completionResult.failure.multiInstanceNumberOfTerminatedInstances,
+        0
+      )
+      assert.notInclude(
+        JSON.stringify(completionResult.failure),
+        "private-completion-error"
       )
     }))
 

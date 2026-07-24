@@ -1581,6 +1581,71 @@ const validateEventCarrier = (
   }
 }
 
+const validateLoopCharacteristics = (
+  node: Task | CallActivity | SubProcess | AdHocSubProcess | Transaction,
+  nodePath: ReadonlyArray<Diagnostic.PathSegment>,
+  diagnostics: Array<Diagnostic.Diagnostic>
+): void => {
+  const characteristics = node.loopCharacteristics
+  if (
+    characteristics === undefined ||
+    characteristics._tag !== "MultiInstanceCharacteristics"
+  ) {
+    return
+  }
+
+  const path = [...nodePath, "loopCharacteristics"] as const
+  const hasCardinality = characteristics.cardinality !== undefined
+  const hasCollection = characteristics.loopDataInputRef !== undefined
+
+  if (!hasCardinality && !hasCollection) {
+    diagnostics.push(error(
+      Codes.InvalidLoopCharacteristics,
+      `Multi-instance activity '${node.id}' must declare exactly one instance source: cardinality or loopDataInputRef`,
+      path
+    ))
+  } else if (hasCardinality && hasCollection) {
+    diagnostics.push(error(
+      Codes.InvalidLoopCharacteristics,
+      `Multi-instance activity '${node.id}' cannot declare both cardinality and loopDataInputRef`,
+      [...path, "loopDataInputRef"]
+    ))
+  }
+
+  if (
+    characteristics.loopDataOutputRef !== undefined &&
+    characteristics.loopDataInputRef === undefined
+  ) {
+    diagnostics.push(error(
+      Codes.InvalidLoopCharacteristics,
+      `Multi-instance activity '${node.id}' loopDataOutputRef requires loopDataInputRef`,
+      [...path, "loopDataOutputRef"]
+    ))
+  }
+
+  if (
+    characteristics.oneBehaviorEventRef !== undefined &&
+    characteristics.behavior !== "one"
+  ) {
+    diagnostics.push(error(
+      Codes.InvalidLoopCharacteristics,
+      `Multi-instance activity '${node.id}' oneBehaviorEventRef requires behavior 'one'`,
+      [...path, "oneBehaviorEventRef"]
+    ))
+  }
+
+  if (
+    characteristics.noneBehaviorEventRef !== undefined &&
+    characteristics.behavior !== "none"
+  ) {
+    diagnostics.push(error(
+      Codes.InvalidLoopCharacteristics,
+      `Multi-instance activity '${node.id}' noneBehaviorEventRef requires behavior 'none'`,
+      [...path, "noneBehaviorEventRef"]
+    ))
+  }
+}
+
 /**
  * Snapshots, strictly decodes, and semantically validates a BPMN model.
  *
@@ -1901,6 +1966,10 @@ export const validate = (
   for (let index = 0; index < model.flowNodes.length; index++) {
     const node = model.flowNodes[index]!
     const nodePath = ["flowNodes", index] as const
+
+    if ("loopCharacteristics" in node) {
+      validateLoopCharacteristics(node, nodePath, diagnostics)
+    }
 
     if (node._tag === "CallActivity" && node.calledElement !== undefined) {
       if (!isNcName(node.calledElement.localName)) {

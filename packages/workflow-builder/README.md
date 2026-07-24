@@ -53,25 +53,43 @@ Today the package provides:
 - a durable BPMN execution-state foundation with token positions, scope and
   invocation identity, gateway/loop/multi-instance/call frames, subscriptions,
   timers, work items, compensation registrations, and cancellation regions,
-  whose state version `4` carries a version `2` executable fingerprint
+  whose state version `5` carries a version `3` executable fingerprint
   reference and exact protocol-v3 task-resolution records;
 - a normalized BPMN data/IO/interface slice and BPMNDI/DI/DC representation
   with aggregate reference, geometry, and semantic-kind validation;
 - a resource-bounded namespace-aware XML infoset plus strict named profile
-  `bpmn-2.0.2-core-process-di-v3` for fail-closed import, canonical export, and
+  `bpmn-2.0.2-core-process-di-v4` for fail-closed import, canonical export, and
   normalized round-trip of its explicitly bounded process/control-flow and DI
   surface, including source-level `callActivity` references as
-  namespace-expanded QNames and Standard Loop characteristics on generic Tasks.
-  The loop condition must be a formal expression with an exact language-version
+  namespace-expanded QNames, Standard Loop characteristics, and represented
+  Multi-Instance fields on generic Tasks. Multi-Instance cardinality,
+  collection input/output references, sequential/parallel mode,
+  `completionCondition`, behavior, and One/None event references round-trip;
+  this interchange capability is wider than executable admission. The Standard
+  Loop condition must be a formal expression with an exact language-version
   binding, `testBefore` selects pre-test or post-test behavior, and a positive
-  `loopMaximum` is mandatory;
+  `loopMaximum` is mandatory in this named profile;
 - a bounded replayable BPMN token kernel for none start/end events, generic
   tasks, bounded Standard Loop Tasks, ordinary subprocesses,
-  conditional/default flows, and exclusive/parallel gateways. Standard Loop
-  execution persists iteration identity and condition evidence, honors
-  `testBefore`, and stops at the required `loopMaximum`; it does not admit the
-  combined pre/post-test variant, loops on SubProcesses, or multi-instance
-  activities. Machine-readable coverage gates still declare no formal BPMN
+  conditional/default flows, exclusive/parallel gateways, and
+  `FixedMultiInstance/1`. That fixed Multi-Instance profile is Task-only: it
+  evaluates one version-bound cardinality expression once at activation,
+  freezes a closed member set under `maxMultiInstanceCardinality`, assigns
+  stable `item:<index>` identities, and runs members sequentially or in
+  parallel with BPMN behavior All. Ordered durable member state is independent
+  of parallel completion order. At each decision boundary, generated instances
+  equal active plus completed plus terminated instances; members not yet
+  generated remain in the sequential pending suffix. These exact counters are
+  supplied to an optional `completionCondition` after each committed member
+  completion; its first `true` result terminates the remainder before emitting
+  one continuation. Cardinality zero completes immediately. Boundary Error and
+  terminal failure paths cancel remaining members, stale `completeTask`
+  commands are fenced and idempotent, every boundary is journaled and replayed,
+  and the native Effect Workflow task bridge derives a distinct exact
+  occurrence from group activation and member index. Collection sources,
+  behavior One/None/Complex, output aggregation, Multi-Instance SubProcesses
+  and CallActivities, and open or draining groups are rejected by executable
+  admission. Machine-readable coverage gates still declare no formal BPMN
   conformance claim;
 - an explicitly bounded protocol-v3 Task/Boundary Error execution slice.
   Immutable task bindings and exact failure-identity-to-Error mappings are part
@@ -91,9 +109,9 @@ Today the package provides:
   subprocesses;
 - a strict BPMN executable facade proving the named XML profile can be imported,
   compiled directly to that token kernel, executed through conditional/default
-  parallel/subprocess, and bounded Standard Loop paths, replayed, canonically
-  exported, re-imported, recompiled, and replayed to the same marking without
-  DAG lowering;
+  parallel/subprocess, bounded Standard Loop, and fixed Multi-Instance paths,
+  replayed, canonically exported, re-imported, recompiled, and replayed to the
+  same marking without DAG lowering;
 - Effectful BPMN kernel preparation that SHA-256 fingerprints the complete
   normalized semantic model, selected root, kernel semantics, limits, mapping
   profile, and exact evaluator-build manifest; state and journal replay reject
@@ -321,7 +339,7 @@ future authenticated distributed queue.
 
 The BPMN model, named XML/DI mapping slice, durable marking, and bounded token
 kernel are likewise not a BPMN conformance claim. Mapping outside
-`bpmn-2.0.2-core-process-di-v3`, normative XSD validation, complete Common
+`bpmn-2.0.2-core-process-di-v4`, normative XSD validation, complete Common
 Executable and Activity lifecycle semantics, a complete atomic normative
 catalogue, persistent storage, authenticated history anchoring, official
 fixtures, and published conformance evidence remain required. The package
@@ -329,13 +347,38 @@ provides no built-in FEEL, XPath, or other expression implementation; an
 application must install an exact build-pinned evaluator, and strong CPU/heap
 isolation requires a worker, process, or sandbox adapter. BPMN 2.0.2 itself
 allows `loopMaximum` to be omitted and `loopCondition` to use the more
-permissive `tExpression` form. Profile `v3` deliberately fails closed unless a
+permissive `tExpression` form. Profile `v4` deliberately fails closed unless a
 generic Task has a positive maximum and a version-bound formal condition; it
-does not claim general Standard Loop or multi-instance support. A BPMN
-`callActivity` can be represented and round-tripped. Its protocol-v3 relation
-and replay semantics are modeled, but executable admission still rejects it
-until source QNames resolve through a trusted compiler-semantic-version-2
-artifact family and a single transactional parent/child authority is installed.
+does not claim general Standard Loop support. Its separate
+`FixedMultiInstance/1` execution intersection is deliberately limited to a
+cardinality-based generic Task with behavior All and an optional formal
+completion condition. XML v4 may round-trip collection and One/None/Complex
+metadata that the kernel rejects. Collection data mapping and externalized
+item manifests, output collection and input-order aggregation, Multi-Instance
+SubProcesses and CallActivities, progressive One/None/Complex behavior events,
+open/dynamic fan-out (WCP15), draining static or dynamic partial joins
+(WCP34/WCP36), native collective cancellation/audit, normative XSD evidence,
+and any formal BPMN conformance claim remain unimplemented. Open creation and
+draining require a distinct `OpenForEachGroup/1` semantic profile rather than a
+silent widening of the frozen group.
+
+The fixed profile follows durable-engine lessons shared by Temporal, AWS Step
+Functions, Argo, and similar systems: freeze the logical member set at
+activation; keep logical member identity distinct from retry or delivery
+attempts; bound semantic cardinality separately from operational worker
+concurrency; require future aggregation to preserve input order even when
+parallel completions arrive out of order; and segment or roll over histories
+before large fan-outs become unbounded. Native Effect Workflow already supplies
+persistence, replay, child execution, activities, deferreds, clocks, and
+backend interruption. Workflow Builder records portable BPMN group semantics
+and exact native occurrences; it does not reimplement those backend
+capabilities.
+
+A BPMN `callActivity` can be represented and round-tripped. Its protocol-v3
+relation and replay semantics are modeled, but executable admission still
+rejects it until source QNames resolve through a trusted
+compiler-semantic-version-2 artifact family and a single transactional
+parent/child authority is installed.
 The compiler-v2 document, digest primitives, and static-DAG artifact verifier
 establish exact content pins but do not yet constitute that execution
 authority. Trusted executable-catalog attestation, persistent

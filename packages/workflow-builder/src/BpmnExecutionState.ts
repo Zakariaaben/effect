@@ -110,7 +110,7 @@ const codeError = (
  * @category constants
  * @since 4.0.0
  */
-export const BpmnExecutionStateVersion = 4 as const
+export const BpmnExecutionStateVersion = 5 as const
 
 /**
  * Version of the executable BPMN fingerprint preimage.
@@ -118,7 +118,7 @@ export const BpmnExecutionStateVersion = 4 as const
  * @category constants
  * @since 4.0.0
  */
-export const BpmnExecutableFingerprintVersion = 2 as const
+export const BpmnExecutableFingerprintVersion = 3 as const
 
 /**
  * Version of the token-kernel semantics committed by an execution.
@@ -126,7 +126,7 @@ export const BpmnExecutableFingerprintVersion = 2 as const
  * @category constants
  * @since 4.0.0
  */
-export const BpmnKernelSemanticVersion = "3" as const
+export const BpmnKernelSemanticVersion = "4" as const
 
 /**
  * Execution snapshot identity pinned to one BPMN semantic model version.
@@ -157,6 +157,35 @@ export const ModelReference = Schema.Struct({
 export type ModelReference = Schema.Schema.Type<typeof ModelReference>
 
 /**
+ * Durable branch identity within one scope activation.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const InvocationBranch = Schema.Union([
+  Schema.TaggedStruct("StandardLoopIteration", {
+    frameId: Identifier,
+    iteration: NonNegativeInt
+  }),
+  Schema.TaggedStruct("MultiInstanceItem", {
+    groupId: Identifier,
+    itemIndex: NonNegativeInt,
+    itemKey: Identifier
+  })
+]).annotate({
+  identifier: "WorkflowBpmnInvocationBranch",
+  parseOptions: strictParseOptions
+})
+
+/**
+ * The decoded type of {@link InvocationBranch}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type InvocationBranch = Schema.Schema.Type<typeof InvocationBranch>
+
+/**
  * Stable invocation identity for one scope activation.
  *
  * @category schemas
@@ -164,9 +193,7 @@ export type ModelReference = Schema.Schema.Type<typeof ModelReference>
  */
 export const InvocationIdentity = Schema.Struct({
   activationId: Identifier,
-  branchId: Schema.optionalKey(Identifier),
-  loopIteration: Schema.optionalKey(NonNegativeInt),
-  multiInstanceItemKey: Schema.optionalKey(Identifier),
+  branch: Schema.optionalKey(InvocationBranch),
   generation: PositiveInt
 }).annotate({
   identifier: "WorkflowBpmnInvocationIdentity",
@@ -303,7 +330,6 @@ export const LoopFrame = Schema.Struct({
   activation: NonNegativeInt,
   completedIterations: NonNegativeInt,
   activeIteration: Schema.optionalKey(NonNegativeInt),
-  mode: Schema.Literals(["standard", "multi-instance"]),
   status: Schema.Literals(["active", "completed", "cancelled"]),
   openedAt: ProtocolV2Wire.Timestamp,
   closedAt: Schema.optionalKey(ProtocolV2Wire.Timestamp)
@@ -326,16 +352,88 @@ export type LoopFrame = Schema.Schema.Type<typeof LoopFrame>
  * @category schemas
  * @since 4.0.0
  */
+export const MultiInstanceSource = Schema.Union([
+  Schema.TaggedStruct("Cardinality", {
+    value: NonNegativeInt
+  }),
+  Schema.TaggedStruct("Collection", {
+    dataInputRef: Identifier,
+    items: Schema.Array(Schema.Json)
+  })
+]).annotate({
+  identifier: "WorkflowBpmnMultiInstanceSource",
+  parseOptions: strictParseOptions
+})
+
+/**
+ * The decoded type of {@link MultiInstanceSource}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type MultiInstanceSource = Schema.Schema.Type<typeof MultiInstanceSource>
+
+/**
+ * One durable member of a multi-instance activation.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const MultiInstanceMember = Schema.Struct({
+  index: NonNegativeInt,
+  itemKey: Identifier,
+  status: Schema.Literals(["pending", "active", "completed", "terminated"]),
+  terminationReason: Schema.optionalKey(Schema.Literals([
+    "completion-condition",
+    "boundary-error-caught",
+    "uncaught-bpmn-error",
+    "unmapped-business-failure",
+    "execution-cancelled"
+  ])),
+  tokenId: Schema.optionalKey(Identifier),
+  startedAt: Schema.optionalKey(ProtocolV2Wire.Timestamp),
+  endedAt: Schema.optionalKey(ProtocolV2Wire.Timestamp)
+}).annotate({
+  identifier: "WorkflowBpmnMultiInstanceMember",
+  parseOptions: strictParseOptions
+})
+
+/**
+ * The decoded type of {@link MultiInstanceMember}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type MultiInstanceMember = Schema.Schema.Type<typeof MultiInstanceMember>
+
+/**
+ * Durable multi-instance group state.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
 export const MultiInstanceGroup = Schema.Struct({
   groupId: Identifier,
   activityId: Identifier,
   processId: Identifier,
   scopeInstanceId: Identifier,
+  activation: NonNegativeInt,
   mode: Schema.Literals(["sequential", "parallel"]),
-  status: Schema.Literals(["spawning", "active", "completed", "cancelled"]),
-  cardinality: Schema.optionalKey(NonNegativeInt),
-  collectionSnapshot: Schema.optionalKey(Schema.Json),
-  completedInstanceCount: Schema.optionalKey(NonNegativeInt)
+  source: MultiInstanceSource,
+  members: Schema.Array(MultiInstanceMember),
+  completedInstanceCount: NonNegativeInt,
+  status: Schema.Literals(["active", "completed", "cancelled"]),
+  completionReason: Schema.optionalKey(Schema.Literals([
+    "all-completed",
+    "completion-condition",
+    "empty",
+    "boundary-error-caught",
+    "uncaught-bpmn-error",
+    "unmapped-business-failure",
+    "execution-cancelled"
+  ])),
+  openedAt: ProtocolV2Wire.Timestamp,
+  closedAt: Schema.optionalKey(ProtocolV2Wire.Timestamp)
 }).annotate({
   identifier: "WorkflowBpmnMultiInstanceGroup",
   parseOptions: strictParseOptions
@@ -973,6 +1071,23 @@ export const validate = (
           ["tokens", index, "invocation", "activationId"]
         ))
       }
+      if (scope.invocation.generation !== token.invocation.generation) {
+        diagnostics.push(codeError(
+          Codes.InvalidTokenInvocation,
+          `Token '${token.tokenId}' generation must match its scope instance generation`,
+          ["tokens", index, "invocation", "generation"]
+        ))
+      }
+      if (
+        token.invocation.branch === undefined &&
+        scope.invocation.branch !== undefined
+      ) {
+        diagnostics.push(codeError(
+          Codes.InvalidTokenInvocation,
+          `Unbranched token '${token.tokenId}' must inherit the exact invocation of its scope instance`,
+          ["tokens", index, "invocation", "branch"]
+        ))
+      }
       if (token.createdAt < scope.enteredAt) {
         diagnostics.push(codeError(
           Codes.InvalidTokenPosition,
@@ -1038,135 +1153,236 @@ export const validate = (
         ))
       }
     }
-    const loopFrame = token.invocation.branchId === undefined
-      ? undefined
-      : loopFrames.get(token.invocation.branchId)
-    if (loopFrame?.mode === "standard") {
-      const loopScope = scopeInstances.get(loopFrame.scopeInstanceId)
-      if (token.processId !== loopFrame.processId) {
+    const branch = token.invocation.branch
+    if (branch?._tag === "StandardLoopIteration") {
+      const loopFrame = loopFrames.get(branch.frameId)
+      if (loopFrame === undefined) {
         diagnostics.push(codeError(
           Codes.InvalidTokenInvocation,
-          `Loop token '${token.tokenId}' process must match standard loop frame '${loopFrame.frameId}'`,
-          ["tokens", index, "processId"]
+          `Standard loop token '${token.tokenId}' references unknown loop frame '${branch.frameId}'`,
+          ["tokens", index, "invocation", "branch", "frameId"]
         ))
-      }
-      if (token.scopeInstanceId !== loopFrame.scopeInstanceId) {
-        diagnostics.push(codeError(
-          Codes.InvalidTokenInvocation,
-          `Loop token '${token.tokenId}' scope instance must match standard loop frame '${loopFrame.frameId}'`,
-          ["tokens", index, "scopeInstanceId"]
-        ))
-      }
-      if (
-        token.position._tag !== "AtNode" ||
-        token.position.nodeId !== loopFrame.activityId
-      ) {
-        diagnostics.push(codeError(
-          Codes.InvalidTokenInvocation,
-          `Loop token '${token.tokenId}' must wait AtNode on standard loop activity '${loopFrame.activityId}'`,
-          ["tokens", index, "position"]
-        ))
-      }
-      if (
-        loopScope !== undefined &&
-        token.invocation.activationId !== loopScope.invocation.activationId
-      ) {
-        diagnostics.push(codeError(
-          Codes.InvalidTokenInvocation,
-          `Loop token '${token.tokenId}' activationId must be inherited from standard loop frame scope '${loopScope.scopeInstanceId}'`,
-          ["tokens", index, "invocation", "activationId"]
-        ))
-      }
-      if (
-        loopScope !== undefined &&
-        token.invocation.generation !== loopScope.invocation.generation
-      ) {
-        diagnostics.push(codeError(
-          Codes.InvalidTokenInvocation,
-          `Loop token '${token.tokenId}' generation must be inherited from standard loop frame scope '${loopScope.scopeInstanceId}'`,
-          ["tokens", index, "invocation", "generation"]
-        ))
-      }
-      if (token.invocation.multiInstanceItemKey !== undefined) {
-        diagnostics.push(codeError(
-          Codes.InvalidTokenInvocation,
-          `Standard loop token '${token.tokenId}' cannot record multiInstanceItemKey`,
-          ["tokens", index, "invocation", "multiInstanceItemKey"]
-        ))
-      }
-      if (token.createdAt < loopFrame.openedAt) {
-        diagnostics.push(codeError(
-          Codes.InvalidTokenInvocation,
-          `Standard loop token '${token.tokenId}' was created before frame '${loopFrame.frameId}' opened`,
-          ["tokens", index, "createdAt"]
-        ))
-      }
-      if (
-        loopFrame.closedAt !== undefined &&
-        token.createdAt > loopFrame.closedAt
-      ) {
-        diagnostics.push(codeError(
-          Codes.InvalidTokenInvocation,
-          `Standard loop token '${token.tokenId}' was created after frame '${loopFrame.frameId}' closed`,
-          ["tokens", index, "createdAt"]
-        ))
-      }
-      if (
-        loopFrame.closedAt !== undefined &&
-        token.consumedAt !== undefined &&
-        token.consumedAt > loopFrame.closedAt
-      ) {
-        diagnostics.push(codeError(
-          Codes.InvalidTokenInvocation,
-          `Standard loop token '${token.tokenId}' became terminal after frame '${loopFrame.frameId}' closed`,
-          ["tokens", index, "consumedAt"]
-        ))
-      }
-      if (token.status === "active") {
-        if (loopFrame.status !== "active") {
-          diagnostics.push(codeError(
-            Codes.InvalidTokenInvocation,
-            `Active loop token '${token.tokenId}' cannot reference terminal standard loop frame '${loopFrame.frameId}'`,
-            ["tokens", index, "invocation", "branchId"]
-          ))
-        }
-        if (
-          loopFrame.activeIteration === undefined ||
-          token.invocation.loopIteration !== loopFrame.activeIteration
-        ) {
-          diagnostics.push(codeError(
-            Codes.InvalidTokenInvocation,
-            `Active loop token '${token.tokenId}' loopIteration must match standard loop frame '${loopFrame.frameId}' activeIteration`,
-            ["tokens", index, "invocation", "loopIteration"]
-          ))
-        }
-      } else if (token.status === "consumed") {
-        if (
-          token.invocation.loopIteration === undefined ||
-          token.invocation.loopIteration >= loopFrame.completedIterations
-        ) {
-          diagnostics.push(codeError(
-            Codes.InvalidTokenInvocation,
-            `Consumed loop token '${token.tokenId}' loopIteration must identify an iteration completed by standard loop frame '${loopFrame.frameId}'`,
-            ["tokens", index, "invocation", "loopIteration"]
-          ))
-        }
       } else {
-        if (loopFrame.status !== "cancelled") {
+        const loopScope = scopeInstances.get(loopFrame.scopeInstanceId)
+        if (token.processId !== loopFrame.processId) {
           diagnostics.push(codeError(
             Codes.InvalidTokenInvocation,
-            `Withdrawn loop token '${token.tokenId}' requires cancelled standard loop frame '${loopFrame.frameId}'`,
-            ["tokens", index, "status"]
+            `Loop token '${token.tokenId}' process must match standard loop frame '${loopFrame.frameId}'`,
+            ["tokens", index, "processId"]
+          ))
+        }
+        if (token.scopeInstanceId !== loopFrame.scopeInstanceId) {
+          diagnostics.push(codeError(
+            Codes.InvalidTokenInvocation,
+            `Loop token '${token.tokenId}' scope instance must match standard loop frame '${loopFrame.frameId}'`,
+            ["tokens", index, "scopeInstanceId"]
           ))
         }
         if (
-          token.invocation.loopIteration === undefined ||
-          token.invocation.loopIteration !== loopFrame.completedIterations
+          token.position._tag !== "AtNode" ||
+          token.position.nodeId !== loopFrame.activityId
         ) {
           diagnostics.push(codeError(
             Codes.InvalidTokenInvocation,
-            `Withdrawn loop token '${token.tokenId}' loopIteration must identify the iteration cancelled by standard loop frame '${loopFrame.frameId}'`,
-            ["tokens", index, "invocation", "loopIteration"]
+            `Loop token '${token.tokenId}' must wait AtNode on standard loop activity '${loopFrame.activityId}'`,
+            ["tokens", index, "position"]
+          ))
+        }
+        if (
+          loopScope !== undefined &&
+          token.invocation.activationId !== loopScope.invocation.activationId
+        ) {
+          diagnostics.push(codeError(
+            Codes.InvalidTokenInvocation,
+            `Loop token '${token.tokenId}' activationId must be inherited from standard loop frame scope '${loopScope.scopeInstanceId}'`,
+            ["tokens", index, "invocation", "activationId"]
+          ))
+        }
+        if (
+          loopScope !== undefined &&
+          token.invocation.generation !== loopScope.invocation.generation
+        ) {
+          diagnostics.push(codeError(
+            Codes.InvalidTokenInvocation,
+            `Loop token '${token.tokenId}' generation must be inherited from standard loop frame scope '${loopScope.scopeInstanceId}'`,
+            ["tokens", index, "invocation", "generation"]
+          ))
+        }
+        if (token.createdAt < loopFrame.openedAt) {
+          diagnostics.push(codeError(
+            Codes.InvalidTokenInvocation,
+            `Standard loop token '${token.tokenId}' was created before frame '${loopFrame.frameId}' opened`,
+            ["tokens", index, "createdAt"]
+          ))
+        }
+        if (
+          loopFrame.closedAt !== undefined &&
+          token.createdAt > loopFrame.closedAt
+        ) {
+          diagnostics.push(codeError(
+            Codes.InvalidTokenInvocation,
+            `Standard loop token '${token.tokenId}' was created after frame '${loopFrame.frameId}' closed`,
+            ["tokens", index, "createdAt"]
+          ))
+        }
+        if (
+          loopFrame.closedAt !== undefined &&
+          token.consumedAt !== undefined &&
+          token.consumedAt > loopFrame.closedAt
+        ) {
+          diagnostics.push(codeError(
+            Codes.InvalidTokenInvocation,
+            `Standard loop token '${token.tokenId}' became terminal after frame '${loopFrame.frameId}' closed`,
+            ["tokens", index, "consumedAt"]
+          ))
+        }
+        if (token.status === "active") {
+          if (loopFrame.status !== "active") {
+            diagnostics.push(codeError(
+              Codes.InvalidTokenInvocation,
+              `Active loop token '${token.tokenId}' cannot reference terminal standard loop frame '${loopFrame.frameId}'`,
+              ["tokens", index, "invocation", "branch", "frameId"]
+            ))
+          }
+          if (
+            loopFrame.activeIteration === undefined ||
+            branch.iteration !== loopFrame.activeIteration
+          ) {
+            diagnostics.push(codeError(
+              Codes.InvalidTokenInvocation,
+              `Active loop token '${token.tokenId}' iteration must match standard loop frame '${loopFrame.frameId}' activeIteration`,
+              ["tokens", index, "invocation", "branch", "iteration"]
+            ))
+          }
+        } else if (token.status === "consumed") {
+          if (
+            branch.iteration >= loopFrame.completedIterations
+          ) {
+            diagnostics.push(codeError(
+              Codes.InvalidTokenInvocation,
+              `Consumed loop token '${token.tokenId}' iteration must identify an iteration completed by standard loop frame '${loopFrame.frameId}'`,
+              ["tokens", index, "invocation", "branch", "iteration"]
+            ))
+          }
+        } else {
+          if (loopFrame.status !== "cancelled") {
+            diagnostics.push(codeError(
+              Codes.InvalidTokenInvocation,
+              `Withdrawn loop token '${token.tokenId}' requires cancelled standard loop frame '${loopFrame.frameId}'`,
+              ["tokens", index, "status"]
+            ))
+          }
+          if (
+            branch.iteration !== loopFrame.completedIterations
+          ) {
+            diagnostics.push(codeError(
+              Codes.InvalidTokenInvocation,
+              `Withdrawn loop token '${token.tokenId}' iteration must identify the iteration cancelled by standard loop frame '${loopFrame.frameId}'`,
+              ["tokens", index, "invocation", "branch", "iteration"]
+            ))
+          }
+        }
+      }
+    } else if (branch?._tag === "MultiInstanceItem") {
+      const group = groups.get(branch.groupId)
+      if (group === undefined) {
+        diagnostics.push(codeError(
+          Codes.InvalidTokenInvocation,
+          `Multi-instance token '${token.tokenId}' references unknown group '${branch.groupId}'`,
+          ["tokens", index, "invocation", "branch", "groupId"]
+        ))
+      } else {
+        const member = group.members[branch.itemIndex]
+        if (
+          member === undefined ||
+          member.index !== branch.itemIndex ||
+          member.itemKey !== branch.itemKey
+        ) {
+          diagnostics.push(codeError(
+            Codes.InvalidTokenInvocation,
+            `Multi-instance token '${token.tokenId}' branch does not identify an exact member of group '${group.groupId}'`,
+            ["tokens", index, "invocation", "branch"]
+          ))
+        } else {
+          if (member.tokenId !== token.tokenId) {
+            diagnostics.push(codeError(
+              Codes.InvalidTokenInvocation,
+              `Multi-instance token '${token.tokenId}' is not the token owned by member '${member.itemKey}'`,
+              ["tokens", index, "tokenId"]
+            ))
+          }
+          const expectedTokenStatus = member.status === "active"
+            ? "active"
+            : member.status === "completed"
+            ? "consumed"
+            : member.status === "terminated"
+            ? "withdrawn"
+            : undefined
+          if (expectedTokenStatus === undefined || token.status !== expectedTokenStatus) {
+            diagnostics.push(codeError(
+              Codes.InvalidTokenInvocation,
+              `Multi-instance token '${token.tokenId}' status '${token.status}' does not match member status '${member.status}'`,
+              ["tokens", index, "status"]
+            ))
+          }
+          if (
+            member.startedAt === undefined ||
+            token.createdAt !== member.startedAt
+          ) {
+            diagnostics.push(codeError(
+              Codes.InvalidTokenInvocation,
+              `Multi-instance token '${token.tokenId}' createdAt must exactly match its member startedAt`,
+              ["tokens", index, "createdAt"]
+            ))
+          }
+          if (token.consumedAt !== member.endedAt) {
+            diagnostics.push(codeError(
+              Codes.InvalidTokenInvocation,
+              `Multi-instance token '${token.tokenId}' consumedAt must exactly match its member endedAt`,
+              ["tokens", index, "consumedAt"]
+            ))
+          }
+        }
+        if (token.processId !== group.processId) {
+          diagnostics.push(codeError(
+            Codes.InvalidTokenInvocation,
+            `Multi-instance token '${token.tokenId}' process must match group '${group.groupId}'`,
+            ["tokens", index, "processId"]
+          ))
+        }
+        if (token.scopeInstanceId !== group.scopeInstanceId) {
+          diagnostics.push(codeError(
+            Codes.InvalidTokenInvocation,
+            `Multi-instance token '${token.tokenId}' scope instance must match group '${group.groupId}'`,
+            ["tokens", index, "scopeInstanceId"]
+          ))
+        }
+        if (
+          token.position._tag !== "AtNode" ||
+          token.position.nodeId !== group.activityId
+        ) {
+          diagnostics.push(codeError(
+            Codes.InvalidTokenInvocation,
+            `Multi-instance token '${token.tokenId}' must wait AtNode on activity '${group.activityId}'`,
+            ["tokens", index, "position"]
+          ))
+        }
+        if (token.createdAt < group.openedAt) {
+          diagnostics.push(codeError(
+            Codes.InvalidTokenInvocation,
+            `Multi-instance token '${token.tokenId}' was created before group '${group.groupId}' opened`,
+            ["tokens", index, "createdAt"]
+          ))
+        }
+        if (
+          group.closedAt !== undefined &&
+          token.consumedAt !== undefined &&
+          token.consumedAt > group.closedAt
+        ) {
+          diagnostics.push(codeError(
+            Codes.InvalidTokenInvocation,
+            `Multi-instance token '${token.tokenId}' became terminal after group '${group.groupId}' closed`,
+            ["tokens", index, "consumedAt"]
           ))
         }
       }
@@ -1455,23 +1671,16 @@ export const validate = (
         `Loop frame '${frame.frameId}' must reference an activity-like node`,
         ["loopFrames", index, "activityId"]
       ))
-    } else if (!("loopCharacteristics" in node) || node.loopCharacteristics === undefined) {
+    } else if (
+      !("loopCharacteristics" in node) ||
+      node.loopCharacteristics?._tag !== "StandardLoopCharacteristics"
+    ) {
       diagnostics.push(codeError(
         Codes.InvalidLoopFrame,
-        `Loop frame '${frame.frameId}' requires loop characteristics on activity '${frame.activityId}'`,
+        `Loop frame '${frame.frameId}' requires Standard Loop characteristics on activity '${frame.activityId}'`,
         ["loopFrames", index, "activityId"]
       ))
     } else {
-      if (
-        frame.mode === "standard" && node.loopCharacteristics._tag !== "StandardLoopCharacteristics" ||
-        frame.mode === "multi-instance" && node.loopCharacteristics._tag !== "MultiInstanceCharacteristics"
-      ) {
-        diagnostics.push(codeError(
-          Codes.InvalidLoopFrame,
-          `Loop frame '${frame.frameId}' mode '${frame.mode}' does not match activity '${frame.activityId}'`,
-          ["loopFrames", index, "mode"]
-        ))
-      }
       if (node.processId !== frame.processId) {
         diagnostics.push(codeError(
           Codes.InvalidLoopFrame,
@@ -1480,8 +1689,6 @@ export const validate = (
         ))
       }
       if (
-        frame.mode === "standard" &&
-        node.loopCharacteristics._tag === "StandardLoopCharacteristics" &&
         node.loopCharacteristics.loopMaximum !== undefined
       ) {
         const loopMaximum = node.loopCharacteristics.loopMaximum
@@ -1614,7 +1821,7 @@ export const validate = (
       }
     }
 
-    if (frame.mode === "standard" && frame.status === "active") {
+    if (frame.status === "active") {
       const activeLoopTokens = scope === undefined || frame.activeIteration === undefined
         ? []
         : state.tokens.filter((token) =>
@@ -1623,11 +1830,11 @@ export const validate = (
           token.scopeInstanceId === frame.scopeInstanceId &&
           token.position._tag === "AtNode" &&
           token.position.nodeId === frame.activityId &&
-          token.invocation.branchId === frame.frameId &&
-          token.invocation.loopIteration === frame.activeIteration &&
+          token.invocation.branch?._tag === "StandardLoopIteration" &&
+          token.invocation.branch.frameId === frame.frameId &&
+          token.invocation.branch.iteration === frame.activeIteration &&
           token.invocation.activationId === scope.invocation.activationId &&
-          token.invocation.generation === scope.invocation.generation &&
-          token.invocation.multiInstanceItemKey === undefined
+          token.invocation.generation === scope.invocation.generation
         )
       if (activeLoopTokens.length !== 1) {
         diagnostics.push(codeError(
@@ -1639,42 +1846,520 @@ export const validate = (
     }
   }
 
+  const multiInstanceActivationKeys = new Set<string>()
   for (let index = 0; index < state.multiInstanceGroups.length; index++) {
     const group = state.multiInstanceGroups[index]!
-    registerId(seenStateIds, diagnostics, group.groupId, ["multiInstanceGroups", index, "groupId"])
+    const groupPath = ["multiInstanceGroups", index] as const
+    registerId(seenStateIds, diagnostics, group.groupId, [...groupPath, "groupId"])
+
+    const activationKey = JSON.stringify([
+      group.processId,
+      group.scopeInstanceId,
+      group.activityId,
+      group.activation
+    ])
+    if (multiInstanceActivationKeys.has(activationKey)) {
+      diagnostics.push(codeError(
+        Codes.InvalidMultiInstanceGroup,
+        `Multi-instance activity '${group.activityId}' has more than one group for activation '${group.activation}' in scope '${group.scopeInstanceId}'`,
+        [...groupPath, "activation"]
+      ))
+    } else {
+      multiInstanceActivationKeys.add(activationKey)
+    }
+
     const node = nodeById.get(group.activityId)
     if (node === undefined) {
       diagnostics.push(codeError(
         Codes.UnknownMultiInstanceActivityRef,
         `Multi-instance group '${group.groupId}' references unknown activity '${group.activityId}'`,
-        ["multiInstanceGroups", index, "activityId"]
+        [...groupPath, "activityId"]
       ))
-      continue
-    }
-    if (
-      !activityLikeTags.has(node._tag) || !("loopCharacteristics" in node) ||
+    } else if (
+      !activityLikeTags.has(node._tag) ||
+      !("loopCharacteristics" in node) ||
       node.loopCharacteristics?._tag !== "MultiInstanceCharacteristics"
     ) {
       diagnostics.push(codeError(
         Codes.InvalidMultiInstanceGroup,
-        `Multi-instance group '${group.groupId}' must reference a multi-instance activity`,
-        ["multiInstanceGroups", index, "activityId"]
+        `Multi-instance group '${group.groupId}' must reference an activity with Multi-Instance characteristics`,
+        [...groupPath, "activityId"]
       ))
-      continue
+    } else {
+      if (node.processId !== group.processId) {
+        diagnostics.push(codeError(
+          Codes.InvalidMultiInstanceGroup,
+          `Multi-instance group '${group.groupId}' process '${group.processId}' does not match activity process '${node.processId}'`,
+          [...groupPath, "processId"]
+        ))
+      }
+      if (node.loopCharacteristics.mode !== group.mode) {
+        diagnostics.push(codeError(
+          Codes.InvalidMultiInstanceGroup,
+          `Multi-instance group '${group.groupId}' mode '${group.mode}' does not match activity '${group.activityId}'`,
+          [...groupPath, "mode"]
+        ))
+      }
+      if (
+        group.source._tag === "Cardinality" &&
+        node.loopCharacteristics.cardinality === undefined
+      ) {
+        diagnostics.push(codeError(
+          Codes.InvalidMultiInstanceGroup,
+          `Multi-instance group '${group.groupId}' records a cardinality snapshot but activity '${group.activityId}' has no loop cardinality`,
+          [...groupPath, "source"]
+        ))
+      }
+      if (
+        group.source._tag === "Collection" &&
+        node.loopCharacteristics.loopDataInputRef !== group.source.dataInputRef
+      ) {
+        diagnostics.push(codeError(
+          Codes.InvalidMultiInstanceGroup,
+          `Multi-instance group '${group.groupId}' collection dataInputRef must exactly match activity '${group.activityId}'`,
+          [...groupPath, "source", "dataInputRef"]
+        ))
+      }
+      if (group.status === "active" && node._tag !== "Task") {
+        diagnostics.push(codeError(
+          Codes.InvalidMultiInstanceGroup,
+          `Active multi-instance group '${group.groupId}' currently requires a Task activity; '${node._tag}' execution is not yet supported`,
+          [...groupPath, "activityId"]
+        ))
+      }
     }
-    if (node.loopCharacteristics.mode !== group.mode) {
+
+    const scope = scopeInstances.get(group.scopeInstanceId)
+    if (scope === undefined) {
+      diagnostics.push(codeError(
+        Codes.UnknownParentScopeInstanceRef,
+        `Multi-instance group '${group.groupId}' references unknown scope instance '${group.scopeInstanceId}'`,
+        [...groupPath, "scopeInstanceId"]
+      ))
+    } else {
+      if (scope.processId !== group.processId) {
+        diagnostics.push(codeError(
+          Codes.InvalidMultiInstanceGroup,
+          `Multi-instance group '${group.groupId}' process must match its scope instance`,
+          [...groupPath, "processId"]
+        ))
+      }
+      if (node !== undefined && scope.definitionId !== node.parentScopeId) {
+        diagnostics.push(codeError(
+          Codes.InvalidMultiInstanceGroup,
+          `Multi-instance group '${group.groupId}' scope definition '${scope.definitionId}' does not own activity '${node.id}'`,
+          [...groupPath, "scopeInstanceId"]
+        ))
+      }
+      if (group.openedAt < scope.enteredAt) {
+        diagnostics.push(codeError(
+          Codes.InvalidMultiInstanceGroup,
+          `Multi-instance group '${group.groupId}' opened before its scope instance entered`,
+          [...groupPath, "openedAt"]
+        ))
+      }
+      if (scope.exitedAt !== undefined && group.openedAt > scope.exitedAt) {
+        diagnostics.push(codeError(
+          Codes.InvalidMultiInstanceGroup,
+          `Multi-instance group '${group.groupId}' opened after its scope instance exited`,
+          [...groupPath, "openedAt"]
+        ))
+      }
+      if (group.status === "active" && scope.status !== "active") {
+        diagnostics.push(codeError(
+          Codes.InvalidMultiInstanceGroup,
+          `Active multi-instance group '${group.groupId}' cannot belong to terminal scope '${scope.scopeInstanceId}'`,
+          [...groupPath, "scopeInstanceId"]
+        ))
+      }
+      if (
+        group.closedAt !== undefined &&
+        scope.exitedAt !== undefined &&
+        group.closedAt > scope.exitedAt
+      ) {
+        diagnostics.push(codeError(
+          Codes.InvalidMultiInstanceGroup,
+          `Multi-instance group '${group.groupId}' closed after its scope instance exited`,
+          [...groupPath, "closedAt"]
+        ))
+      }
+    }
+
+    if (group.openedAt < state.startedAt) {
       diagnostics.push(codeError(
         Codes.InvalidMultiInstanceGroup,
-        `Multi-instance group '${group.groupId}' mode '${group.mode}' does not match activity '${group.activityId}'`,
-        ["multiInstanceGroups", index, "mode"]
+        `Multi-instance group '${group.groupId}' opened before the execution started`,
+        [...groupPath, "openedAt"]
       ))
     }
-    if (group.cardinality === undefined && group.collectionSnapshot === undefined) {
+
+    const sourceCount = group.source._tag === "Cardinality"
+      ? group.source.value
+      : group.source.items.length
+    if (sourceCount !== group.members.length) {
       diagnostics.push(codeError(
         Codes.InvalidMultiInstanceGroup,
-        `Multi-instance group '${group.groupId}' must record cardinality or collection snapshot`,
-        ["multiInstanceGroups", index]
+        `Multi-instance group '${group.groupId}' source count '${sourceCount}' must equal members length '${group.members.length}'`,
+        [...groupPath, "members"]
       ))
+    }
+
+    const itemKeys = new Set<string>()
+    let exactCompletedCount = 0
+    let activeCount = 0
+    let pendingCount = 0
+    let terminatedCount = 0
+    for (let memberIndex = 0; memberIndex < group.members.length; memberIndex++) {
+      const member = group.members[memberIndex]!
+      const memberPath = [...groupPath, "members", memberIndex] as const
+      if (member.index !== memberIndex) {
+        diagnostics.push(codeError(
+          Codes.InvalidMultiInstanceGroup,
+          `Multi-instance group '${group.groupId}' member index '${member.index}' must equal its ordered position '${memberIndex}'`,
+          [...memberPath, "index"]
+        ))
+      }
+      if (itemKeys.has(member.itemKey)) {
+        diagnostics.push(codeError(
+          Codes.InvalidMultiInstanceGroup,
+          `Multi-instance group '${group.groupId}' contains duplicate itemKey '${member.itemKey}'`,
+          [...memberPath, "itemKey"]
+        ))
+      } else {
+        itemKeys.add(member.itemKey)
+      }
+
+      if (member.status === "completed") {
+        exactCompletedCount++
+      } else if (member.status === "active") {
+        activeCount++
+      } else if (member.status === "pending") {
+        pendingCount++
+      } else {
+        terminatedCount++
+      }
+
+      if (member.status === "pending") {
+        if (
+          member.tokenId !== undefined ||
+          member.startedAt !== undefined ||
+          member.endedAt !== undefined ||
+          member.terminationReason !== undefined
+        ) {
+          diagnostics.push(codeError(
+            Codes.InvalidMultiInstanceGroup,
+            `Pending multi-instance member '${member.itemKey}' cannot record token or lifecycle timestamps`,
+            memberPath
+          ))
+        }
+      } else if (member.status === "active") {
+        if (
+          member.tokenId === undefined ||
+          member.startedAt === undefined ||
+          member.endedAt !== undefined ||
+          member.terminationReason !== undefined
+        ) {
+          diagnostics.push(codeError(
+            Codes.InvalidMultiInstanceGroup,
+            `Active multi-instance member '${member.itemKey}' requires tokenId and startedAt only`,
+            memberPath
+          ))
+        }
+      } else if (member.status === "completed") {
+        if (
+          member.tokenId === undefined ||
+          member.startedAt === undefined ||
+          member.endedAt === undefined ||
+          member.terminationReason !== undefined
+        ) {
+          diagnostics.push(codeError(
+            Codes.InvalidMultiInstanceGroup,
+            `Completed multi-instance member '${member.itemKey}' requires tokenId, startedAt, and endedAt without a termination reason`,
+            memberPath
+          ))
+        }
+      } else {
+        const hasNoActivation = member.tokenId === undefined &&
+          member.startedAt === undefined &&
+          member.endedAt === undefined
+        const hasTerminalActivation = member.tokenId !== undefined &&
+          member.startedAt !== undefined &&
+          member.endedAt !== undefined
+        if (
+          member.terminationReason === undefined ||
+          (!hasNoActivation && !hasTerminalActivation)
+        ) {
+          diagnostics.push(codeError(
+            Codes.InvalidMultiInstanceGroup,
+            `Terminated multi-instance member '${member.itemKey}' requires a termination reason and either no activation data or a complete terminal activation`,
+            memberPath
+          ))
+        }
+        if (group.mode === "parallel" && hasNoActivation) {
+          diagnostics.push(codeError(
+            Codes.InvalidMultiInstanceGroup,
+            `Terminated parallel multi-instance member '${member.itemKey}' must retain its activated token lifecycle`,
+            memberPath
+          ))
+        }
+      }
+
+      if (member.startedAt !== undefined && member.startedAt < group.openedAt) {
+        diagnostics.push(codeError(
+          Codes.InvalidMultiInstanceGroup,
+          `Multi-instance member '${member.itemKey}' started before group '${group.groupId}' opened`,
+          [...memberPath, "startedAt"]
+        ))
+      }
+      if (
+        member.endedAt !== undefined &&
+        member.startedAt !== undefined &&
+        member.endedAt < member.startedAt
+      ) {
+        diagnostics.push(codeError(
+          Codes.InvalidMultiInstanceGroup,
+          `Multi-instance member '${member.itemKey}' ended before it started`,
+          [...memberPath, "endedAt"]
+        ))
+      }
+      if (
+        member.endedAt !== undefined &&
+        group.closedAt !== undefined &&
+        member.endedAt > group.closedAt
+      ) {
+        diagnostics.push(codeError(
+          Codes.InvalidMultiInstanceGroup,
+          `Multi-instance member '${member.itemKey}' ended after group '${group.groupId}' closed`,
+          [...memberPath, "endedAt"]
+        ))
+      }
+
+      if (member.tokenId !== undefined) {
+        const token = tokens.get(member.tokenId)
+        if (token === undefined) {
+          diagnostics.push(codeError(
+            Codes.InvalidMultiInstanceGroup,
+            `Multi-instance member '${member.itemKey}' references unknown token '${member.tokenId}'`,
+            [...memberPath, "tokenId"]
+          ))
+        } else {
+          const branch = token.invocation.branch
+          if (
+            branch?._tag !== "MultiInstanceItem" ||
+            branch.groupId !== group.groupId ||
+            branch.itemIndex !== member.index ||
+            branch.itemKey !== member.itemKey
+          ) {
+            diagnostics.push(codeError(
+              Codes.InvalidMultiInstanceGroup,
+              `Multi-instance member '${member.itemKey}' token does not carry its exact group, index, and itemKey branch identity`,
+              [...memberPath, "tokenId"]
+            ))
+          }
+          if (
+            token.processId !== group.processId ||
+            token.scopeInstanceId !== group.scopeInstanceId ||
+            token.position._tag !== "AtNode" ||
+            token.position.nodeId !== group.activityId
+          ) {
+            diagnostics.push(codeError(
+              Codes.InvalidMultiInstanceGroup,
+              `Multi-instance member '${member.itemKey}' token does not wait on its exact activity, process, and scope`,
+              [...memberPath, "tokenId"]
+            ))
+          }
+          const expectedTokenStatus = member.status === "active"
+            ? "active"
+            : member.status === "completed"
+            ? "consumed"
+            : "withdrawn"
+          if (
+            token.status !== expectedTokenStatus ||
+            token.createdAt !== member.startedAt ||
+            token.consumedAt !== member.endedAt
+          ) {
+            diagnostics.push(codeError(
+              Codes.InvalidMultiInstanceGroup,
+              `Multi-instance member '${member.itemKey}' token lifecycle does not exactly match its durable member lifecycle`,
+              [...memberPath, "tokenId"]
+            ))
+          }
+        }
+      }
+    }
+
+    if (group.completedInstanceCount !== exactCompletedCount) {
+      diagnostics.push(codeError(
+        Codes.InvalidMultiInstanceGroup,
+        `Multi-instance group '${group.groupId}' completedInstanceCount '${group.completedInstanceCount}' must equal exact completed member count '${exactCompletedCount}'`,
+        [...groupPath, "completedInstanceCount"]
+      ))
+    }
+
+    if (group.status === "active") {
+      if (group.closedAt !== undefined || group.completionReason !== undefined) {
+        diagnostics.push(codeError(
+          Codes.InvalidMultiInstanceGroup,
+          `Active multi-instance group '${group.groupId}' cannot record closedAt or completionReason`,
+          groupPath
+        ))
+      }
+      if (sourceCount === 0 || activeCount === 0 || terminatedCount > 0) {
+        diagnostics.push(codeError(
+          Codes.InvalidMultiInstanceGroup,
+          `Active multi-instance group '${group.groupId}' requires at least one active member and cannot contain terminated members`,
+          [...groupPath, "members"]
+        ))
+      }
+      if (group.mode === "sequential") {
+        if (activeCount !== 1) {
+          diagnostics.push(codeError(
+            Codes.InvalidMultiInstanceGroup,
+            `Active sequential multi-instance group '${group.groupId}' must contain exactly one active member`,
+            [...groupPath, "members"]
+          ))
+        }
+        let phase: "completed" | "active" | "pending" = "completed"
+        for (let memberIndex = 0; memberIndex < group.members.length; memberIndex++) {
+          const member = group.members[memberIndex]!
+          const valid = phase === "completed"
+            ? member.status === "completed" || member.status === "active"
+            : phase === "active"
+            ? member.status === "pending"
+            : member.status === "pending"
+          if (!valid) {
+            diagnostics.push(codeError(
+              Codes.InvalidMultiInstanceGroup,
+              `Sequential multi-instance group '${group.groupId}' members must be an ordered completed prefix, one active member, then a pending suffix`,
+              [...groupPath, "members", memberIndex, "status"]
+            ))
+            break
+          }
+          if (member.status === "active") {
+            phase = "active"
+          } else if (phase === "active") {
+            phase = "pending"
+          }
+        }
+      } else if (pendingCount > 0) {
+        diagnostics.push(codeError(
+          Codes.InvalidMultiInstanceGroup,
+          `Active parallel multi-instance group '${group.groupId}' cannot retain pending members`,
+          [...groupPath, "members"]
+        ))
+      }
+    } else {
+      if (group.closedAt === undefined || group.completionReason === undefined) {
+        diagnostics.push(codeError(
+          Codes.InvalidMultiInstanceGroup,
+          `Terminal multi-instance group '${group.groupId}' must record closedAt and completionReason`,
+          groupPath
+        ))
+      } else if (group.closedAt < group.openedAt) {
+        diagnostics.push(codeError(
+          Codes.InvalidMultiInstanceGroup,
+          `Terminal multi-instance group '${group.groupId}' closed before it opened`,
+          [...groupPath, "closedAt"]
+        ))
+      }
+      if (activeCount > 0 || pendingCount > 0) {
+        diagnostics.push(codeError(
+          Codes.InvalidMultiInstanceGroup,
+          `Terminal multi-instance group '${group.groupId}' cannot retain active or pending members`,
+          [...groupPath, "members"]
+        ))
+      }
+      const completedReasons = new Set<MultiInstanceGroup["completionReason"]>([
+        "all-completed",
+        "completion-condition",
+        "empty"
+      ])
+      if (
+        group.status === "completed" &&
+        !completedReasons.has(group.completionReason)
+      ) {
+        diagnostics.push(codeError(
+          Codes.InvalidMultiInstanceGroup,
+          `Completed multi-instance group '${group.groupId}' has incompatible completionReason '${group.completionReason}'`,
+          [...groupPath, "completionReason"]
+        ))
+      }
+      if (
+        group.status === "cancelled" &&
+        (group.completionReason === undefined || completedReasons.has(group.completionReason))
+      ) {
+        diagnostics.push(codeError(
+          Codes.InvalidMultiInstanceGroup,
+          `Cancelled multi-instance group '${group.groupId}' requires a cancellation completionReason`,
+          [...groupPath, "completionReason"]
+        ))
+      }
+      if (
+        group.completionReason === "empty" &&
+        (sourceCount !== 0 || group.members.length !== 0)
+      ) {
+        diagnostics.push(codeError(
+          Codes.InvalidMultiInstanceGroup,
+          `Multi-instance group '${group.groupId}' can use completionReason 'empty' only for an empty source`,
+          [...groupPath, "completionReason"]
+        ))
+      }
+      if (
+        group.completionReason === "all-completed" &&
+        (sourceCount === 0 || exactCompletedCount !== group.members.length)
+      ) {
+        diagnostics.push(codeError(
+          Codes.InvalidMultiInstanceGroup,
+          `Multi-instance group '${group.groupId}' can use completionReason 'all-completed' only when every member of a non-empty source completed`,
+          [...groupPath, "completionReason"]
+        ))
+      }
+      if (
+        group.completionReason === "completion-condition" &&
+        exactCompletedCount === 0
+      ) {
+        diagnostics.push(codeError(
+          Codes.InvalidMultiInstanceGroup,
+          `Multi-instance group '${group.groupId}' completion condition can only terminate after at least one member completed`,
+          [...groupPath, "completionReason"]
+        ))
+      }
+      if (group.status === "cancelled" && terminatedCount === 0) {
+        diagnostics.push(codeError(
+          Codes.InvalidMultiInstanceGroup,
+          `Cancelled multi-instance group '${group.groupId}' must retain at least one terminated member`,
+          [...groupPath, "members"]
+        ))
+      }
+      if (group.mode === "sequential") {
+        let terminatedSeen = false
+        for (let memberIndex = 0; memberIndex < group.members.length; memberIndex++) {
+          const member = group.members[memberIndex]!
+          if (member.status === "terminated") {
+            terminatedSeen = true
+          } else if (terminatedSeen && member.status === "completed") {
+            diagnostics.push(codeError(
+              Codes.InvalidMultiInstanceGroup,
+              `Terminal sequential multi-instance group '${group.groupId}' must retain a completed prefix followed by a terminated suffix`,
+              [...groupPath, "members", memberIndex, "status"]
+            ))
+            break
+          }
+        }
+      }
+      for (let memberIndex = 0; memberIndex < group.members.length; memberIndex++) {
+        const member = group.members[memberIndex]!
+        if (
+          member.status === "terminated" &&
+          member.terminationReason !== group.completionReason
+        ) {
+          diagnostics.push(codeError(
+            Codes.InvalidMultiInstanceGroup,
+            `Terminated member '${member.itemKey}' reason must match group '${group.groupId}' completionReason`,
+            [...groupPath, "members", memberIndex, "terminationReason"]
+          ))
+        }
+      }
     }
   }
 

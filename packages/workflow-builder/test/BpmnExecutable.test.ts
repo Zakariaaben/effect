@@ -62,7 +62,8 @@ const options: BpmnExecutable.CompileXmlOptions = {
   },
   rootProcessId,
   limits: {
-    maxAutomaticTransitions: 1_000
+    maxAutomaticTransitions: 1_000,
+    maxMultiInstanceCardinality: 128
   },
   evaluatorBindings: [{
     language: expressionLanguage,
@@ -157,6 +158,58 @@ const loopXml = `<?xml version="1.0" encoding="UTF-8"?>
   </bpmn:process>
 </bpmn:definitions>`
 
+const multiInstanceXml = (
+  mode: "sequential" | "parallel",
+  cardinalitySource: string,
+  completionConditionSource?: string
+): string =>
+  `<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions
+  xmlns:bpmn="${modelNamespace}"
+  xmlns:xsi="${xsiNamespace}"
+  targetNamespace="urn:workflow:executable-multi-instance"
+  expressionLanguage="${expressionLanguage}">
+  <bpmn:process id="${rootProcessId}" isExecutable="true">
+    <bpmn:startEvent id="mi_start"/>
+    <bpmn:task id="mi_task">
+      <bpmn:multiInstanceLoopCharacteristics isSequential="${mode === "sequential" ? "true" : "false"}">
+        <bpmn:loopCardinality xsi:type="bpmn:tFormalExpression"><![CDATA[${cardinalitySource}]]></bpmn:loopCardinality>${
+    completionConditionSource === undefined
+      ? ""
+      : `
+        <bpmn:completionCondition xsi:type="bpmn:tFormalExpression"><![CDATA[${completionConditionSource}]]></bpmn:completionCondition>`
+  }
+      </bpmn:multiInstanceLoopCharacteristics>
+    </bpmn:task>
+    <bpmn:endEvent id="mi_end"/>
+    <bpmn:sequenceFlow id="flow_mi_start" sourceRef="mi_start" targetRef="mi_task"/>
+    <bpmn:sequenceFlow id="flow_mi_end" sourceRef="mi_task" targetRef="mi_end"/>
+  </bpmn:process>
+</bpmn:definitions>`
+
+const nonExecutableMultiInstanceXml = `<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions
+  xmlns:bpmn="${modelNamespace}"
+  xmlns:tns="urn:workflow:executable-multi-instance"
+  targetNamespace="urn:workflow:executable-multi-instance"
+  expressionLanguage="${expressionLanguage}">
+  <bpmn:process id="${rootProcessId}" isExecutable="true">
+    <bpmn:startEvent id="mi_start"/>
+    <bpmn:task id="mi_task">
+      <bpmn:multiInstanceLoopCharacteristics
+        isSequential="false"
+        behavior="One"
+        oneBehaviorEventRef="tns:first_completed">
+        <bpmn:loopDataInputRef>tns:items</bpmn:loopDataInputRef>
+        <bpmn:loopDataOutputRef>tns:results</bpmn:loopDataOutputRef>
+      </bpmn:multiInstanceLoopCharacteristics>
+    </bpmn:task>
+    <bpmn:endEvent id="mi_end"/>
+    <bpmn:sequenceFlow id="flow_mi_start" sourceRef="mi_start" targetRef="mi_task"/>
+    <bpmn:sequenceFlow id="flow_mi_end" sourceRef="mi_task" targetRef="mi_end"/>
+  </bpmn:process>
+</bpmn:definitions>`
+
 const loopTaskBinding: BpmnActivityV3.TaskBinding = {
   bindingVersion: BpmnActivityV3.BindingVersion,
   executionProtocolVersion: 3,
@@ -228,7 +281,7 @@ const prepareKernel = (
 
 const services = (approved: boolean): BpmnKernel.Services => ({
   now,
-  evaluateCondition: ({ expression }) =>
+  evaluateExpression: ({ expression }) =>
     Result.succeed(
       {
         result: expression.language === expressionLanguage &&
@@ -272,6 +325,110 @@ const complete = (
     },
     services(approved)
   ))
+}
+
+interface MultiInstanceEvaluationObservation {
+  readonly tag: BpmnKernel.EvaluationContext["_tag"]
+  readonly source: string
+  readonly expectedResult: BpmnExpressionEvaluator.ExpectedResult
+  readonly completedMemberIndex?: number
+}
+
+const multiInstanceServices = (
+  cardinality: number,
+  observations: Array<MultiInstanceEvaluationObservation>,
+  completionCondition: boolean = false
+): BpmnKernel.Services => ({
+  now,
+  evaluateExpression: (context) => {
+    observations.push({
+      tag: context._tag,
+      source: context.expression.source,
+      expectedResult: context.request.expectedResult,
+      ...(context._tag === "MultiInstanceCompletionCondition"
+        ? { completedMemberIndex: context.completedMember.index }
+        : {})
+    })
+    return Result.succeed({
+      result: context._tag === "MultiInstanceCardinality"
+        ? cardinality
+        : completionCondition,
+      steps: observations.length
+    })
+  }
+})
+
+const activeMultiInstanceTokens = (
+  state: BpmnExecutionState.BpmnExecutionState
+): ReadonlyArray<BpmnExecutionState.BpmnExecutionState["tokens"][number]> =>
+  state.tokens
+    .filter((token) =>
+      token.status === "active" &&
+      token.position._tag === "AtNode" &&
+      token.position.nodeId === "mi_task" &&
+      token.invocation.branch?._tag === "MultiInstanceItem"
+    )
+    .sort((left, right) => {
+      const leftIndex = left.invocation.branch?._tag === "MultiInstanceItem"
+        ? left.invocation.branch.itemIndex
+        : -1
+      const rightIndex = right.invocation.branch?._tag === "MultiInstanceItem"
+        ? right.invocation.branch.itemIndex
+        : -1
+      return leftIndex - rightIndex
+    })
+
+const completeMultiInstanceToken = (
+  kernel: BpmnKernel.CompiledKernel,
+  state: BpmnExecutionState.BpmnExecutionState,
+  token: BpmnExecutionState.BpmnExecutionState["tokens"][number],
+  runtime: BpmnKernel.Services
+): BpmnKernel.TransitionBatch =>
+  success(BpmnKernel.completeTask(
+    kernel,
+    state,
+    {
+      scopeInstanceId: token.scopeInstanceId,
+      taskNodeId: "mi_task",
+      tokenId: token.tokenId
+    },
+    runtime
+  ))
+
+const assertMultiInstanceCanonicalReplay = (
+  compiled: BpmnExecutable.CompiledXml,
+  journal: ReadonlyArray<BpmnKernel.TransitionEvent>,
+  expectedState: BpmnExecutionState.BpmnExecutionState
+): void => {
+  const canonical = success(BpmnXml.exportXml(
+    compiled.interchange,
+    { format: "compact" }
+  ))
+  const recompiled = success(compileXml(canonical))
+
+  assert.strictEqual(
+    recompiled.interchange.profileId,
+    "bpmn-2.0.2-core-process-di-v4"
+  )
+  assert.deepStrictEqual(
+    recompiled.interchange.model,
+    compiled.interchange.model
+  )
+  assert.strictEqual(
+    recompiled.kernel.modelReference.executableFingerprint,
+    compiled.kernel.modelReference.executableFingerprint
+  )
+  assert.deepStrictEqual(
+    success(BpmnKernel.replay(recompiled.kernel, journal)),
+    expectedState
+  )
+  assert.strictEqual(
+    success(BpmnXml.exportXml(
+      recompiled.interchange,
+      { format: "compact" }
+    )),
+    canonical
+  )
 }
 
 describe("BpmnExecutable", () => {
@@ -403,7 +560,14 @@ describe("BpmnExecutable", () => {
           "Expected the first Standard Loop iteration"
         )
       }
-      assert.strictEqual(firstToken.invocation.loopIteration, 0)
+      assert.strictEqual(
+        firstToken.invocation.branch?._tag,
+        "StandardLoopIteration"
+      )
+      if (firstToken.invocation.branch?._tag !== "StandardLoopIteration") {
+        return yield* Effect.die("Expected Standard Loop branch identity")
+      }
+      assert.strictEqual(firstToken.invocation.branch.iteration, 0)
       const firstTarget = {
         scopeInstanceId: firstToken.scopeInstanceId,
         taskNodeId: "loop_task",
@@ -436,10 +600,17 @@ describe("BpmnExecutable", () => {
           "Expected the second Standard Loop iteration"
         )
       }
-      assert.strictEqual(secondToken.invocation.loopIteration, 1)
       assert.strictEqual(
-        secondToken.invocation.branchId,
-        firstToken.invocation.branchId
+        secondToken.invocation.branch?._tag,
+        "StandardLoopIteration"
+      )
+      if (secondToken.invocation.branch?._tag !== "StandardLoopIteration") {
+        return yield* Effect.die("Expected Standard Loop branch identity")
+      }
+      assert.strictEqual(secondToken.invocation.branch.iteration, 1)
+      assert.strictEqual(
+        secondToken.invocation.branch.frameId,
+        firstToken.invocation.branch.frameId
       )
       const secondTarget = {
         scopeInstanceId: secondToken.scopeInstanceId,
@@ -527,6 +698,316 @@ describe("BpmnExecutable", () => {
         completed.state
       )
     }))
+
+  it("imports, compiles, executes, replays, and canonically recompiles a sequential Multi-Instance task", () => {
+    const compiled = success(compileXml(
+      multiInstanceXml("sequential", "requested-count", "keep-waiting")
+    ))
+    assert.strictEqual(
+      BpmnXml.CoreProcessDiProfileId,
+      "bpmn-2.0.2-core-process-di-v4"
+    )
+    assert.strictEqual(
+      compiled.interchange.profileId,
+      "bpmn-2.0.2-core-process-di-v4"
+    )
+    assert.deepStrictEqual(
+      compiled.interchange.mappingReport.semanticLosses,
+      []
+    )
+
+    const observations: Array<MultiInstanceEvaluationObservation> = []
+    const runtime = multiInstanceServices(2, observations, false)
+    const initialized = success(BpmnKernel.initialize(
+      compiled.kernel,
+      runtime
+    ))
+    const firstToken = activeMultiInstanceTokens(initialized.state)[0]
+    if (firstToken === undefined) {
+      throw new Error("expected the first sequential Multi-Instance member")
+    }
+    assert.deepStrictEqual(observations, [{
+      tag: "MultiInstanceCardinality",
+      source: "requested-count",
+      expectedResult: "non-negative-integer"
+    }])
+    assert.deepStrictEqual(
+      initialized.state.multiInstanceGroups.map((group) => ({
+        mode: group.mode,
+        source: group.source,
+        completedInstanceCount: group.completedInstanceCount,
+        status: group.status,
+        members: group.members.map((member) => ({
+          index: member.index,
+          itemKey: member.itemKey,
+          status: member.status
+        }))
+      })),
+      [{
+        mode: "sequential",
+        source: { _tag: "Cardinality", value: 2 },
+        completedInstanceCount: 0,
+        status: "active",
+        members: [
+          { index: 0, itemKey: "item:0", status: "active" },
+          { index: 1, itemKey: "item:1", status: "pending" }
+        ]
+      }]
+    )
+
+    const first = completeMultiInstanceToken(
+      compiled.kernel,
+      initialized.state,
+      firstToken,
+      runtime
+    )
+    const secondToken = activeMultiInstanceTokens(first.state)[0]
+    if (secondToken === undefined) {
+      throw new Error("expected the second sequential Multi-Instance member")
+    }
+    assert.strictEqual(
+      secondToken.invocation.branch?._tag === "MultiInstanceItem"
+        ? secondToken.invocation.branch.itemIndex
+        : undefined,
+      1
+    )
+    assert.deepStrictEqual(
+      first.state.multiInstanceGroups[0]?.members.map((member) => member.status),
+      ["completed", "active"]
+    )
+
+    const completed = completeMultiInstanceToken(
+      compiled.kernel,
+      first.state,
+      secondToken,
+      runtime
+    )
+    const journal: ReadonlyArray<BpmnKernel.TransitionEvent> = [
+      ...initialized.events,
+      ...first.events,
+      ...completed.events
+    ]
+
+    assert.deepStrictEqual(observations, [
+      {
+        tag: "MultiInstanceCardinality",
+        source: "requested-count",
+        expectedResult: "non-negative-integer"
+      },
+      {
+        tag: "MultiInstanceCompletionCondition",
+        source: "keep-waiting",
+        expectedResult: "boolean",
+        completedMemberIndex: 0
+      },
+      {
+        tag: "MultiInstanceCompletionCondition",
+        source: "keep-waiting",
+        expectedResult: "boolean",
+        completedMemberIndex: 1
+      }
+    ])
+    assert.strictEqual(
+      observations.filter((observation) => observation.tag === "MultiInstanceCardinality").length,
+      1
+    )
+    assert.strictEqual(completed.state.status, "completed")
+    assert.deepStrictEqual(
+      completed.state.multiInstanceGroups.map((group) => ({
+        source: group.source,
+        completedInstanceCount: group.completedInstanceCount,
+        status: group.status,
+        completionReason: group.completionReason,
+        memberStatuses: group.members.map((member) => member.status)
+      })),
+      [{
+        source: { _tag: "Cardinality", value: 2 },
+        completedInstanceCount: 2,
+        status: "completed",
+        completionReason: "all-completed",
+        memberStatuses: ["completed", "completed"]
+      }]
+    )
+    assert.strictEqual(
+      journal.filter((event) => event._tag === "MultiInstanceCardinalityEvaluated").length,
+      1
+    )
+    assert.deepStrictEqual(
+      journal.flatMap((event) =>
+        event._tag === "MultiInstanceCompletionConditionEvaluated"
+          ? [event.result]
+          : []
+      ),
+      [false, false]
+    )
+    assert.deepStrictEqual(
+      success(BpmnKernel.replay(compiled.kernel, journal)),
+      completed.state
+    )
+    assertMultiInstanceCanonicalReplay(
+      compiled,
+      journal,
+      completed.state
+    )
+  })
+
+  it("preserves deterministic member identity across out-of-order parallel Multi-Instance completion and canonical replay", () => {
+    const compiled = success(compileXml(
+      multiInstanceXml("parallel", "parallel-count")
+    ))
+    assert.strictEqual(
+      compiled.interchange.profileId,
+      "bpmn-2.0.2-core-process-di-v4"
+    )
+    const observations: Array<MultiInstanceEvaluationObservation> = []
+    const runtime = multiInstanceServices(3, observations)
+    const initialized = success(BpmnKernel.initialize(
+      compiled.kernel,
+      runtime
+    ))
+    assert.deepStrictEqual(observations, [{
+      tag: "MultiInstanceCardinality",
+      source: "parallel-count",
+      expectedResult: "non-negative-integer"
+    }])
+    assert.deepStrictEqual(
+      activeMultiInstanceTokens(initialized.state).map((token) =>
+        token.invocation.branch?._tag === "MultiInstanceItem"
+          ? {
+            itemIndex: token.invocation.branch.itemIndex,
+            itemKey: token.invocation.branch.itemKey
+          }
+          : undefined
+      ),
+      [
+        { itemIndex: 0, itemKey: "item:0" },
+        { itemIndex: 1, itemKey: "item:1" },
+        { itemIndex: 2, itemKey: "item:2" }
+      ]
+    )
+
+    const journal: Array<BpmnKernel.TransitionEvent> = [
+      ...initialized.events
+    ]
+    let state = initialized.state
+    for (const index of [2, 0, 1]) {
+      const token = activeMultiInstanceTokens(state).find((candidate) =>
+        candidate.invocation.branch?._tag === "MultiInstanceItem" &&
+        candidate.invocation.branch.itemIndex === index
+      )
+      if (token === undefined) {
+        throw new Error(`expected active parallel member '${index}'`)
+      }
+      const transition = completeMultiInstanceToken(
+        compiled.kernel,
+        state,
+        token,
+        runtime
+      )
+      journal.push(...transition.events)
+      state = transition.state
+    }
+
+    assert.strictEqual(
+      observations.filter((observation) => observation.tag === "MultiInstanceCardinality").length,
+      1
+    )
+    assert.strictEqual(state.status, "completed")
+    assert.deepStrictEqual(
+      state.multiInstanceGroups.map((group) => ({
+        mode: group.mode,
+        source: group.source,
+        completedInstanceCount: group.completedInstanceCount,
+        status: group.status,
+        completionReason: group.completionReason,
+        members: group.members.map((member) => ({
+          index: member.index,
+          itemKey: member.itemKey,
+          status: member.status
+        }))
+      })),
+      [{
+        mode: "parallel",
+        source: { _tag: "Cardinality", value: 3 },
+        completedInstanceCount: 3,
+        status: "completed",
+        completionReason: "all-completed",
+        members: [
+          { index: 0, itemKey: "item:0", status: "completed" },
+          { index: 1, itemKey: "item:1", status: "completed" },
+          { index: 2, itemKey: "item:2", status: "completed" }
+        ]
+      }]
+    )
+    assert.deepStrictEqual(
+      journal.flatMap((event) =>
+        event._tag === "MultiInstanceItemCompleted"
+          ? [event.itemIndex]
+          : []
+      ),
+      [2, 0, 1]
+    )
+    assert.strictEqual(
+      journal.filter((event) =>
+        event._tag === "OutgoingSelected" &&
+        event.sourceNodeId === "mi_task"
+      ).length,
+      1
+    )
+    assert.deepStrictEqual(
+      success(BpmnKernel.replay(compiled.kernel, journal)),
+      state
+    )
+    assertMultiInstanceCanonicalReplay(compiled, journal, state)
+  })
+
+  it("round-trips collection and progressive Multi-Instance mapping while executable admission fails closed", () => {
+    const imported = success(BpmnXml.importXml(
+      nonExecutableMultiInstanceXml,
+      options.importOptions
+    ))
+    assert.strictEqual(
+      imported.profileId,
+      "bpmn-2.0.2-core-process-di-v4"
+    )
+    const task = imported.model.flowNodes.find((node) => node.id === "mi_task")
+    if (
+      task?._tag !== "Task" ||
+      task.loopCharacteristics?._tag !== "MultiInstanceCharacteristics"
+    ) {
+      throw new Error("expected imported collection Multi-Instance task")
+    }
+    assert.deepStrictEqual(task.loopCharacteristics, {
+      _tag: "MultiInstanceCharacteristics",
+      mode: "parallel",
+      loopDataInputRef: "items",
+      loopDataOutputRef: "results",
+      behavior: "one",
+      oneBehaviorEventRef: "first_completed"
+    })
+    assert.deepStrictEqual(imported.mappingReport.semanticLosses, [])
+
+    const canonical = success(BpmnXml.exportXml(
+      imported,
+      { format: "compact" }
+    ))
+    const reimported = success(BpmnXml.importXml(
+      canonical,
+      options.importOptions
+    ))
+    assert.deepStrictEqual(reimported.model, imported.model)
+    assert.strictEqual(
+      success(BpmnXml.exportXml(reimported, { format: "compact" })),
+      canonical
+    )
+
+    for (const candidate of [nonExecutableMultiInstanceXml, canonical]) {
+      const rejected = failure(compileXml(candidate))
+      assert(
+        rejected.diagnostics.some((diagnostic) => diagnostic.code === BpmnKernel.Codes.UnsupportedLoop)
+      )
+    }
+  })
 
   it("uses the exclusive gateway's explicit default when its condition is false", () => {
     const compiled = success(compileXml(xml))
