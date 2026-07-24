@@ -12,6 +12,7 @@
  */
 import type * as Arr from "../../Array.ts"
 import * as Cause from "../../Cause.ts"
+import * as Clock from "../../Clock.ts"
 import * as Context from "../../Context.ts"
 import * as Data from "../../Data.ts"
 import * as Duration from "../../Duration.ts"
@@ -46,6 +47,47 @@ export const TypeId: TypeId = "~effect/persistence/PersistedQueue"
  * @since 4.0.0
  */
 export type TypeId = "~effect/persistence/PersistedQueue"
+
+/**
+ * Scope-bound capability for observing loss of one queue acquisition.
+ *
+ * **Details**
+ *
+ * `ownershipLost` completes after the backing store confirms that the current
+ * delivery no longer owns its fenced acquisition, or after the store cannot
+ * confirm ownership for the configured lock-expiration horizon. A transient
+ * refresh error alone does not complete the signal.
+ *
+ * The signal is cooperative. It is not a settlement receipt, a fencing token
+ * for another store, or an atomic guard for external side effects.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export interface Acquisition {
+  /**
+   * Reads whether this process has already observed ownership loss.
+   *
+   * **Details**
+   *
+   * This is local signal state, not a fresh attestation against the store.
+   */
+  readonly isOwnershipLost: Effect.Effect<boolean>
+
+  readonly ownershipLost: Effect.Effect<void>
+}
+
+/**
+ * Metadata supplied to a persisted-queue take callback.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export interface TakeMetadata {
+  readonly id: string
+  readonly attempts: number
+  readonly acquisition: Acquisition
+}
 
 /**
  * Persistent queue of schema-encoded values.
@@ -85,10 +127,7 @@ export interface PersistedQueue<in out A, out R = never> {
    * max attempts is set to 10.
    */
   readonly take: <XA, XE, XR>(
-    f: (value: A, metadata: {
-      readonly id: string
-      readonly attempts: number
-    }) => Effect.Effect<XA, XE, XR>,
+    f: (value: A, metadata: TakeMetadata) => Effect.Effect<XA, XE, XR>,
     options?: {
       readonly maxAttempts?: number | undefined
     }
@@ -176,7 +215,11 @@ export const makeFactory = Effect.gen(function*() {
               maxAttempts: opts?.maxAttempts ?? 10
             }).pipe(Scope.provide(scope))
             const decoded = yield* decodeUnknown(item.element)
-            return yield* f(decoded, { id: item.id, attempts: item.attempts })
+            return yield* f(decoded, {
+              id: item.id,
+              attempts: item.attempts,
+              acquisition: item.acquisition
+            })
           }))
       })
     }
@@ -268,6 +311,7 @@ export class PersistedQueueStore extends Context.Service<
         readonly id: string
         readonly attempts: number
         readonly element: unknown
+        readonly acquisition: Acquisition
       },
       PersistedQueueError,
       Scope.Scope
@@ -314,8 +358,9 @@ export const layerStoreMemory: Layer.Layer<
   return PersistedQueueStore.of({
     offer: (options) =>
       Effect.sync(() => {
-        if (ids.has(options.id)) return
-        ids.add(options.id)
+        const queueId = JSON.stringify([options.name, options.id])
+        if (ids.has(queueId)) return
+        ids.add(queueId)
         const queue = getOrCreateQueue(options.name)
         queue.items.add({ id: options.id, attempts: 0, element: options.element })
         queue.latch.openUnsafe()
@@ -332,7 +377,7 @@ export const layerStoreMemory: Layer.Layer<
         yield* Effect.addFinalizer((exit) => {
           if (exit._tag === "Success") {
             return Effect.void
-          } else if (!Exit.hasInterrupts(exit)) {
+          } else if (!Cause.hasInterruptsOnly(exit.cause)) {
             item.attempts += 1
           }
           if (item.attempts >= options.maxAttempts) {
@@ -342,7 +387,13 @@ export const layerStoreMemory: Layer.Layer<
           queue.latch.openUnsafe()
           return Effect.void
         })
-        return item
+        return {
+          ...item,
+          acquisition: {
+            isOwnershipLost: Effect.succeed(false),
+            ownershipLost: Effect.never
+          }
+        }
       }
     })
   })
@@ -355,7 +406,9 @@ export const layerStoreMemory: Layer.Layer<
  *
  * The store uses Redis lists and hashes with per-acquisition fenced locks,
  * periodically refreshes the current acquisition while items are being
- * processed, and moves exhausted items to a failed queue.
+ * processed, and moves exhausted items to a failed queue. Its versioned key
+ * layout length-frames public queue names so they cannot collide with internal
+ * key families.
  *
  * @category store
  * @since 4.0.0
@@ -369,6 +422,7 @@ export const makeStoreRedis = Effect.fnUntraced(function*(
   }
 ) {
   const redis = yield* Redis.Redis
+  const clock = yield* Clock.Clock
 
   const pollInterval = Duration.max(
     options?.pollInterval ? Duration.fromInputUnsafe(options.pollInterval) : Duration.seconds(1),
@@ -380,17 +434,20 @@ export const makeStoreRedis = Effect.fnUntraced(function*(
       : 30_000,
     1
   )
-  const lockExpirationMillis = Math.max(
-    options?.lockExpiration
-      ? Duration.toMillis(Duration.fromInputUnsafe(options.lockExpiration))
-      : 90_000,
-    1
+  const lockExpiration = Duration.max(
+    options?.lockExpiration ? Duration.fromInputUnsafe(options.lockExpiration) : Duration.seconds(90),
+    Duration.millis(1)
   )
+  const lockExpirationMillis = Duration.toMillis(lockExpiration)
+  const lockExpirationNanos = Duration.toNanosUnsafe(lockExpiration)
   const prefix = options?.prefix ?? "effectq:"
-  const keyQueue = (name: string) => `${prefix}${name}`
-  const keyLock = (id: string) => `${prefix}${id}:lock`
-  const keyPending = (name: string) => `${prefix}${name}:pending`
-  const keyFailed = (name: string) => `${prefix}${name}:failed`
+  const keyQueueBase = (name: string) => `${prefix}v2:queue:${name.length}:${name}:`
+  const keyQueue = (name: string) => `${keyQueueBase(name)}ready`
+  const keyLockPrefix = (name: string) => `${keyQueueBase(name)}lock:`
+  const keyLock = (name: string, id: string) => `${keyLockPrefix(name)}${id}`
+  const keyPending = (name: string) => `${keyQueueBase(name)}pending`
+  const keyFailed = (name: string) => `${keyQueueBase(name)}failed`
+  const keyIds = (name: string) => `${keyQueueBase(name)}ids`
 
   type StoredElement = {
     readonly id: string
@@ -401,6 +458,7 @@ export const makeStoreRedis = Effect.fnUntraced(function*(
 
   type Element = StoredElement & {
     readonly acquisitionId: string
+    readonly confirmedAt: bigint
   }
 
   const encodeStoredElement = (
@@ -445,7 +503,7 @@ export const makeStoreRedis = Effect.fnUntraced(function*(
                 requeue(
                   queueKey,
                   pendingKey,
-                  keyLock(element.id),
+                  keyLock(name, element.id),
                   element.acquisitionId,
                   element.id,
                   encodeStoredElement(element)
@@ -454,7 +512,7 @@ export const makeStoreRedis = Effect.fnUntraced(function*(
         )
       )
 
-      yield* resetQueue(queueKey, pendingKey, prefix).pipe(
+      yield* resetQueue(queueKey, pendingKey, keyLockPrefix(name)).pipe(
         Effect.andThen(Effect.sleep(lockRefreshMillis)),
         Effect.forever,
         Effect.forkScoped
@@ -462,22 +520,24 @@ export const makeStoreRedis = Effect.fnUntraced(function*(
 
       const poll = (size: number) => {
         const acquisitionId = crypto.randomUUID()
+        const confirmationStartedAt = clock.currentTimeNanosUnsafe()
         return Effect.map(
           take(
             queueKey,
             pendingKey,
-            prefix,
+            keyLockPrefix(name),
             acquisitionId,
             size,
             lockExpirationMillis
           ),
-          (payloads) =>
-            payloads === null
-              ? null
-              : payloads.map((payload) => ({
-                ...JSON.parse(payload) as StoredElement,
-                acquisitionId
-              }))
+          (payloads) => {
+            if (payloads === null) return null
+            return payloads.map((payload) => ({
+              ...JSON.parse(payload) as StoredElement,
+              acquisitionId,
+              confirmedAt: confirmationStartedAt
+            }))
+          }
         )
       }
 
@@ -507,12 +567,55 @@ export const makeStoreRedis = Effect.fnUntraced(function*(
     idleTimeToLive: Duration.seconds(30)
   })
 
-  const activeLocks = new Map<string, string>()
+  type ActiveLock = {
+    readonly acquisitionId: string
+    readonly ownershipLost: Latch.Latch
+    lastConfirmedAt: bigint
+  }
+  const activeLocks = new Map<string, ActiveLock>()
+
+  const loseActiveLock = (lock: string, acquisitionId: string) => {
+    const active = activeLocks.get(lock)
+    if (active?.acquisitionId !== acquisitionId) return
+    activeLocks.delete(lock)
+    active.ownershipLost.openUnsafe()
+  }
+
+  const expireUnconfirmedLocks = (now: bigint) => {
+    for (const [lock, active] of activeLocks) {
+      if (now - active.lastConfirmedAt >= lockExpirationNanos) {
+        loseActiveLock(lock, active.acquisitionId)
+      }
+    }
+  }
 
   yield* Effect.gen(function*() {
     while (true) {
       yield* Effect.sleep(lockRefreshMillis)
-      yield* Effect.ignore(expireAll(Array.from(activeLocks), lockExpirationMillis))
+      const snapshot = Array.from(
+        activeLocks,
+        ([lock, active]) => [lock, active.acquisitionId] as const
+      )
+      if (snapshot.length === 0) continue
+      const confirmationStartedAt = clock.currentTimeNanosUnsafe()
+      const refreshed = yield* Effect.exit(
+        expireAll(snapshot, lockExpirationMillis)
+      )
+      const now = clock.currentTimeNanosUnsafe()
+      if (Exit.isFailure(refreshed)) {
+        expireUnconfirmedLocks(now)
+        continue
+      }
+      const lost = new Set(refreshed.value)
+      for (const [lock, acquisitionId] of snapshot) {
+        const active = activeLocks.get(lock)
+        if (active?.acquisitionId !== acquisitionId) continue
+        if (lost.has(lock)) {
+          loseActiveLock(lock, acquisitionId)
+        } else {
+          active.lastConfirmedAt = confirmationStartedAt
+        }
+      }
     }
   }).pipe(
     Effect.forkScoped,
@@ -523,17 +626,25 @@ export const makeStoreRedis = Effect.fnUntraced(function*(
     })
   )
 
+  yield* Effect.gen(function*() {
+    const interval = Math.max(1, Math.min(lockRefreshMillis, lockExpirationMillis))
+    while (true) {
+      yield* Effect.sleep(interval)
+      expireUnconfirmedLocks(clock.currentTimeNanosUnsafe())
+    }
+  }).pipe(Effect.forkScoped, Effect.interruptible)
+
   return PersistedQueueStore.of({
     offer: ({ element, id, isCustomId, name }) =>
       Effect.mapError(
         isCustomId
           ? offer(
-            `${prefix}${name}`,
-            `${prefix}${name}:ids`,
+            keyQueue(name),
+            keyIds(name),
             id,
             JSON.stringify({ id, element, attempts: 0 })
           )
-          : redis.send("RPUSH", `${prefix}${name}`, JSON.stringify({ id, element, attempts: 0 })),
+          : redis.send("RPUSH", keyQueue(name), JSON.stringify({ id, element, attempts: 0 })),
         ({ cause }) =>
           new PersistedQueueError({
             message: "Failed to offer element to persisted queue",
@@ -560,23 +671,56 @@ export const makeStoreRedis = Effect.fnUntraced(function*(
               }))
           }),
           Effect.scoped,
-          Effect.tap((element) => {
-            const lock = keyLock(element.id)
-            activeLocks.set(lock, element.acquisitionId)
+          Effect.flatMap((element) => {
+            const lock = keyLock(options.name, element.id)
+            const ownershipLost = Latch.makeUnsafe()
+            const previous = activeLocks.get(lock)
+            if (previous && previous.acquisitionId !== element.acquisitionId) {
+              previous.ownershipLost.openUnsafe()
+            }
+            activeLocks.set(lock, {
+              acquisitionId: element.acquisitionId,
+              ownershipLost,
+              lastConfirmedAt: element.confirmedAt
+            })
+            expireUnconfirmedLocks(clock.currentTimeNanosUnsafe())
             const releaseActiveLock = () => {
-              if (activeLocks.get(lock) === element.acquisitionId) {
+              if (activeLocks.get(lock)?.acquisitionId === element.acquisitionId) {
                 activeLocks.delete(lock)
               }
             }
-            return Effect.addFinalizer(Exit.match({
-              onFailure: (cause) => {
-                releaseActiveLock()
-                const nextAttempts = element.attempts + 1
-                if (nextAttempts >= options.maxAttempts) {
-                  return Effect.orDie(failed(
+            return Effect.as(
+              Effect.addFinalizer(Exit.match({
+                onFailure: (cause) => {
+                  releaseActiveLock()
+                  if (Cause.hasInterruptsOnly(cause)) {
+                    return Effect.orDie(requeue(
+                      keyQueue(options.name),
+                      keyPending(options.name),
+                      lock,
+                      element.acquisitionId,
+                      element.id,
+                      encodeStoredElement(element)
+                    ))
+                  }
+                  const nextAttempts = element.attempts + 1
+                  if (nextAttempts >= options.maxAttempts) {
+                    return Effect.orDie(failed(
+                      keyPending(options.name),
+                      lock,
+                      keyFailed(options.name),
+                      element.acquisitionId,
+                      element.id,
+                      encodeStoredElement(element, {
+                        lastFailure: Cause.pretty(cause),
+                        attempts: nextAttempts
+                      })
+                    ))
+                  }
+                  return Effect.orDie(requeue(
+                    keyQueue(options.name),
                     keyPending(options.name),
                     lock,
-                    keyFailed(options.name),
                     element.acquisitionId,
                     element.id,
                     encodeStoredElement(element, {
@@ -584,31 +728,25 @@ export const makeStoreRedis = Effect.fnUntraced(function*(
                       attempts: nextAttempts
                     })
                   ))
+                },
+                onSuccess: () => {
+                  releaseActiveLock()
+                  return Effect.orDie(complete(
+                    keyPending(options.name),
+                    lock,
+                    element.acquisitionId,
+                    element.id
+                  ))
                 }
-                return Effect.orDie(requeue(
-                  keyQueue(options.name),
-                  keyPending(options.name),
-                  lock,
-                  element.acquisitionId,
-                  element.id,
-                  Cause.hasInterruptsOnly(cause)
-                    ? encodeStoredElement(element)
-                    : encodeStoredElement(element, {
-                      lastFailure: Cause.pretty(cause),
-                      attempts: nextAttempts
-                    })
-                ))
-              },
-              onSuccess: () => {
-                releaseActiveLock()
-                return Effect.orDie(complete(
-                  keyPending(options.name),
-                  lock,
-                  element.acquisitionId,
-                  element.id
-                ))
+              })),
+              {
+                ...element,
+                acquisition: {
+                  isOwnershipLost: Effect.sync(() => ownershipLost.isOpen()),
+                  ownershipLost: ownershipLost.await
+                }
               }
-            }))
+            )
           })
         )
       )
@@ -634,18 +772,18 @@ end
 )
 
 const resetQueueRedis = Redis.script(
-  (...args: [keyQueue: string, keyPending: string, prefix: string]) => args,
+  (...args: [keyQueue: string, keyPending: string, lockPrefix: string]) => args,
   {
     lua: `
 local key_queue = KEYS[1]
 local key_pending = KEYS[2]
-local prefix = ARGV[1]
+local lock_prefix = ARGV[1]
 
 local entries = redis.call("HGETALL", key_pending)
 for i = 1, #entries, 2 do
   local id = entries[i]
   local payload = entries[i + 1]
-  local lock_key = prefix .. id .. ":lock"
+  local lock_key = lock_prefix .. id
   local exists = redis.call("EXISTS", lock_key)
   if exists == 0 then
     redis.call("RPUSH", key_queue, payload)
@@ -746,7 +884,7 @@ const takeRedis = Redis.script(
     ...args: [
       keyQueue: string,
       keyPending: string,
-      prefix: string,
+      lockPrefix: string,
       acquisitionId: string,
       batchSize: number,
       pttl: number
@@ -756,7 +894,7 @@ const takeRedis = Redis.script(
     lua: `
 local key_queue = KEYS[1]
 local key_pending = KEYS[2]
-local prefix = ARGV[1]
+local lock_prefix = ARGV[1]
 local acquisition_id = ARGV[2]
 local batch_size = tonumber(ARGV[3])
 local pttl = ARGV[4]
@@ -768,7 +906,7 @@ end
 
 for i, payload in ipairs(payloads) do
   local id = cjson.decode(payload).id
-  local key_lock = prefix .. id .. ":lock"
+  local key_lock = lock_prefix .. id
   redis.call("SET", key_lock, acquisition_id, "PX", pttl)
   redis.call("HSET", key_pending, id, payload)
 end
@@ -789,14 +927,18 @@ const expireAllRedis = Redis.script(
     numberOfKeys: (locks) => locks.length,
     lua: `
 local ttl = ARGV[#KEYS + 1]
+local lost = {}
 for i, key in ipairs(KEYS) do
   if redis.call("GET", key) == ARGV[i] then
     redis.call("PEXPIRE", key, ttl)
+  else
+    table.insert(lost, key)
   end
 end
+return lost
 `
   }
-)
+).withReturnType<ReadonlyArray<string>>()
 
 /**
  * Provides a Redis-backed `PersistedQueueStore` using `makeStoreRedis`.
@@ -842,8 +984,13 @@ export const makeStoreSql: (
   SqlClient.SqlClient | Scope.Scope
 > = Effect.fnUntraced(function*(options) {
   const sql = (yield* SqlClient.SqlClient).withoutTransforms()
+  const clock = yield* Clock.Clock
   const tableName = options?.tableName ?? "effect_queue"
   const tableNameSql = sql(tableName)
+  const queueIdIndexName = `idx_${tableName}_queue_id`
+  const legacyIdIndexName = `idx_${tableName}_id`
+  const takeIndexName = `idx_${tableName}_take`
+  const updateIndexName = `idx_${tableName}_update`
   const pollInterval = Duration.max(
     options?.pollInterval ? Duration.fromInputUnsafe(options.pollInterval) : Duration.millis(1000),
     Duration.millis(1)
@@ -856,6 +1003,8 @@ export const makeStoreSql: (
     options?.lockExpiration ? Duration.fromInputUnsafe(options.lockExpiration) : Duration.minutes(2),
     Duration.millis(1)
   )
+  const lockExpirationMillis = Duration.toMillis(lockExpiration)
+  const lockExpirationNanos = Duration.toNanosUnsafe(lockExpiration)
   const lockExpirationSql = sql.literal(Math.ceil(Duration.toSeconds(lockExpiration)).toString())
 
   const sqlNow = sql.onDialectOrElse({
@@ -903,7 +1052,7 @@ export const makeStoreSql: (
         updated_at TIMESTAMP NOT NULL
       )`,
     mssql: () =>
-      sql`IF NOT EXISTS (SELECT * FROM sysobjects WHERE name=${tableNameSql} AND xtype='U')
+      sql`IF NOT EXISTS (SELECT * FROM sysobjects WHERE name=${tableName} AND xtype='U')
       CREATE TABLE ${tableNameSql} (
         sequence INT IDENTITY(1,1) PRIMARY KEY,
         id NVARCHAR(36) NOT NULL,
@@ -936,37 +1085,54 @@ export const makeStoreSql: (
 
   yield* sql.onDialectOrElse({
     mssql: () =>
-      sql`IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = N'idx_${tableName}_id')
-        CREATE UNIQUE INDEX idx_${tableNameSql}_id ON ${tableNameSql} (id)`,
-    mysql: () => sql`CREATE UNIQUE INDEX ${sql(`idx_${tableName}_id`)} ON ${tableNameSql} (id)`.pipe(Effect.ignore),
-    orElse: () => sql`CREATE UNIQUE INDEX IF NOT EXISTS ${sql(`idx_${tableName}_id`)} ON ${tableNameSql} (id)`
-  })
-
-  yield* sql.onDialectOrElse({
-    mssql: () =>
-      sql`IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = N'idx_${tableName}_take')
-        CREATE INDEX idx_${tableNameSql}_take ON ${tableNameSql} (queue_name, completed, attempts, acquired_at)`,
+      sql`IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = ${queueIdIndexName})
+        CREATE UNIQUE INDEX ${sql(queueIdIndexName)} ON ${tableNameSql} (queue_name, id)`,
     mysql: () =>
-      sql`CREATE INDEX ${
-        sql(`idx_${tableName}_take`)
-      } ON ${tableNameSql} (queue_name, completed, attempts, acquired_at)`
-        .pipe(Effect.ignore),
-    orElse: () =>
-      sql`CREATE INDEX IF NOT EXISTS ${
-        sql(`idx_${tableName}_take`)
-      } ON ${tableNameSql} (queue_name, completed, attempts, acquired_at)`
-  })
-
-  yield* sql.onDialectOrElse({
-    mssql: () =>
-      sql`IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = N'idx_${tableName}_update')
-        CREATE INDEX ${sql(`idx_${tableName}_update`)} ON ${tableNameSql} (sequence, acquired_by)`,
-    mysql: () =>
-      sql`CREATE INDEX ${sql(`idx_${tableName}_update`)} ON ${tableNameSql} (sequence, acquired_by)`.pipe(
+      sql`CREATE UNIQUE INDEX ${sql(queueIdIndexName)} ON ${tableNameSql} (queue_name, id)`.pipe(
         Effect.ignore
       ),
+    orElse: () => sql`CREATE UNIQUE INDEX IF NOT EXISTS ${sql(queueIdIndexName)} ON ${tableNameSql} (queue_name, id)`
+  })
+
+  const isMissingMysqlIndex = (error: SqlError) => {
+    const cause = error.reason.cause
+    if (typeof cause !== "object" || cause === null) return false
+    return ("errno" in cause && cause.errno === 1091) ||
+      ("code" in cause && cause.code === "ER_CANT_DROP_FIELD_OR_KEY")
+  }
+
+  yield* sql.onDialectOrElse({
+    mssql: () =>
+      sql`IF EXISTS (SELECT * FROM sys.indexes WHERE name = ${legacyIdIndexName})
+        DROP INDEX ${sql(legacyIdIndexName)} ON ${tableNameSql}`,
+    mysql: () =>
+      sql`DROP INDEX ${sql(legacyIdIndexName)} ON ${tableNameSql}`.pipe(
+        Effect.catchIf(isMissingMysqlIndex, () => Effect.void)
+      ),
+    orElse: () => sql`DROP INDEX IF EXISTS ${sql(legacyIdIndexName)}`
+  })
+
+  yield* sql.onDialectOrElse({
+    mssql: () =>
+      sql`IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = ${takeIndexName})
+        CREATE INDEX ${sql(takeIndexName)} ON ${tableNameSql} (queue_name, completed, attempts, acquired_at)`,
+    mysql: () =>
+      sql`CREATE INDEX ${sql(takeIndexName)} ON ${tableNameSql} (queue_name, completed, attempts, acquired_at)`
+        .pipe(Effect.ignore),
     orElse: () =>
-      sql`CREATE INDEX IF NOT EXISTS ${sql(`idx_${tableName}_update`)} ON ${tableNameSql} (sequence, acquired_by)`
+      sql`CREATE INDEX IF NOT EXISTS ${sql(takeIndexName)}
+        ON ${tableNameSql} (queue_name, completed, attempts, acquired_at)`
+  })
+
+  yield* sql.onDialectOrElse({
+    mssql: () =>
+      sql`IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = ${updateIndexName})
+        CREATE INDEX ${sql(updateIndexName)} ON ${tableNameSql} (sequence, acquired_by)`,
+    mysql: () =>
+      sql`CREATE INDEX ${sql(updateIndexName)} ON ${tableNameSql} (sequence, acquired_by)`.pipe(
+        Effect.ignore
+      ),
+    orElse: () => sql`CREATE INDEX IF NOT EXISTS ${sql(updateIndexName)} ON ${tableNameSql} (sequence, acquired_by)`
   })
 
   const offer = sql.onDialectOrElse({
@@ -974,7 +1140,7 @@ export const makeStoreSql: (
       sql`
         INSERT INTO ${tableNameSql} (id, queue_name, element, completed, attempts, created_at, updated_at)
         VALUES (${id}, ${name}, ${element}, FALSE, 0, ${sqlNow}, ${sqlNow})
-        ON CONFLICT (id) DO NOTHING
+        ON CONFLICT (queue_name, id) DO NOTHING
       `,
     mysql: () => (id: string, name: string, element: string) =>
       sql`
@@ -983,7 +1149,7 @@ export const makeStoreSql: (
       `,
     mssql: () => (id: string, name: string, element: string) =>
       sql`
-        IF NOT EXISTS (SELECT 1 FROM ${tableNameSql} WHERE id = ${id})
+        IF NOT EXISTS (SELECT 1 FROM ${tableNameSql} WHERE queue_name = ${name} AND id = ${id})
         BEGIN
           INSERT INTO ${tableNameSql} (id, queue_name, element, completed, attempts, created_at, updated_at)
           VALUES (${id}, ${name}, ${element}, 0, 0, ${sqlNow}, ${sqlNow})
@@ -1008,7 +1174,12 @@ export const makeStoreSql: (
     orElse: () => sql.literal("TRUE")
   })
 
-  const elementAcquisitions = new Map<number, string>()
+  type ActiveAcquisition = {
+    readonly acquisitionId: string
+    readonly ownershipLost: Latch.Latch
+    lastConfirmedAt: bigint
+  }
+  const elementAcquisitions = new Map<number, ActiveAcquisition>()
   const groupAcquisitions = (
     entries: ReadonlyArray<readonly [sequence: number, acquisitionId: string]>
   ) => {
@@ -1023,22 +1194,59 @@ export const makeStoreSql: (
     }
     return groups
   }
+  const loseAcquisition = (sequence: number, acquisitionId: string) => {
+    const active = elementAcquisitions.get(sequence)
+    if (active?.acquisitionId !== acquisitionId) return
+    elementAcquisitions.delete(sequence)
+    active.ownershipLost.openUnsafe()
+  }
+  const expireUnconfirmedAcquisitions = () =>
+    Effect.sync(() => {
+      const now = clock.currentTimeNanosUnsafe()
+      for (const [sequence, active] of elementAcquisitions) {
+        if (now - active.lastConfirmedAt >= lockExpirationNanos) {
+          loseAcquisition(sequence, active.acquisitionId)
+        }
+      }
+    })
   const releaseAcquisition = (sequence: number, acquisitionId: string) => {
-    if (elementAcquisitions.get(sequence) === acquisitionId) {
+    if (elementAcquisitions.get(sequence)?.acquisitionId === acquisitionId) {
       elementAcquisitions.delete(sequence)
     }
   }
   const refreshLocks: Effect.Effect<void, SqlError> = Effect.suspend((): Effect.Effect<void, SqlError> => {
     if (elementAcquisitions.size === 0) return Effect.void
+    const snapshot = Array.from(
+      elementAcquisitions,
+      ([sequence, active]) => [sequence, active.acquisitionId] as const
+    )
+    const confirmationStartedAt = clock.currentTimeNanosUnsafe()
     return Effect.forEach(
-      groupAcquisitions(Array.from(elementAcquisitions)),
+      groupAcquisitions(snapshot),
       ([acquisitionId, sequences]) =>
-        sql`
+        Effect.gen(function*() {
+          yield* sql`
           UPDATE ${tableNameSql}
           SET acquired_at = ${sqlNow}
           WHERE sequence IN (${sql.literal(sequences.join(","))})
           AND acquired_by = ${stringLiteral(acquisitionId)}
-        `,
+          `
+          const ownedRows = yield* sql<{ readonly sequence: number }>`
+            SELECT sequence FROM ${tableNameSql}
+            WHERE sequence IN (${sql.literal(sequences.join(","))})
+            AND acquired_by = ${stringLiteral(acquisitionId)}
+          `
+          const owned = new Set(ownedRows.map((row) => row.sequence))
+          for (const sequence of sequences) {
+            const active = elementAcquisitions.get(sequence)
+            if (active?.acquisitionId !== acquisitionId) continue
+            if (owned.has(sequence)) {
+              active.lastConfirmedAt = confirmationStartedAt
+            } else {
+              loseAcquisition(sequence, acquisitionId)
+            }
+          }
+        }),
       { concurrency: "unbounded", discard: true }
     )
   })
@@ -1064,6 +1272,22 @@ export const makeStoreSql: (
       SET acquired_at = NULL, acquired_by = NULL, updated_at = ${sqlNow}, attempts = ${attempts}, last_failure = ${
       Cause.pretty(cause)
     }
+      WHERE sequence = ${sequence}
+      AND acquired_by = ${stringLiteral(acquisitionId)}
+    `.pipe(
+      Effect.retry({
+        times: 5,
+        schedule: Schedule.exponential(100, 1.5)
+      }),
+      Effect.orDie
+    )
+  }
+  const fail = (sequence: number, acquisitionId: string, attempts: number, cause: Cause.Cause<any>) => {
+    releaseAcquisition(sequence, acquisitionId)
+    return sql`
+      UPDATE ${tableNameSql}
+      SET acquired_at = NULL, acquired_by = NULL, updated_at = ${sqlNow}, completed = ${sqlTrue},
+        attempts = ${attempts}, last_failure = ${Cause.pretty(cause)}
       WHERE sequence = ${sequence}
       AND acquired_by = ${stringLiteral(acquisitionId)}
     `.pipe(
@@ -1103,7 +1327,12 @@ export const makeStoreSql: (
   }
 
   yield* refreshLocks.pipe(
-    Effect.tapCause(Effect.logWarning),
+    Effect.tapCause((cause) =>
+      Effect.andThen(
+        Effect.logWarning(cause),
+        expireUnconfirmedAcquisitions()
+      )
+    ),
     Effect.retry(Schedule.spaced(500)),
     Effect.schedule(Schedule.fixed(lockRefreshInterval)),
     Effect.annotateLogs({
@@ -1114,6 +1343,19 @@ export const makeStoreSql: (
     Effect.forkScoped
   )
 
+  yield* Effect.gen(function*() {
+    const interval = Duration.millis(
+      Math.max(
+        1,
+        Math.min(Duration.toMillis(lockRefreshInterval), lockExpirationMillis)
+      )
+    )
+    while (true) {
+      yield* Effect.sleep(interval)
+      yield* expireUnconfirmedAcquisitions()
+    }
+  }).pipe(Effect.forkScoped)
+
   type StoredElement = {
     readonly id: string
     sequence: number
@@ -1123,6 +1365,8 @@ export const makeStoreSql: (
   }
   type Element = StoredElement & {
     readonly acquisitionId: string
+    readonly ownershipLost: Latch.Latch
+    readonly confirmedAt: bigint
   }
   const mailboxes = yield* RcMap.make({
     lookup: Effect.fnUntraced(function*({ maxAttempts, name }: QueueKey) {
@@ -1216,6 +1460,7 @@ export const makeStoreSql: (
           yield* pollLatch.await
           yield* Effect.yieldNow
           const acquisitionId = crypto.randomUUID()
+          const confirmationStartedAt = clock.currentTimeNanosUnsafe()
           const storedElements = takers.current === 0 ? [] : yield* poll(takers.current, acquisitionId)
           if (storedElements.length === 0) {
             yield* Effect.sleep(pollInterval)
@@ -1224,12 +1469,23 @@ export const makeStoreSql: (
           takenLatch.closeUnsafe()
           const elements = storedElements.map((element): Element => ({
             ...element,
-            acquisitionId
+            acquisitionId,
+            ownershipLost: Latch.makeUnsafe(),
+            confirmedAt: confirmationStartedAt
           }))
           for (let i = 0; i < elements.length; i++) {
             const element = elements[i]
-            elementAcquisitions.set(element.sequence, acquisitionId)
+            const previous = elementAcquisitions.get(element.sequence)
+            if (previous && previous.acquisitionId !== acquisitionId) {
+              previous.ownershipLost.openUnsafe()
+            }
+            elementAcquisitions.set(element.sequence, {
+              acquisitionId,
+              ownershipLost: element.ownershipLost,
+              lastConfirmedAt: confirmationStartedAt
+            })
           }
+          yield* expireUnconfirmedAcquisitions()
           yield* Queue.offerAll(queue, elements)
           yield* takenLatch.await
           yield* Effect.yieldNow
@@ -1277,16 +1533,25 @@ export const makeStoreSql: (
           restore,
           Effect.tap((element) =>
             Effect.addFinalizer(Exit.match({
-              onFailure: (cause) =>
-                Cause.hasInterruptsOnly(cause)
-                  ? interrupt([element])
-                  : retry(element.sequence, element.acquisitionId, element.attempts + 1, cause),
+              onFailure: (cause) => {
+                if (Cause.hasInterruptsOnly(cause)) {
+                  return interrupt([element])
+                }
+                const nextAttempts = element.attempts + 1
+                return nextAttempts >= maxAttempts
+                  ? fail(element.sequence, element.acquisitionId, nextAttempts, cause)
+                  : retry(element.sequence, element.acquisitionId, nextAttempts, cause)
+              },
               onSuccess: () => complete(element.sequence, element.acquisitionId, element.attempts + 1)
             }))
           ),
           Effect.map((element) => ({
             ...element,
-            element: JSON.parse(element.element)
+            element: JSON.parse(element.element),
+            acquisition: {
+              isOwnershipLost: Effect.sync(() => element.ownershipLost.isOpen()),
+              ownershipLost: element.ownershipLost.await
+            }
           }))
         )
       )

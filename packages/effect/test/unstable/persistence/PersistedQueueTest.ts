@@ -1,5 +1,5 @@
 import { assert, it } from "@effect/vitest"
-import { Effect, Fiber, Latch, Layer, Schema } from "effect"
+import { Cause, Effect, Fiber, Latch, Layer, Schema } from "effect"
 import { TestClock } from "effect/testing"
 import { PersistedQueue } from "effect/unstable/persistence"
 
@@ -23,7 +23,7 @@ export const suite = (name: string, layer: Layer.Layer<PersistedQueue.PersistedQ
         }))
       }))
 
-    it.effect("interrupt", () =>
+    it.effect("interrupt does not exhaust max attempts", () =>
       Effect.gen(function*() {
         const queue = yield* PersistedQueue.make({
           name: "test-queue-b",
@@ -33,12 +33,18 @@ export const suite = (name: string, layer: Layer.Layer<PersistedQueue.PersistedQ
         yield* queue.offer({ n: 42n })
 
         const latch = Latch.makeUnsafe()
-        const fiber = yield* queue.take(Effect.fnUntraced(function*(_value) {
-          yield* latch.open
-          return yield* Effect.never
-        })).pipe(Effect.forkScoped)
+        const fiber = yield* queue.take(
+          Effect.fnUntraced(function*(_value) {
+            yield* latch.open
+            return yield* Effect.never
+          }),
+          { maxAttempts: 1 }
+        ).pipe(Effect.forkScoped)
 
-        const fiber2 = yield* queue.take((val) => Effect.succeed(val)).pipe(Effect.forkScoped)
+        const fiber2 = yield* queue.take((val, { attempts }) => {
+          assert.strictEqual(attempts, 0)
+          return Effect.succeed(val)
+        }, { maxAttempts: 1 }).pipe(Effect.forkScoped)
 
         yield* latch.await
 
@@ -57,6 +63,23 @@ export const suite = (name: string, layer: Layer.Layer<PersistedQueue.PersistedQ
         assert.strictEqual((yield* Fiber.join(fiber2)).n, 42n)
       }))
 
+    it.effect("keeps ownership-loss pending while the acquisition is current", () =>
+      Effect.gen(function*() {
+        const queue = yield* PersistedQueue.make({
+          name: "test-queue-ownership-current",
+          schema: Item
+        })
+
+        yield* queue.offer({ n: 42n })
+
+        yield* queue.take(Effect.fnUntraced(function*(_value, { acquisition }) {
+          assert.isFalse(yield* acquisition.isOwnershipLost)
+          const lost = yield* acquisition.ownershipLost.pipe(Effect.forkScoped)
+          yield* Effect.sleep("250 millis").pipe(TestClock.withLive)
+          assert.isUndefined(lost.pollUnsafe())
+        }))
+      }))
+
     it.effect("failure", () =>
       Effect.gen(function*() {
         const queue = yield* PersistedQueue.make({
@@ -73,6 +96,27 @@ export const suite = (name: string, layer: Layer.Layer<PersistedQueue.PersistedQ
           assert.strictEqual(attempts, 1)
           return Effect.succeed(val)
         })
+        assert.strictEqual(value.n, 42n)
+      }))
+
+    it.effect("counts a mixed failure and interruption cause as an attempt", () =>
+      Effect.gen(function*() {
+        const queue = yield* PersistedQueue.make({
+          name: "test-queue-mixed-failure-interruption",
+          schema: Item
+        })
+
+        yield* queue.offer({ n: 42n })
+
+        yield* queue.take(
+          () => Effect.failCause(Cause.combine(Cause.fail("boom"), Cause.interrupt(1))),
+          { maxAttempts: 2 }
+        ).pipe(Effect.exit)
+
+        const value = yield* queue.take((val, { attempts }) => {
+          assert.strictEqual(attempts, 1)
+          return Effect.succeed(val)
+        }, { maxAttempts: 2 })
         assert.strictEqual(value.n, 42n)
       }))
 
@@ -98,6 +142,24 @@ export const suite = (name: string, layer: Layer.Layer<PersistedQueue.PersistedQ
         )
 
         assert.isUndefined(fiber.pollUnsafe())
+      }))
+
+    it.effect("scopes custom-id de-duplication to each queue", () =>
+      Effect.gen(function*() {
+        const queueA = yield* PersistedQueue.make({
+          name: "queue-scoped-id-a",
+          schema: Item
+        })
+        const queueB = yield* PersistedQueue.make({
+          name: "queue-scoped-id-b",
+          schema: Item
+        })
+
+        yield* queueA.offer({ n: 1n }, { id: "shared-custom-id" })
+        yield* queueB.offer({ n: 2n }, { id: "shared-custom-id" })
+
+        assert.strictEqual((yield* queueA.take(Effect.succeed)).n, 1n)
+        assert.strictEqual((yield* queueB.take(Effect.succeed)).n, 2n)
       }))
 
     it.effect("does not redeliver in-flight elements", () =>
@@ -159,6 +221,29 @@ export const suite = (name: string, layer: Layer.Layer<PersistedQueue.PersistedQ
         yield* Effect.sleep(1000).pipe(
           TestClock.withLive
         )
+
+        assert.isUndefined(fiber.pollUnsafe())
+      }))
+
+    it.effect("keeps exhausted elements terminal when a later take raises maxAttempts", () =>
+      Effect.gen(function*() {
+        const queue = yield* PersistedQueue.make({
+          name: "test-queue-exhausted-terminal",
+          schema: Item
+        })
+
+        yield* queue.offer({ n: 42n })
+
+        const error = yield* queue
+          .take(() => Effect.fail("boom"), { maxAttempts: 1 })
+          .pipe(Effect.flip)
+
+        assert.strictEqual(error, "boom")
+
+        const fiber = yield* queue.take((val) => Effect.succeed(val), { maxAttempts: 2 }).pipe(Effect.forkScoped)
+
+        yield* TestClock.adjust(1000)
+        yield* Effect.sleep(1000).pipe(TestClock.withLive)
 
         assert.isUndefined(fiber.pollUnsafe())
       }))

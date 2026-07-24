@@ -12,6 +12,7 @@
  */
 import * as Effect from "../../Effect.ts"
 import * as Layer from "../../Layer.ts"
+import * as Option from "../../Option.ts"
 import * as Schedule from "../../Schedule.ts"
 import * as Schema from "../../Schema.ts"
 import * as Tracer from "../../Tracer.ts"
@@ -62,15 +63,22 @@ export interface DurableQueue<
  *
  * `attempts` is the number of prior non-interrupt acquisition failures
  * recorded for the same queue item. It starts at `0`; an interrupted
- * acquisition is requeued without incrementing this value.
+ * acquisition is requeued without incrementing this value. `acquisition` is
+ * scoped to the current delivery. Its ownership-loss signal cooperatively
+ * interrupts handler execution so a stale delivery is requeued without
+ * publishing its interrupted `Exit`. The locally observed ownership-loss
+ * snapshot is checked before the handler is constructed and again before its
+ * result is published. These snapshots are not fresh backing-store ownership
+ * attestations.
+ *
+ * The signal does not make deferred completion and queue acknowledgement one
+ * transaction. Handlers that mutate external systems still require stable
+ * idempotency or an external fencing protocol.
  *
  * @category models
  * @since 4.0.0
  */
-export interface WorkerMetadata {
-  readonly id: string
-  readonly attempts: number
-}
+export interface WorkerMetadata extends PersistedQueue.TakeMetadata {}
 
 /**
  * Configuration for durable queue workers.
@@ -293,7 +301,18 @@ const defaultRetrySchedule = Schedule.min([
  *
  * The handler receives persisted-queue metadata as its second argument. The
  * `id` identifies the queue item and `attempts` reports prior non-interrupt
- * acquisition failures. Existing one-argument handlers remain supported.
+ * acquisition failures. Existing one-argument handlers remain supported. A
+ * redelivered item whose durable result is already present is acknowledged
+ * without invoking the handler again. New handler results are resolved through
+ * the deferred's first-wins operation so a competing terminal cannot be
+ * replaced. If the underlying queue reports ownership loss before the handler
+ * wins its race, or the local snapshot observes loss before publication, the
+ * worker is interrupted outside the captured `Exit`; no false business result
+ * is published and the queue may redeliver the item.
+ *
+ * Ownership loss is cooperative and deferred completion is not atomically
+ * fenced with queue acknowledgement. External effects still require stable
+ * idempotency or their own fencing protocol.
  *
  * @category Worker
  * @since 4.0.0
@@ -318,7 +337,9 @@ export const makeWorker: <
   | R
   | Payload["EncodingServices"]
   | Payload["DecodingServices"]
+  | Success["DecodingServices"]
   | Success["EncodingServices"]
+  | Error["DecodingServices"]
   | Error["EncodingServices"]
 > = Effect.fnUntraced(function*<
   Payload extends Schema.Top,
@@ -348,16 +369,35 @@ export const makeWorker: <
       readonly sampled: boolean
     }
     return Effect.withSpan(
-      f(item.payload, metadata).pipe(
-        Effect.exit,
-        Effect.flatMap((exit) =>
-          DurableDeferred.done(self.deferred, {
-            token: item.token,
-            exit
-          })
-        ),
-        Effect.asVoid
-      ),
+      Effect.gen(function*() {
+        const existing = yield* DurableDeferred.poll(self.deferred, {
+          token: item.token
+        })
+        if (Option.isSome(existing)) {
+          return
+        }
+        if (yield* metadata.acquisition.isOwnershipLost) {
+          return yield* Effect.interrupt
+        }
+        const result = yield* Effect.raceFirst(
+          metadata.acquisition.ownershipLost.pipe(
+            Effect.as(Option.none())
+          ),
+          Effect.exit(
+            Effect.suspend(() => f(item.payload, metadata))
+          ).pipe(Effect.map(Option.some))
+        )
+        if (Option.isNone(result)) {
+          return yield* Effect.interrupt
+        }
+        if (yield* metadata.acquisition.isOwnershipLost) {
+          return yield* Effect.interrupt
+        }
+        yield* DurableDeferred.resolve(self.deferred, {
+          token: item.token,
+          exit: result.value
+        })
+      }),
       `DurableQueue/${self.name}/worker`,
       {
         captureStackTrace: false,
@@ -390,6 +430,8 @@ export const makeWorker: <
  *
  * The handler receives persisted-queue metadata as its second argument. The
  * `maxAttempts` option is passed through to the underlying persisted queue.
+ * Durable terminal results are checked before handler execution and resolved
+ * with first-wins semantics afterward.
  *
  * @category Worker
  * @since 4.0.0
@@ -414,6 +456,8 @@ export const worker: <
   | R
   | Payload["EncodingServices"]
   | Payload["DecodingServices"]
+  | Success["DecodingServices"]
   | Success["EncodingServices"]
+  | Error["DecodingServices"]
   | Error["EncodingServices"]
 > = (self, f, options) => Layer.effectDiscard(Effect.forkScoped(makeWorker(self, f, options)))

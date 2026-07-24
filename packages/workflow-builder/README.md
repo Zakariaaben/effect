@@ -322,10 +322,14 @@ Today the package provides:
   reloads and verifies the artifact, operation, executable registry, route, and
   build before user code. Queue storage, worker loops, waiting, redelivery, and
   concurrency remain native Effect responsibilities. Offer and attestation
-  retry plus the native queue acquisition-failure limit are explicit. The
-  adapter rejects schedule-to-start/start-to-close until native worker-start
-  fencing exists and claims neither remote cancellation, dead-letter repair,
-  stale-worker completion fencing, nor exactly-once external effects;
+  retry plus the native queue acquisition-failure limit are explicit. Native
+  workers cooperatively interrupt on observed acquisition loss, resolve
+  terminal deferreds first-wins, and drain a redelivery whose terminal already
+  exists without rerunning its handler. The adapter still rejects
+  schedule-to-start/start-to-close until one lifecycle authority can
+  atomically fence ownership, deadline/cancellation, and terminal commit; it
+  claims neither remote cancellation, dead-letter repair, cross-store
+  stale-result fencing, nor exactly-once external effects;
 - authenticated ordered `FirstSettled` and `FirstSuccess` semantic races over
   exact node activities, durable timers, and pinned deferred generations.
   Race membership and result contracts are derived rather than caller-supplied;

@@ -23,6 +23,41 @@ PersistedQueueTest.suite(
 )
 
 it.layer(PgContainer.layerClient, { timeout: "30 seconds" })("PersistedQueue SQL locks", (it) => {
+  it.effect("migrates the legacy global id index without dropping queue rows", () =>
+    Effect.gen(function*() {
+      const tableName = "effect_queue_legacy_id_index"
+      const options = { tableName, pollInterval: "10 millis" } as const
+      const sql = (yield* SqlClient.SqlClient).withoutTransforms()
+      const table = sql(tableName)
+      const legacyIndex = sql(`idx_${tableName}_id`)
+
+      const legacyStore = yield* PersistedQueue.makeStoreSql(options)
+      yield* sql`CREATE UNIQUE INDEX ${legacyIndex} ON ${table} (id)`
+
+      const id = crypto.randomUUID()
+      yield* legacyStore.offer({
+        name: "legacy-index-a",
+        id,
+        element: { message: "first" },
+        isCustomId: true
+      })
+
+      const store = yield* PersistedQueue.makeStoreSql(options)
+      yield* store.offer({
+        name: "legacy-index-b",
+        id,
+        element: { message: "second" },
+        isCustomId: true
+      })
+
+      const rows = yield* sql<{ readonly queue_name: string }>`
+        SELECT queue_name FROM ${table}
+        WHERE id = ${id}
+        ORDER BY queue_name
+      `
+      assert.deepStrictEqual(rows.map((row) => row.queue_name), ["legacy-index-a", "legacy-index-b"])
+    }).pipe(TestClock.withLive))
+
   it.effect("refreshes locks for acquired elements", () =>
     Effect.gen(function*() {
       const options = {
@@ -123,6 +158,83 @@ it.layer(PgContainer.layerClient, { timeout: "30 seconds" })("PersistedQueue SQL
       }>`SELECT completed, acquired_by FROM ${table} WHERE id = ${id}`
       assert.isTrue(afterSecondCompletes[0].completed)
       assert.isNull(afterSecondCompletes[0].acquired_by)
+    }).pipe(TestClock.withLive))
+
+  it.effect("signals confirmed acquisition ownership loss", () =>
+    Effect.gen(function*() {
+      const tableName = "effect_queue_ownership_loss"
+      const queueName = "ownership-loss"
+      const store = yield* PersistedQueue.makeStoreSql({
+        tableName,
+        pollInterval: "10 millis",
+        lockRefreshInterval: "20 millis",
+        lockExpiration: "1 second"
+      })
+      const sql = (yield* SqlClient.SqlClient).withoutTransforms()
+      const table = sql(tableName)
+      const id = crypto.randomUUID()
+
+      yield* store.offer({
+        name: queueName,
+        id,
+        element: { message: "hello" },
+        isCustomId: false
+      })
+
+      const acquired = Latch.makeUnsafe()
+      const lost = Latch.makeUnsafe()
+      const release = Latch.makeUnsafe()
+      const worker = yield* Effect.scoped(Effect.gen(function*() {
+        const item = yield* store.take({ name: queueName, maxAttempts: 10 })
+        yield* item.acquisition.ownershipLost.pipe(
+          Effect.andThen(Effect.gen(function*() {
+            assert.isTrue(yield* item.acquisition.isOwnershipLost)
+            yield* lost.open
+          })),
+          Effect.forkScoped
+        )
+        yield* acquired.open
+        yield* release.await
+      })).pipe(Effect.forkScoped)
+
+      yield* acquired.await
+      yield* sql`
+        UPDATE ${table}
+        SET acquired_by = ${crypto.randomUUID()}
+        WHERE id = ${id}
+      `
+      yield* lost.await
+
+      yield* release.open
+      yield* Fiber.join(worker)
+    }).pipe(TestClock.withLive))
+
+  it.effect("fails closed after the unconfirmed ownership horizon", () =>
+    Effect.gen(function*() {
+      const store = yield* PersistedQueue.makeStoreSql({
+        tableName: "effect_queue_ownership_horizon",
+        pollInterval: "10 millis",
+        lockRefreshInterval: "1 hour",
+        lockExpiration: "100 millis"
+      })
+      const queueName = "ownership-horizon"
+
+      yield* store.offer({
+        name: queueName,
+        id: crypto.randomUUID(),
+        element: { message: "hello" },
+        isCustomId: false
+      })
+
+      const worker = yield* Effect.scoped(Effect.gen(function*() {
+        const item = yield* store.take({ name: queueName, maxAttempts: 10 })
+        assert.isFalse(yield* item.acquisition.isOwnershipLost)
+        yield* item.acquisition.ownershipLost
+        assert.isTrue(yield* item.acquisition.isOwnershipLost)
+        return yield* Effect.interrupt
+      })).pipe(Effect.forkScoped)
+
+      yield* Fiber.await(worker)
     }).pipe(TestClock.withLive))
 
   it.effect("counts malformed JSON as an attempt and continues", () =>

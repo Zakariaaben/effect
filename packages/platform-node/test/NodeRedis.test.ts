@@ -67,15 +67,35 @@ it.layer(PersistedQueueRedisLayer, { timeout: "30 seconds" })(
         const error = yield* queue.take(() => Effect.fail("boom"), { maxAttempts: 1 }).pipe(Effect.flip)
         assert.strictEqual(error, "boom")
 
-        const failed = yield* redis.use((client) => client.lrange(`effectq:${queueName}:failed`, 0, -1))
+        const keys = redisQueueKeys("effectq:", queueName)
+        const failed = yield* redis.use((client) => client.lrange(keys.failed, 0, -1))
         assert.strictEqual(failed.length, 1)
         const failedItem = JSON.parse(failed[0])
         assert.strictEqual(failedItem.id, id)
         assert.deepStrictEqual(failedItem.element, { n: 42 })
         assert.strictEqual(failedItem.attempts, 1)
 
-        const pending = yield* redis.use((client) => client.hlen(`effectq:${queueName}:pending`))
+        const pending = yield* redis.use((client) => client.hlen(keys.pending))
         assert.strictEqual(pending, 0)
+      }))
+
+    it.effect("isolates public queue names from internal Redis key families", () =>
+      Effect.gen(function*() {
+        const baseName = "test-redis-key-family"
+        const queue = yield* PersistedQueue.make({
+          name: baseName,
+          schema: RedisItem
+        })
+        const suffixQueue = yield* PersistedQueue.make({
+          name: `${baseName}:pending`,
+          schema: RedisItem
+        })
+
+        yield* queue.offer({ n: 1 })
+        yield* suffixQueue.offer({ n: 2 })
+
+        assert.strictEqual((yield* queue.take(Effect.succeed)).n, 1)
+        assert.strictEqual((yield* suffixQueue.take(Effect.succeed)).n, 2)
       }))
 
     it.effect("fences stale completion, requeue, and failed-item finalizers", () =>
@@ -93,12 +113,13 @@ it.layer(PersistedQueueRedisLayer, { timeout: "30 seconds" })(
           ["complete", "requeue", "failed"] as const,
           Effect.fnUntraced(function*(mode) {
             const queueName = `same-store-${mode}`
-            const queueKey = `${prefix}${queueName}`
-            const pendingKey = `${queueKey}:pending`
-            const failedKey = `${queueKey}:failed`
+            const keys = redisQueueKeys(prefix, queueName)
+            const queueKey = keys.ready
+            const pendingKey = keys.pending
+            const failedKey = keys.failed
             const maxAttempts = mode === "failed" ? 1 : 10
             const id = crypto.randomUUID()
-            const lockKey = `${prefix}${id}:lock`
+            const lockKey = keys.lock(id)
 
             yield* store.offer({
               name: queueName,
@@ -153,9 +174,92 @@ it.layer(PersistedQueueRedisLayer, { timeout: "30 seconds" })(
           { discard: true }
         )
       }).pipe(TestClock.withLive))
+
+    it.effect("signals confirmed acquisition ownership loss", () =>
+      Effect.gen(function*() {
+        const redis = yield* NodeRedis.NodeRedis
+        const prefix = "effectq-ownership-loss:"
+        const queueName = "ownership-loss"
+        const id = crypto.randomUUID()
+        const lockKey = redisQueueKeys(prefix, queueName).lock(id)
+        const store = yield* PersistedQueue.makeStoreRedis({
+          prefix,
+          pollInterval: "10 millis",
+          lockRefreshInterval: "20 millis",
+          lockExpiration: "1 second"
+        })
+
+        yield* store.offer({
+          name: queueName,
+          id,
+          element: { n: 42 },
+          isCustomId: false
+        })
+
+        const acquired = Latch.makeUnsafe()
+        const lost = Latch.makeUnsafe()
+        const release = Latch.makeUnsafe()
+        const worker = yield* Effect.scoped(Effect.gen(function*() {
+          const item = yield* store.take({ name: queueName, maxAttempts: 10 })
+          yield* item.acquisition.ownershipLost.pipe(
+            Effect.andThen(Effect.gen(function*() {
+              assert.isTrue(yield* item.acquisition.isOwnershipLost)
+              yield* lost.open
+            })),
+            Effect.forkScoped
+          )
+          yield* acquired.open
+          yield* release.await
+        })).pipe(Effect.forkScoped)
+
+        yield* acquired.await
+        yield* redis.use((client) => client.set(lockKey, "replacement-acquisition"))
+        yield* lost.await
+
+        yield* release.open
+        yield* Fiber.join(worker)
+      }).pipe(TestClock.withLive))
+
+    it.effect("fails closed after the unconfirmed ownership horizon", () =>
+      Effect.gen(function*() {
+        const store = yield* PersistedQueue.makeStoreRedis({
+          prefix: "effectq-ownership-horizon:",
+          pollInterval: "10 millis",
+          lockRefreshInterval: "1 hour",
+          lockExpiration: "100 millis"
+        })
+        const queueName = "ownership-horizon"
+
+        yield* store.offer({
+          name: queueName,
+          id: crypto.randomUUID(),
+          element: { n: 42 },
+          isCustomId: false
+        })
+
+        const worker = yield* Effect.scoped(Effect.gen(function*() {
+          const item = yield* store.take({ name: queueName, maxAttempts: 10 })
+          assert.isFalse(yield* item.acquisition.isOwnershipLost)
+          yield* item.acquisition.ownershipLost
+          assert.isTrue(yield* item.acquisition.isOwnershipLost)
+          return yield* Effect.interrupt
+        })).pipe(Effect.forkScoped)
+
+        yield* Fiber.await(worker)
+      }).pipe(TestClock.withLive))
   }
 )
 
 const RedisItem = Schema.Struct({
   n: Schema.Number
 })
+
+const redisQueueKeys = (prefix: string, name: string) => {
+  const base = `${prefix}v2:queue:${name.length}:${name}:`
+  return {
+    ready: `${base}ready`,
+    pending: `${base}pending`,
+    failed: `${base}failed`,
+    lock: (id: string) => `${base}lock:${id}`
+  } as const
+}

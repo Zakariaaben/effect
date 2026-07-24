@@ -271,12 +271,16 @@ outcomes into its deferred result. Queue names use a complete
 domain-separated route digest, remain below the native SQL name bound, and are
 versioned so schema changes do not silently reinterpret old items.
 
-The current native callback does not expose an acquisition capability,
-ownership-loss notification, item cancellation, or portable dead-letter/admin
-API. Consequently this first adapter:
+The forked native callback now exposes a scope-bound acquisition-loss
+capability. `DurableQueue` races it outside the captured handler `Exit`, uses
+first-wins deferred resolution, and drains redelivery without rebuilding the
+handler when the terminal is already present. It still does not expose
+conditional cross-store result settlement, item cancellation, or a portable
+dead-letter/admin API. Consequently this adapter:
 
 - rejects schedule-to-start and start-to-close policies instead of equating
-  enqueue or callback entry with a fenced worker start;
+  enqueue, callback entry, or a cooperative acquisition signal with an
+  authority-fenced worker start and terminal commit;
 - claims at-least-once delivery only, requiring idempotent or independently
   fenced external effects;
 - does not claim stale-worker completion fencing, remote cancellation,
@@ -286,10 +290,53 @@ API. Consequently this first adapter:
   authorities separate rather than importing their state model into protocol
   version `3`.
 
-Those gaps should be closed by narrow improvements to native Effect queue
-capabilities—opaque acquisition/settlement fencing, canonical result receipts,
-explicit dead-letter/admin controls, and consistent interruption semantics—not
-by recreating a competing queue backend in Workflow Builder.
+Those gaps should be closed by narrow native or injected generic
+capabilities—conditional settlement fencing, canonical timestamped result
+receipts, explicit cancellation/dead-letter/admin controls, and one authority
+for lifecycle races—not by recreating a competing queue backend in Workflow
+Builder.
+
+#### Distributed attempt lifecycle placement
+
+A queue acquisition signal and a semantic completion fence are deliberately
+different capabilities. Native `PersistedQueue` may expose a scope-bound,
+opaque acquisition whose ownership-loss signal allows a worker to stop
+cooperatively. Native `DurableQueue` may use that signal to avoid publishing an
+interrupted handler exit and may drain a redelivery when the workflow result is
+already present. Those improvements strengthen at-least-once delivery, but
+they cannot make a queue acknowledgement and a workflow result in another
+store one transaction.
+
+Managed schedule-to-start, start-to-close, cancellation, and stale-result
+suppression therefore require one `AttemptLifecycleAuthorityV3`-shaped
+authority. Its start and terminal transitions must atomically order:
+
+- the exact semantic attempt and current operational ownership generation;
+- cancellation and the applicable absolute deadline, with `now >= deadline`
+  selecting timeout;
+- the canonical first `AttemptStarted` receipt, whose timestamp is not reset by
+  redelivery;
+- a full non-pure-interrupt terminal `Exit`, including defects as well as
+  encoded handler results; and
+- an authority-timestamped, exact-retry-safe terminal receipt, with stale,
+  suppressed, replayed, and conflicting submissions distinguished.
+
+This is a generic execution-lifecycle contract, not a queue implementation and
+not BPMN vocabulary. Retry remains the owner of timer policy, timeout meaning,
+business-failure classification, and terminal validation. A transport owns
+delivery and cooperative physical interruption. The lifecycle authority owns
+the linearization point. Application handlers still need stable idempotency or
+an independently fenced application transaction for external effects.
+
+The protocol-v1/v2 `ActivityDeliveryStore` is reference evidence, not a V3
+backend: it currently combines outbox relay, worker leases, and V1 history
+append. Its generation fencing, same-result replay/conflict, lease-steal,
+complete-versus-cancel, and cancel-before-register laws should move into V3
+conformance suites. Its storage and event model must not be imported wholesale.
+Until either native Effect exposes an integrated equivalent or an application
+provides a conforming lifecycle authority backed by one transactional store,
+the native `DurableQueue` executor continues to reject
+schedule-to-start/start-to-close.
 
 ### `OperationalInstanceWithdrawal/1`
 
@@ -416,7 +463,7 @@ machine failure.
 | `SemanticOperationV3.ts`          | Content-addressed operations with closed node-handler/classifier/jitter/time-observation activity purposes, coherent exact artifact-codec/node-output-aggregate/versioned-built-in result contracts, typed-owner timer generations, separately success/error-schema-and-codec-pinned deferred generations, and derived ordered race membership; exact occurrence provenance, persisted nested verification, and native-coordinate projection make drift detectable before side effects.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `SemanticExecutableRegistryV3.ts` | Immutable Effect service that atomically resolves every build-pinned node handler, codec/schema, and retry classifier required by one exact `VerifiedArtifact`; executable constructors and resolved activity/deferred/race views retain process provenance and captured contexts, dynamically derive exact race result schemas, and admit neither persistence, caching, nor fallback lookup.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `EffectWorkflowSemanticV3.ts`     | Authenticated one-shot static-DAG occurrence admission plus semantic-to-native mapping: descriptor and generic execution-backend guard activities; transport-neutral encoded handler results; host-side codec, failure-identity, and coordinate revalidation; semantic attempts through native `Activity.CurrentAttempt`; explicitly selected infrastructure interruption policy; positive timers through forced-durable native `DurableClock`; authenticated deferred completion; and identified `FirstSettled`/`FirstSuccess` races without a second backend.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `EffectWorkflowDurableQueueV3.ts` | Optional protocol-v3 native distributed-worker transport: content-addressed queue/deployment/build routes, strict independently inspectable work items, artifact/operation/executable re-attestation on every delivery, transport-neutral encoded handler results, host-owned completion timestamps, explicit offer and attestation retry, an explicit native acquisition-failure limit, and native `DurableQueue` worker Layers. It owns no store, lease, scheduler, worker loop, or failover engine. It rejects schedule-to-start/start-to-close until native acquisition fencing exists and claims neither remote cancellation nor exactly-once external effects.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `EffectWorkflowDurableQueueV3.ts` | Optional protocol-v3 native distributed-worker transport: content-addressed queue/deployment/build routes, strict independently inspectable work items, artifact/operation/executable re-attestation on every delivery, transport-neutral encoded handler results, host-owned completion timestamps, explicit offer and attestation retry, an explicit native acquisition-failure limit, and native `DurableQueue` worker Layers. It owns no store, lease, scheduler, worker loop, or failover engine. Native workers cooperatively stop after observed ownership loss and use first-wins terminal replay, but the adapter rejects schedule-to-start/start-to-close until one authority can atomically fence ownership, deadlines/cancellation, and terminal commit. It claims neither remote cancellation nor exactly-once external effects.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `EffectWorkflowRetryV3.ts`        | Descriptor-safe managed retry over the native semantic mapper: exact node-attempt activities persist closed success, application-failure, or attempt-timeout outcomes; handler typed failures are classified once, explicit non-retryable identities precede the captured classifier, and bounded attempts/elapsed time, replay-recorded jitter, and durable-clock backoff produce closed terminal explanations. One content-addressed schedule-to-close controller acknowledges a stable injected-engine clock before observation or execution. Schedule-to-start persists a canonical arm before scheduling or dispatch; start-to-close pins its deadline in `Started`. Exact first-wins gates select arm, start, and terminal facts. The native Activity `Completed` receipt persists the complete Exit and authoritative completion time, so start-to-close arbitration covers success, typed error, and defect; version `2` outcome timestamps are cross-checked. Pre-deadline defects preserve non-interrupt Cause semantics. Defect object identity is not preserved. Outer schedule-to-close defect ordering remains open. Loser shutdown is not joined, schedules are not cancelled, and timeout claims no external rollback. The injected engine remains the integrity boundary; no crash or multi-worker proof is claimed.                                                                       |
 | `EffectWorkflowBpmnV3.ts`         | Trusted native-Effect-to-BPMN Task bridge. It validates an accessor-safe target, exact compiled-kernel authority, immutable task binding, and opaque retry-invocation artifact/node pins before dispatch; executes the retry composition once; and returns a strict portable `resolveTask` command together with the raw outcome for data mapping and observability. Only `NonRetryable`/`Exhausted` application-failure terminals become `BusinessFailed`; schedule-to-start/start-to-close `AttemptTimedOut`, schedule-to-close timeout, defects, interruption, and adapter failures remain typed operational failures outside BPMN Error routing. Command application is deliberately left to a serialized or compare-and-swap durable coordinator. The XML executable facade accepts immutable task bindings only as explicit external `CompileXmlOptions`; BPMN XML does not define or infer them.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `IdentityV3.ts`                   | Collision-free tuple-framed child call, run, start, schedule, projection, cancellation, abandon, and start-failure identities for protocol version `3`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
