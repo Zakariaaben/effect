@@ -195,6 +195,67 @@ const multiInstanceXml = (
   </mi:process>
 </mi:definitions>`
 
+const catchEventOptions: BpmnXml.ImportOptions = {
+  importId: "catch-event-choice",
+  expressionLanguageBindings: [{
+    language: "urn:expression:wait",
+    version: "1.0.0"
+  }]
+}
+
+const catchEventXml = (
+  prefixes: {
+    readonly model: string
+    readonly xsi: string
+    readonly target: string
+  } = {
+    model: "wait",
+    xsi: "types",
+    target: "domain"
+  },
+  timerElement: "timeDate" | "timeDuration" = "timeDuration",
+  timerSource: string = "PT5M"
+): string =>
+  `<${prefixes.model}:definitions
+  xmlns:${prefixes.model}="${modelNamespace}"
+  xmlns:${prefixes.xsi}="${xsiNamespace}"
+  xmlns:${prefixes.target}="urn:workflow:wait"
+  targetNamespace="urn:workflow:wait"
+  expressionLanguage="urn:expression:wait">
+  <${prefixes.model}:message id="payment_message" name="Payment received"/>
+  <${prefixes.model}:process id="wait_process">
+    <${prefixes.model}:startEvent id="start">
+      <${prefixes.model}:outgoing>${prefixes.target}:to_choice</${prefixes.model}:outgoing>
+    </${prefixes.model}:startEvent>
+    <${prefixes.model}:eventBasedGateway id="choice">
+      <${prefixes.model}:incoming>${prefixes.target}:to_choice</${prefixes.model}:incoming>
+      <${prefixes.model}:outgoing>${prefixes.target}:to_message</${prefixes.model}:outgoing>
+      <${prefixes.model}:outgoing>${prefixes.target}:to_timer</${prefixes.model}:outgoing>
+    </${prefixes.model}:eventBasedGateway>
+    <${prefixes.model}:intermediateCatchEvent id="catch_message">
+      <${prefixes.model}:incoming>${prefixes.target}:to_message</${prefixes.model}:incoming>
+      <${prefixes.model}:outgoing>${prefixes.target}:message_done</${prefixes.model}:outgoing>
+      <${prefixes.model}:messageEventDefinition messageRef="${prefixes.target}:payment_message"/>
+    </${prefixes.model}:intermediateCatchEvent>
+    <${prefixes.model}:intermediateCatchEvent id="catch_timer">
+      <${prefixes.model}:incoming>${prefixes.target}:to_timer</${prefixes.model}:incoming>
+      <${prefixes.model}:outgoing>${prefixes.target}:timer_done</${prefixes.model}:outgoing>
+      <${prefixes.model}:timerEventDefinition>
+        <${prefixes.model}:${timerElement} ${prefixes.xsi}:type="${prefixes.model}:tFormalExpression">${timerSource}</${prefixes.model}:${timerElement}>
+      </${prefixes.model}:timerEventDefinition>
+    </${prefixes.model}:intermediateCatchEvent>
+    <${prefixes.model}:endEvent id="end">
+      <${prefixes.model}:incoming>${prefixes.target}:message_done</${prefixes.model}:incoming>
+      <${prefixes.model}:incoming>${prefixes.target}:timer_done</${prefixes.model}:incoming>
+    </${prefixes.model}:endEvent>
+    <${prefixes.model}:sequenceFlow id="to_choice" sourceRef="start" targetRef="choice"/>
+    <${prefixes.model}:sequenceFlow id="to_message" sourceRef="choice" targetRef="catch_message"/>
+    <${prefixes.model}:sequenceFlow id="to_timer" sourceRef="choice" targetRef="catch_timer"/>
+    <${prefixes.model}:sequenceFlow id="message_done" sourceRef="catch_message" targetRef="end"/>
+    <${prefixes.model}:sequenceFlow id="timer_done" sourceRef="catch_timer" targetRef="end"/>
+  </${prefixes.model}:process>
+</${prefixes.model}:definitions>`
+
 describe("BpmnXml", () => {
   it("imports the complete named semantic and DI slice independent of prefix spelling", () => {
     const first = success(BpmnXml.importXml(xml(), options))
@@ -258,6 +319,455 @@ describe("BpmnXml", () => {
     )
   })
 
+  it("round-trips the strict message/timer catch-event choice slice in XSD order", () => {
+    const imported = success(BpmnXml.importXml(catchEventXml(), catchEventOptions))
+    const alternatePrefixes = success(BpmnXml.importXml(
+      catchEventXml({ model: "semantic", xsi: "instance", target: "target" }),
+      catchEventOptions
+    ))
+    const messageElement = `<wait:message id="payment_message" name="Payment received"/>`
+    const processBeforeMessage = success(BpmnXml.importXml(
+      catchEventXml()
+        .replace(`  ${messageElement}\n`, "")
+        .replace(`  </wait:process>`, `  </wait:process>\n  ${messageElement}`),
+      catchEventOptions
+    ))
+
+    assert.strictEqual(imported.profileId, "bpmn-2.0.2-core-process-di-v6")
+    assert.deepStrictEqual(imported.model, alternatePrefixes.model)
+    assert.deepStrictEqual(imported.model, processBeforeMessage.model)
+    assert.deepStrictEqual(imported.model.messages, [{
+      id: "payment_message",
+      name: "Payment received"
+    }])
+
+    const gateway = imported.model.flowNodes.find((node) => node.id === "choice")
+    assert.deepStrictEqual(
+      gateway?._tag === "Gateway"
+        ? {
+          gatewayKind: gateway.gatewayKind,
+          gatewayDirection: gateway.gatewayDirection,
+          instantiate: gateway.instantiate,
+          eventGatewayType: gateway.eventGatewayType
+        }
+        : undefined,
+      {
+        gatewayKind: "event-based",
+        gatewayDirection: "unspecified",
+        instantiate: false,
+        eventGatewayType: "exclusive"
+      }
+    )
+
+    const messageCatch = imported.model.flowNodes.find((node) => node.id === "catch_message")
+    const timerCatch = imported.model.flowNodes.find((node) => node.id === "catch_timer")
+    assert.deepStrictEqual(
+      messageCatch?._tag === "IntermediateCatchEvent"
+        ? {
+          eventDefinitions: messageCatch.eventDefinitions,
+          eventDefinitionRefs: messageCatch.eventDefinitionRefs,
+          parallelMultiple: messageCatch.parallelMultiple
+        }
+        : undefined,
+      {
+        eventDefinitions: [{
+          _tag: "MessageEventDefinition",
+          messageRef: "payment_message"
+        }],
+        eventDefinitionRefs: [],
+        parallelMultiple: false
+      }
+    )
+    assert.deepStrictEqual(
+      timerCatch?._tag === "IntermediateCatchEvent"
+        ? timerCatch.eventDefinitions
+        : undefined,
+      [{
+        _tag: "TimerEventDefinition",
+        timeDuration: {
+          language: "urn:expression:wait",
+          version: "1.0.0",
+          source: "PT5M"
+        }
+      }]
+    )
+    for (
+      const code of [
+        "GatewayDirectionDefault",
+        "EventBasedGatewayInstantiateDefault",
+        "EventGatewayTypeDefault",
+        "CatchEventParallelMultipleDefault"
+      ]
+    ) {
+      assert.isTrue(
+        imported.mappingReport.defaultsApplied.some((entry) => entry.code === code)
+      )
+    }
+
+    const serialized = success(BpmnXml.exportXml(imported, { format: "compact" }))
+    assert.include(serialized, `<bpmn:message id="payment_message" name="Payment received"/>`)
+    assert.include(
+      serialized,
+      `<bpmn:eventBasedGateway id="choice" gatewayDirection="Unspecified" instantiate="false" eventGatewayType="Exclusive">`
+    )
+    assert.include(
+      serialized,
+      `<bpmn:intermediateCatchEvent id="catch_message" parallelMultiple="false">`
+    )
+    assert.include(
+      serialized,
+      `<bpmn:messageEventDefinition messageRef="tns:payment_message"/>`
+    )
+    assert.include(
+      serialized,
+      `<bpmn:timeDuration xsi:type="bpmn:tFormalExpression">PT5M</bpmn:timeDuration>`
+    )
+    assert.isBelow(
+      serialized.indexOf(`<bpmn:message id="payment_message"`),
+      serialized.indexOf(`<bpmn:process id="wait_process"`)
+    )
+    assert.isBelow(
+      serialized.indexOf(`<bpmn:outgoing>tns:message_done</bpmn:outgoing>`),
+      serialized.indexOf(`<bpmn:messageEventDefinition`)
+    )
+
+    const reimported = success(BpmnXml.importXml(serialized, catchEventOptions))
+    assert.deepStrictEqual(reimported.model, imported.model)
+    assert.strictEqual(
+      success(BpmnXml.exportXml(reimported, { format: "compact" })),
+      serialized
+    )
+    const pretty = success(BpmnXml.exportXml(imported, { format: "pretty" }))
+    const prettyRoundTrip = success(BpmnXml.importXml(pretty, catchEventOptions))
+    assert.deepStrictEqual(prettyRoundTrip.model, imported.model)
+    assert.strictEqual(
+      success(BpmnXml.exportXml(prettyRoundTrip, { format: "pretty" })),
+      pretty
+    )
+  })
+
+  it("imports timeDate as an exactly version-bound tFormalExpression", () => {
+    const imported = success(BpmnXml.importXml(
+      catchEventXml(undefined, "timeDate", "2030-01-02T03:04:05Z"),
+      catchEventOptions
+    ))
+    const timerCatch = imported.model.flowNodes.find((node) => node.id === "catch_timer")
+
+    assert.deepStrictEqual(
+      timerCatch?._tag === "IntermediateCatchEvent"
+        ? timerCatch.eventDefinitions
+        : undefined,
+      [{
+        _tag: "TimerEventDefinition",
+        timeDate: {
+          language: "urn:expression:wait",
+          version: "1.0.0",
+          source: "2030-01-02T03:04:05Z"
+        }
+      }]
+    )
+    const serialized = success(BpmnXml.exportXml(imported, { format: "compact" }))
+    assert.include(
+      serialized,
+      `<bpmn:timeDate xsi:type="bpmn:tFormalExpression">2030-01-02T03:04:05Z</bpmn:timeDate>`
+    )
+    assert.deepStrictEqual(
+      success(BpmnXml.importXml(serialized, catchEventOptions)).model,
+      imported.model
+    )
+    assert.include(
+      failureCodes(BpmnXml.importXml(
+        catchEventXml(undefined, "timeDate", "2030-01-02T03:04:05Z"),
+        {
+          ...catchEventOptions,
+          expressionLanguageBindings: []
+        }
+      )),
+      BpmnXml.Codes.MissingExpressionBinding
+    )
+  })
+
+  it("fails closed for unsupported catch triggers, multiplicity, references, and event-gateway modes", () => {
+    const valid = catchEventXml()
+    const messageDefinition = `<wait:messageEventDefinition messageRef="domain:payment_message"/>`
+    const timerExpression = `<wait:timeDuration types:type="wait:tFormalExpression">PT5M</wait:timeDuration>`
+    const cases: ReadonlyArray<readonly [string, string]> = [
+      [
+        valid.replace(` messageRef="domain:payment_message"`, ""),
+        BpmnXml.Codes.InvalidStructure
+      ],
+      [
+        valid.replace(`domain:payment_message"/>`, `domain:missing_message"/>`),
+        BpmnModel.Codes.UnknownMessageRef
+      ],
+      [
+        valid.replace(`domain:payment_message"/>`, `missing:payment_message"/>`),
+        BpmnXml.Codes.UnknownPrefix
+      ],
+      [
+        valid
+          .replace(
+            `xmlns:domain="urn:workflow:wait"`,
+            `xmlns:domain="urn:workflow:wait" xmlns:foreign="urn:foreign"`
+          )
+          .replace(`domain:payment_message"/>`, `foreign:payment_message"/>`),
+        BpmnXml.Codes.InvalidReference
+      ],
+      [
+        valid.replace(
+          `<wait:message id="payment_message"`,
+          `<wait:message id="payment_message" itemRef="domain:item"`
+        ),
+        BpmnXml.Codes.UnsupportedModel
+      ],
+      [
+        valid.replace(
+          messageDefinition,
+          `<wait:messageEventDefinition id="inline" messageRef="domain:payment_message"/>`
+        ),
+        BpmnXml.Codes.UnsupportedAttribute
+      ],
+      [
+        valid.replace(
+          messageDefinition,
+          `<wait:messageEventDefinition messageRef="domain:payment_message" operationRef="domain:operation"/>`
+        ),
+        BpmnXml.Codes.UnsupportedAttribute
+      ],
+      [
+        valid.replace(
+          messageDefinition,
+          `<wait:messageEventDefinition messageRef="domain:payment_message"><wait:operationRef>domain:operation</wait:operationRef></wait:messageEventDefinition>`
+        ),
+        BpmnXml.Codes.UnsupportedElement
+      ],
+      [
+        valid.replace(messageDefinition, `<wait:signalEventDefinition signalRef="domain:signal"/>`),
+        BpmnXml.Codes.UnsupportedElement
+      ],
+      [
+        valid.replace(
+          messageDefinition,
+          `<wait:conditionalEventDefinition><wait:condition/></wait:conditionalEventDefinition>`
+        ),
+        BpmnXml.Codes.UnsupportedElement
+      ],
+      [
+        valid.replace(messageDefinition, `${messageDefinition}${messageDefinition}`),
+        BpmnXml.Codes.InvalidStructure
+      ],
+      [
+        valid.replace(messageDefinition, `<wait:eventDefinitionRef>domain:definition</wait:eventDefinitionRef>`),
+        BpmnXml.Codes.UnsupportedElement
+      ],
+      [
+        valid.replace(`id="catch_message">`, `id="catch_message" parallelMultiple="true">`),
+        BpmnXml.Codes.UnsupportedModel
+      ],
+      [
+        valid.replace(`types:type="wait:tFormalExpression"`, `id="inline" types:type="wait:tFormalExpression"`),
+        BpmnXml.Codes.UnsupportedAttribute
+      ],
+      [
+        valid.replace(` types:type="wait:tFormalExpression"`, ""),
+        BpmnXml.Codes.InvalidStructure
+      ],
+      [
+        valid.replace(`types:type="wait:tFormalExpression"`, `types:type="wait:tExpression"`),
+        BpmnXml.Codes.InvalidStructure
+      ],
+      [
+        valid.replace(
+          `<wait:timerEventDefinition>`,
+          `<wait:timerEventDefinition id="inline">`
+        ),
+        BpmnXml.Codes.UnsupportedAttribute
+      ],
+      [
+        valid.replaceAll("timeDuration", "timeCycle"),
+        BpmnXml.Codes.UnsupportedElement
+      ],
+      [
+        valid.replace(
+          timerExpression,
+          `${timerExpression}<wait:timeDate types:type="wait:tFormalExpression">2030-01-02T03:04:05Z</wait:timeDate>`
+        ),
+        BpmnXml.Codes.InvalidStructure
+      ],
+      [
+        valid.replace(timerExpression, ""),
+        BpmnXml.Codes.InvalidStructure
+      ],
+      [
+        valid.replace(`id="choice">`, `id="choice" instantiate="true">`),
+        BpmnXml.Codes.UnsupportedModel
+      ],
+      [
+        valid.replace(`id="choice">`, `id="choice" eventGatewayType="Parallel">`),
+        BpmnXml.Codes.UnsupportedModel
+      ],
+      [
+        valid.replace(
+          `<wait:outgoing>domain:message_done</wait:outgoing>
+      ${messageDefinition}`,
+          `${messageDefinition}
+      <wait:outgoing>domain:message_done</wait:outgoing>`
+        ),
+        BpmnXml.Codes.InvalidStructure
+      ],
+      [
+        valid.replace(
+          `<wait:message id="payment_message" name="Payment received"/>`,
+          `<wait:signal id="payment_message" name="Payment received"/>`
+        ),
+        BpmnXml.Codes.UnsupportedElement
+      ],
+      [
+        valid.replace(`id="payment_message"`, `id="choice"`),
+        BpmnXml.Codes.DuplicateId
+      ]
+    ]
+
+    for (const [candidate, expectedCode] of cases) {
+      assert.include(
+        failureCodes(BpmnXml.importXml(candidate, catchEventOptions)),
+        expectedCode
+      )
+    }
+  })
+
+  it("rejects non-profile catch and message constructs from normalized documents before export", () => {
+    const imported = success(BpmnXml.importXml(catchEventXml(), catchEventOptions))
+    const messageCatch = imported.model.flowNodes.find((node) => node.id === "catch_message")
+    const timerCatch = imported.model.flowNodes.find((node) => node.id === "catch_timer")
+    const gateway = imported.model.flowNodes.find((node) => node.id === "choice")
+    if (
+      messageCatch?._tag !== "IntermediateCatchEvent" ||
+      timerCatch?._tag !== "IntermediateCatchEvent" ||
+      gateway?._tag !== "Gateway"
+    ) {
+      throw new Error("expected normalized catch-event choice nodes")
+    }
+    const durationDefinition = timerCatch.eventDefinitions[0]
+    if (
+      durationDefinition?._tag !== "TimerEventDefinition" ||
+      durationDefinition.timeDuration === undefined
+    ) {
+      throw new Error("expected a normalized duration definition")
+    }
+
+    const withNode = (
+      nodeId: string,
+      replacement: BpmnModel.FlowNode
+    ): unknown => ({
+      ...imported,
+      model: {
+        ...imported.model,
+        flowNodes: imported.model.flowNodes.map((node) => node.id === nodeId ? replacement : node)
+      }
+    })
+    const invalidDocuments: ReadonlyArray<unknown> = [
+      {
+        ...imported,
+        model: {
+          ...imported.model,
+          messages: [{
+            ...imported.model.messages![0]!,
+            itemRef: "unsupported_item"
+          }]
+        }
+      },
+      {
+        ...imported,
+        model: {
+          ...imported.model,
+          signals: [{ id: "unsupported_signal" }]
+        }
+      },
+      withNode(messageCatch.id, {
+        ...messageCatch,
+        eventDefinitions: [{
+          _tag: "MessageEventDefinition"
+        }]
+      }),
+      withNode(messageCatch.id, {
+        ...messageCatch,
+        eventDefinitions: [{
+          _tag: "MessageEventDefinition",
+          messageRef: "payment_message",
+          operationRef: "unsupported_operation"
+        }]
+      }),
+      withNode(messageCatch.id, {
+        ...messageCatch,
+        eventDefinitions: [
+          ...messageCatch.eventDefinitions,
+          ...messageCatch.eventDefinitions
+        ]
+      }),
+      withNode(messageCatch.id, {
+        ...messageCatch,
+        eventDefinitionRefs: ["unsupported_definition"]
+      }),
+      withNode(messageCatch.id, {
+        ...messageCatch,
+        parallelMultiple: true
+      }),
+      withNode(messageCatch.id, {
+        ...messageCatch,
+        eventDefinitions: [{
+          _tag: "SignalEventDefinition",
+          signalRef: "unsupported_signal"
+        }]
+      }),
+      withNode(timerCatch.id, {
+        ...timerCatch,
+        eventDefinitions: [{
+          _tag: "TimerEventDefinition",
+          timeCycle: durationDefinition.timeDuration
+        }]
+      }),
+      withNode(gateway.id, {
+        ...gateway,
+        instantiate: true
+      }),
+      withNode(gateway.id, {
+        ...gateway,
+        eventGatewayType: "parallel"
+      })
+    ]
+
+    for (const document of invalidDocuments) {
+      assert.include(
+        failureCodes(BpmnXml.validate(document)),
+        BpmnXml.Codes.UnsupportedModel
+      )
+      assert.include(
+        failureCodes(BpmnXml.exportXml(document)),
+        BpmnXml.Codes.UnsupportedModel
+      )
+    }
+
+    const staleTimerBinding = withNode(timerCatch.id, {
+      ...timerCatch,
+      eventDefinitions: [{
+        _tag: "TimerEventDefinition",
+        timeDuration: {
+          ...durationDefinition.timeDuration,
+          version: "stale"
+        }
+      }]
+    })
+    assert.include(
+      failureCodes(BpmnXml.validate(staleTimerBinding)),
+      BpmnXml.Codes.ExpressionVersionMismatch
+    )
+    assert.include(
+      failureCodes(BpmnXml.exportXml(staleTimerBinding)),
+      BpmnXml.Codes.ExpressionVersionMismatch
+    )
+  })
+
   it("imports exact StandardLoop semantics with alternate prefixes and the BPMN testBefore default", () => {
     const explicit = success(BpmnXml.importXml(
       standardLoopXml({ model: "workflow", xsi: "schema" }),
@@ -265,7 +775,7 @@ describe("BpmnXml", () => {
     ))
     assert.strictEqual(
       explicit.profileId,
-      "bpmn-2.0.2-core-process-di-v5"
+      "bpmn-2.0.2-core-process-di-v6"
     )
     const explicitTask = explicit.model.flowNodes[1]!
     assert.strictEqual(explicitTask._tag, "Task")

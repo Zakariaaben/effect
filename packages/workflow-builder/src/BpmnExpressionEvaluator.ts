@@ -45,6 +45,7 @@ const decodeBinding = Schema.decodeUnknownResult(
  */
 export const ExpectedResult = Schema.Literals([
   "boolean",
+  "string",
   "non-negative-integer",
   "json-array",
   "json"

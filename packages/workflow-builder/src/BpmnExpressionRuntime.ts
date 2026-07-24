@@ -30,7 +30,10 @@ const Operation = Schema.Literals([
   "initialize",
   "advance",
   "completeTask",
-  "resolveTask"
+  "resolveTask",
+  "deliverMessage",
+  "acknowledgeTimerArm",
+  "observeDueTimer"
 ])
 
 /**
@@ -91,7 +94,15 @@ const RuntimeErrorFields = Schema.Struct({
   multiInstanceNumberOfInstances: Schema.optionalKey(ProtocolV2Wire.NonNegativeSafeInt),
   multiInstanceNumberOfActiveInstances: Schema.optionalKey(ProtocolV2Wire.NonNegativeSafeInt),
   multiInstanceNumberOfCompletedInstances: Schema.optionalKey(ProtocolV2Wire.NonNegativeSafeInt),
-  multiInstanceNumberOfTerminatedInstances: Schema.optionalKey(ProtocolV2Wire.NonNegativeSafeInt)
+  multiInstanceNumberOfTerminatedInstances: Schema.optionalKey(ProtocolV2Wire.NonNegativeSafeInt),
+  catchEventNodeId: Schema.optionalKey(Schema.NonEmptyString),
+  catchWaitGroupId: Schema.optionalKey(Schema.NonEmptyString),
+  catchArmId: Schema.optionalKey(Schema.NonEmptyString),
+  catchGeneration: Schema.optionalKey(ProtocolV2Wire.PositiveSafeInt),
+  catchMessageRef: Schema.optionalKey(Schema.NonEmptyString),
+  catchTimerId: Schema.optionalKey(Schema.NonEmptyString),
+  catchTimerKind: Schema.optionalKey(Schema.Literals(["timeDuration", "timeDate"])),
+  catchTimerScheduledAt: Schema.optionalKey(ProtocolV2Wire.Timestamp)
 }).check(
   Schema.makeFilter((fields) => {
     const loopCoordinates = [
@@ -124,6 +135,24 @@ const RuntimeErrorFields = Schema.Struct({
     const multiInstanceCompletionCount = multiInstanceCompletionCoordinates.filter(
       (coordinate) => coordinate !== undefined
     ).length
+    const catchBaseCoordinates = [
+      fields.catchEventNodeId,
+      fields.catchWaitGroupId,
+      fields.catchArmId,
+      fields.catchGeneration
+    ]
+    const catchTimerCoordinates = [
+      fields.catchTimerId,
+      fields.catchTimerKind,
+      fields.catchTimerScheduledAt
+    ]
+    const catchBaseCount = catchBaseCoordinates.filter(
+      (coordinate) => coordinate !== undefined
+    ).length
+    const catchTimerCount = catchTimerCoordinates.filter(
+      (coordinate) => coordinate !== undefined
+    ).length
+    const hasCatchMessageRef = fields.catchMessageRef !== undefined
     const hasMultiInstanceDataInputRef = fields.multiInstanceDataInputRef !== undefined
     const hasSequenceFlow = fields.sequenceFlowId !== undefined
     const decisionKinds = Number(hasSequenceFlow) +
@@ -132,6 +161,11 @@ const RuntimeErrorFields = Schema.Struct({
         multiInstanceBaseCount > 0 ||
           hasMultiInstanceDataInputRef ||
           multiInstanceCompletionCount > 0
+      ) +
+      Number(
+        catchBaseCount > 0 ||
+          hasCatchMessageRef ||
+          catchTimerCount > 0
       )
     if (decisionKinds > 1) {
       return false
@@ -157,10 +191,22 @@ const RuntimeErrorFields = Schema.Struct({
           )
         )
     }
+    if (
+      catchBaseCount > 0 ||
+      hasCatchMessageRef ||
+      catchTimerCount > 0
+    ) {
+      return catchBaseCount === catchBaseCoordinates.length &&
+        (
+          hasCatchMessageRef && catchTimerCount === 0 ||
+          !hasCatchMessageRef &&
+            catchTimerCount === catchTimerCoordinates.length
+        )
+    }
     return true
   }, {
     expected:
-      "no decision coordinates, one sequenceFlowId, one complete standard-loop tuple, one complete multi-instance cardinality tuple, one complete multi-instance collection tuple, or one complete multi-instance completion tuple"
+      "no decision coordinates, one sequenceFlowId, one complete standard-loop tuple, one complete multi-instance cardinality tuple, one complete multi-instance collection tuple, one complete multi-instance completion tuple, one complete Message-correlation tuple, or one complete Timer-expression tuple"
   })
 )
 
@@ -195,7 +241,7 @@ export const Requirements = Object.freeze(
     evaluatorRegistry: "trusted-exact-registry",
     evaluatorBindingResolution: "complete-tuple",
     operationReplay: "same-input-and-time",
-    decisionIdentityVersion: 3,
+    decisionIdentityVersion: 4,
     evaluatorTimeout: "binding-timeout-millis",
     evaluatorOutput: "strict-json-result",
     commitVisibility: "final-batch-only"
@@ -257,6 +303,24 @@ type DecisionCoordinates =
     readonly numberOfCompletedInstances: number
     readonly numberOfTerminatedInstances: number
   }
+  | {
+    readonly _tag: "MessageCorrelation"
+    readonly catchEventNodeId: string
+    readonly waitGroupId: string
+    readonly armId: string
+    readonly generation: number
+    readonly messageRef: string
+  }
+  | {
+    readonly _tag: "TimerExpression"
+    readonly catchEventNodeId: string
+    readonly waitGroupId: string
+    readonly armId: string
+    readonly timerId: string
+    readonly generation: number
+    readonly timerKind: "timeDuration" | "timeDate"
+    readonly scheduledAt: ProtocolV2Wire.Timestamp
+  }
 
 interface PendingEvaluation {
   readonly context: BpmnKernel.EvaluationContext
@@ -309,7 +373,8 @@ const runtimeError = (
         multiInstanceGroupActivation: coordinates.groupActivation,
         multiInstanceDataInputRef: coordinates.dataInputRef
       }
-      : {
+      : coordinates._tag === "MultiInstanceCompletionCondition"
+      ? {
         multiInstanceActivityId: coordinates.activityId,
         multiInstanceGroupId: coordinates.groupId,
         multiInstanceGroupActivation: coordinates.groupActivation,
@@ -320,6 +385,23 @@ const runtimeError = (
         multiInstanceNumberOfActiveInstances: coordinates.numberOfActiveInstances,
         multiInstanceNumberOfCompletedInstances: coordinates.numberOfCompletedInstances,
         multiInstanceNumberOfTerminatedInstances: coordinates.numberOfTerminatedInstances
+      }
+      : coordinates._tag === "MessageCorrelation"
+      ? {
+        catchEventNodeId: coordinates.catchEventNodeId,
+        catchWaitGroupId: coordinates.waitGroupId,
+        catchArmId: coordinates.armId,
+        catchGeneration: coordinates.generation,
+        catchMessageRef: coordinates.messageRef
+      }
+      : {
+        catchEventNodeId: coordinates.catchEventNodeId,
+        catchWaitGroupId: coordinates.waitGroupId,
+        catchArmId: coordinates.armId,
+        catchGeneration: coordinates.generation,
+        catchTimerId: coordinates.timerId,
+        catchTimerKind: coordinates.timerKind,
+        catchTimerScheduledAt: coordinates.scheduledAt
       })
   })
 
@@ -371,6 +453,26 @@ const decisionCoordinates = (
         numberOfCompletedInstances: context.runtime.numberOfCompletedInstances,
         numberOfTerminatedInstances: context.runtime.numberOfTerminatedInstances
       }
+    case "MessageCorrelation":
+      return {
+        _tag: context._tag,
+        catchEventNodeId: context.catchEvent.id,
+        waitGroupId: context.waitGroupId,
+        armId: context.armId,
+        generation: context.generation,
+        messageRef: context.binding.messageRef
+      }
+    case "TimerExpression":
+      return {
+        _tag: context._tag,
+        catchEventNodeId: context.catchEvent.id,
+        waitGroupId: context.waitGroupId,
+        armId: context.armId,
+        timerId: context.timerId,
+        generation: context.generation,
+        timerKind: context.timerKind,
+        scheduledAt: context.scheduledAt
+      }
   }
 }
 
@@ -400,7 +502,8 @@ const evaluationFailure = (
       multiInstanceGroupActivation: coordinates.groupActivation,
       multiInstanceDataInputRef: coordinates.dataInputRef
     }
-    : {
+    : coordinates._tag === "MultiInstanceCompletionCondition"
+    ? {
       multiInstanceActivityId: coordinates.activityId,
       multiInstanceGroupId: coordinates.groupId,
       multiInstanceGroupActivation: coordinates.groupActivation,
@@ -412,6 +515,23 @@ const evaluationFailure = (
       multiInstanceNumberOfCompletedInstances: coordinates.numberOfCompletedInstances,
       multiInstanceNumberOfTerminatedInstances: coordinates.numberOfTerminatedInstances
     }
+    : coordinates._tag === "MessageCorrelation"
+    ? {
+      catchEventNodeId: coordinates.catchEventNodeId,
+      catchWaitGroupId: coordinates.waitGroupId,
+      catchArmId: coordinates.armId,
+      catchGeneration: coordinates.generation,
+      catchMessageRef: coordinates.messageRef
+    }
+    : {
+      catchEventNodeId: coordinates.catchEventNodeId,
+      catchWaitGroupId: coordinates.waitGroupId,
+      catchArmId: coordinates.armId,
+      catchGeneration: coordinates.generation,
+      catchTimerId: coordinates.timerId,
+      catchTimerKind: coordinates.timerKind,
+      catchTimerScheduledAt: coordinates.scheduledAt
+    }
   const message = coordinates._tag === "SequenceFlowCondition"
     ? `Effectful evaluation is required for sequence flow '${coordinates.sequenceFlowId}'`
     : coordinates._tag === "StandardLoopCondition"
@@ -420,7 +540,11 @@ const evaluationFailure = (
     ? `Effectful evaluation is required for multi-instance cardinality on activity '${coordinates.activityId}'`
     : coordinates._tag === "MultiInstanceCollection"
     ? `Effectful evaluation is required for multi-instance collection on activity '${coordinates.activityId}'`
-    : `Effectful evaluation is required for multi-instance completion condition on activity '${coordinates.activityId}'`
+    : coordinates._tag === "MultiInstanceCompletionCondition"
+    ? `Effectful evaluation is required for multi-instance completion condition on activity '${coordinates.activityId}'`
+    : coordinates._tag === "MessageCorrelation"
+    ? `Effectful evaluation is required for Message correlation on catch event '${coordinates.catchEventNodeId}'`
+    : `Effectful evaluation is required for Timer expression on catch event '${coordinates.catchEventNodeId}'`
   return new Diagnostic.CompilationError({
     diagnostics: [
       Diagnostic.error(
@@ -727,6 +851,108 @@ export const advance = (
         BpmnKernel.advance(
           kernel,
           state,
+          runtimeServices(now, evaluateExpression)
+        )
+    )
+  })
+
+/**
+ * Persists one durable Timer-arm acknowledgement through the exact
+ * Effect-native runtime boundary.
+ *
+ * @category constructors
+ * @since 4.0.0
+ */
+export const acknowledgeTimerArm = (
+  kernel: BpmnKernel.CompiledKernel,
+  stateInput: unknown,
+  commandInput: unknown,
+  services: BpmnKernel.Services
+): Effect.Effect<
+  BpmnKernel.TransitionBatch,
+  Diagnostic.CompilationError | RuntimeError,
+  BpmnExpressionEvaluator.EvaluatorRegistry
+> =>
+  Effect.suspend(() => {
+    const now = captureNow(services)
+    const state = snapshotInput(stateInput)
+    const command = snapshotInput(commandInput)
+    return drive(
+      "acknowledgeTimerArm",
+      kernel,
+      (evaluateExpression) =>
+        BpmnKernel.acknowledgeTimerArm(
+          kernel,
+          state,
+          command,
+          runtimeServices(now, evaluateExpression)
+        )
+    )
+  })
+
+/**
+ * Delivers one trusted external Message receipt with exact Effect-native
+ * expression evaluation for routing after the catch resolves.
+ *
+ * @category constructors
+ * @since 4.0.0
+ */
+export const deliverMessage = (
+  kernel: BpmnKernel.CompiledKernel,
+  stateInput: unknown,
+  commandInput: unknown,
+  services: BpmnKernel.Services
+): Effect.Effect<
+  BpmnKernel.TransitionBatch,
+  Diagnostic.CompilationError | RuntimeError,
+  BpmnExpressionEvaluator.EvaluatorRegistry
+> =>
+  Effect.suspend(() => {
+    const now = captureNow(services)
+    const state = snapshotInput(stateInput)
+    const command = snapshotInput(commandInput)
+    return drive(
+      "deliverMessage",
+      kernel,
+      (evaluateExpression) =>
+        BpmnKernel.deliverMessage(
+          kernel,
+          state,
+          command,
+          runtimeServices(now, evaluateExpression)
+        )
+    )
+  })
+
+/**
+ * Observes one due Timer wake-up with exact Effect-native expression
+ * evaluation for routing after deterministic winner selection.
+ *
+ * @category constructors
+ * @since 4.0.0
+ */
+export const observeDueTimer = (
+  kernel: BpmnKernel.CompiledKernel,
+  stateInput: unknown,
+  commandInput: unknown,
+  services: BpmnKernel.Services
+): Effect.Effect<
+  BpmnKernel.TransitionBatch,
+  Diagnostic.CompilationError | RuntimeError,
+  BpmnExpressionEvaluator.EvaluatorRegistry
+> =>
+  Effect.suspend(() => {
+    const now = captureNow(services)
+    const state = snapshotInput(stateInput)
+    const command = snapshotInput(commandInput)
+    return drive(
+      "observeDueTimer",
+      kernel,
+      (evaluateExpression) =>
+        BpmnKernel.observeDueTimer(
+          kernel,
+          state,
+          command,
           runtimeServices(now, evaluateExpression)
         )
     )

@@ -81,6 +81,29 @@ describe("BpmnExpressionEvaluator", () => {
       assert.strictEqual(yield* layered.resolve(binding()), registered)
     }))
 
+  it.effect("passes string expectations without coercing evaluator results", () =>
+    Effect.gen(function*() {
+      let received: Evaluator.EvaluationRequest | undefined
+      const evaluate: Evaluator.EvaluatorHandler = (request) => {
+        received = request
+        return Effect.succeed({ result: 42, steps: 1 })
+      }
+      const registry = yield* Evaluator.makeMemory([
+        definition(binding(), evaluate)
+      ])
+      const resolved = yield* registry.resolve(binding())
+      const request = Schema.decodeUnknownSync(Evaluator.EvaluationRequest)({
+        source: "display-name",
+        context: { input: "exact" },
+        expectedResult: "string"
+      })
+
+      const evaluation = yield* resolved.evaluate(request)
+
+      assert.strictEqual(received, request)
+      assert.deepStrictEqual(evaluation, { result: 42, steps: 1 })
+    }))
+
   it.effect("rejects duplicate complete bindings", () =>
     Effect.gen(function*() {
       const first = definition()
@@ -215,6 +238,7 @@ describe("BpmnExpressionEvaluator", () => {
     for (
       const expectedResult of [
         "boolean",
+        "string",
         "non-negative-integer",
         "json-array",
         "json"

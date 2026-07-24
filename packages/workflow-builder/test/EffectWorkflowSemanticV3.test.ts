@@ -562,6 +562,7 @@ const pollUntilObserved = Effect.fnUntraced(function*<
     const polled = yield* workflow.poll(executionId)
     if (Option.isSome(polled)) return polled.value
     yield* Effect.yieldNow
+    yield* Effect.sleep("1 millis").pipe(TestClock.withLive)
   }
   return yield* Effect.die("Native workflow did not expose observable state")
 })
@@ -578,6 +579,7 @@ const pollUntilComplete = Effect.fnUntraced(function*<
       return polled.value
     }
     yield* Effect.yieldNow
+    yield* Effect.sleep("1 millis").pipe(TestClock.withLive)
   }
   return yield* Effect.die("Native workflow did not complete")
 })

@@ -1,7 +1,7 @@
 {
   "formatVersion": 1,
   "catalogId": "effect-workflow-builder-bpmn-2.0.2",
-  "catalogRevision": 10,
+  "catalogRevision": 11,
   "standard": {
     "name": "Business Process Model and Notation",
     "version": "2.0.2",
@@ -78,7 +78,7 @@
       "dependsOn": [
         "BPMN-FOUNDATION-DURABLE-MARKING"
       ],
-      "notes": "The executable subset includes Standard Loops, FixedMultiInstance/1, and CollectionMultiInstance/1 on generic Tasks. Both Multi-Instance profiles freeze one bounded closed member set at activation, preserve stable index identity, run sequentially or in parallel with behavior All, and either join all members or, when an admitted completionCondition first becomes true, terminate the already generated active remainder and mark a sequential planned suffix not-generated. The collection profile preserves source order and duplicates, makes input-item mapping explicit, and admits only complete-success output gathering in source-index order. SubProcess and CallActivity multi-instance execution, progressive behavior events, partial collection output, and open or draining groups remain outside this kernel subset."
+      "notes": "The executable subset includes Standard Loops, FixedMultiInstance/1 and CollectionMultiInstance/1 on generic Tasks, and CatchEventChoice/1 for bounded Message/Timer Intermediate Catch Events. Both Multi-Instance profiles freeze one bounded closed member set at activation, preserve stable index identity, run sequentially or in parallel with behavior All, and either join all members or, when an admitted completionCondition first becomes true, terminate the already generated active remainder and mark a sequential planned suffix not-generated. CatchEventChoice/1 opens exact arms and atomically commits one deterministic winner, continuation, loser cancellation, and Message delivery disposition. Fingerprinted limits bound Timer lexical bytes, execution-state bytes, and transition-journal count/bytes beneath fixed parser/kernel ceilings; longer histories require a separate segmented/checkpoint protocol. SubProcess and CallActivity multi-instance execution, progressive behavior events, partial collection output, open or draining groups, and the broader BPMN Event lifecycle remain outside this kernel subset."
     },
     {
       "id": "BPMN-EXECUTION-FIXED-MULTI-INSTANCE-TASK",
@@ -94,7 +94,7 @@
         "BPMN-FOUNDATION-DURABLE-MARKING",
         "BPMN-EXECUTION-BASIC-TOKEN-KERNEL"
       ],
-      "notes": "This atomic executable profile is restricted to one generic Task with a version-bound formal loopCardinality, behavior absent or All, sequential or parallel execution, an optional version-bound formal completionCondition, and a compiled maximum cardinality. Cardinality is evaluated once before member creation. Durable group/member state records stable index and item identity, exact active/completed/terminated counters over generated instances, first-true completion cancellation, a distinct not-generated sequential suffix, Boundary Error or failure cleanup, late-completion fencing, and causal journal replay. XML v5 can represent broader collection and One/None/Complex metadata, but this cardinality profile does not silently adopt it; collection scatter/gather is covered only by the separate CollectionMultiInstance/1 requirement. It does not claim SubProcess or CallActivity multi-instance execution, progressive behavior events, open WCP15 groups, draining WCP34/WCP36 joins, or a complete BPMN Activity lifecycle."
+      "notes": "This atomic executable profile is restricted to one generic Task with a version-bound formal loopCardinality, behavior absent or All, sequential or parallel execution, an optional version-bound formal completionCondition, and a compiled maximum cardinality. Cardinality is evaluated once before member creation. Durable group/member state records stable index and item identity, exact active/completed/terminated counters over generated instances, first-true completion cancellation, a distinct not-generated sequential suffix, Boundary Error or failure cleanup, late-completion fencing, and causal journal replay. XML v6 can represent broader collection and One/None/Complex metadata, but this cardinality profile does not silently adopt it; collection scatter/gather is covered only by the separate CollectionMultiInstance/1 requirement. It does not claim SubProcess or CallActivity multi-instance execution, progressive behavior events, open WCP15 groups, draining WCP34/WCP36 joins, or a complete BPMN Activity lifecycle."
     },
     {
       "id": "BPMN-EXECUTION-COLLECTION-MULTI-INSTANCE-TASK",
@@ -126,7 +126,38 @@
       "dependsOn": [
         "BPMN-EXECUTION-BASIC-TOKEN-KERNEL"
       ],
-      "notes": "This atomic slice admits an immutable protocol-v3 binding on a generic Task, one-execution translation from a native managed-retry result, exact application-failure-to-BPMN-Error promotion, and at most one interrupting Boundary Error. The XML executable facade accepts task bindings explicitly through CompileXmlOptions and commits them to the executable fingerprint; bindings remain external executable inputs and are not inferred from BPMN XML. Schedule-to-close timeout remains operational and is not treated as a BPMN Error or Boundary Timer. This is not evidence for the complete Activity lifecycle, generic event propagation, BPMN Cancel, timers, non-interrupting boundaries, or event subprocesses."
+      "notes": "This atomic slice admits an immutable protocol-v3 binding on a generic Task, one-execution translation from a native managed-retry result, exact application-failure-to-BPMN-Error promotion, and at most one interrupting Boundary Error. The XML executable facade accepts task bindings explicitly through CompileXmlOptions and commits them to the executable fingerprint; bindings remain external executable inputs and are not inferred from BPMN XML. Schedule-to-close timeout remains operational and is not treated as a BPMN Error or Boundary Timer. This is not evidence for the complete Activity lifecycle, generic event propagation, BPMN Cancel, Boundary Timer or Timer semantics outside CatchEventChoice/1, non-interrupting boundaries, or event subprocesses."
+    },
+    {
+      "id": "BPMN-EXECUTION-INTERMEDIATE-CATCH-MESSAGE-TIMER-SLICE",
+      "title": "CatchEventChoice/1 Message and Timer Intermediate Catch Event execution slice",
+      "facet": "execution",
+      "source": {
+        "authority": "OMG",
+        "document": "Business Process Model and Notation 2.0.2",
+        "section": "10.5.4, 10.5.5, Tables 10.99 and 10.101, 13.3.3, and 13.5.2",
+        "url": "https://www.omg.org/spec/BPMN/2.0.2"
+      },
+      "dependsOn": [
+        "BPMN-FOUNDATION-DURABLE-MARKING",
+        "BPMN-EXECUTION-BASIC-TOKEN-KERNEL"
+      ],
+      "notes": "CatchEventChoice/1 admits only normal-flow Intermediate Catch Events with one Message definition or one Timer definition containing exactly one timeDuration or timeDate. Waiting opens when the event is reached and one accepted occurrence is consumed before continuation. Message admission uses an externally compiled exact ordered non-empty key-correlation expression, payload contract, and authorization-policy build. The atomic delivery transition is the acceptedAt authority: every previously unseen receipt.acceptedAt must equal services.now while the exact active arm, correlation, policy pin, payload bound, and race winner or fence are validated; a sender timestamp is never authoritative, while exact redelivery of an already committed receipt remains idempotent. timeDuration and timeDate remain BPMN tExpression values. The profile requires their evaluated value to be a string and parses that string as a bounded ISO-8601/XML Schema duration or dateTime subset; this runtime restriction is not a direct XSD constraint on the tExpression text. The profile is transient-active-only and has no early-message inbox. A global deliveryId ledger consumes both Message winners and Messages preempted by a Timer. Timer deadlines and correlation results are recorded for causal replay without clock or expression reexecution. Signal, Conditional, Multiple, Parallel Multiple, timeCycle, Start, Boundary, throwing, Receive Task, and event-subprocess semantics are excluded. BPMN Table 10.99 requires operationRef for Message Events in executable Processes, while this slice rejects operationRef and uses the external fingerprinted MessageBinding. BPMN 13.3.3 also describes predicate correlation, which this exact-key profile rejects. Therefore this is implementation-profile evidence, not complete BPMN Process Execution Conformance."
+    },
+    {
+      "id": "BPMN-EXECUTION-EVENT-BASED-GATEWAY-CHOICE-SLICE",
+      "title": "CatchEventChoice/1 exclusive non-instantiating Event-Based Gateway execution slice",
+      "facet": "execution",
+      "source": {
+        "authority": "OMG",
+        "document": "Business Process Model and Notation 2.0.2",
+        "section": "10.6.6 and 13.4.4",
+        "url": "https://www.omg.org/spec/BPMN/2.0.2"
+      },
+      "dependsOn": [
+        "BPMN-EXECUTION-INTERMEDIATE-CATCH-MESSAGE-TIMER-SLICE"
+      ],
+      "notes": "CatchEventChoice/1 admits one diverging exclusive non-instantiating Event-Based Gateway with one incoming flow and between two and the compiled maximum number of unique unconditional direct Message/Timer catch branches. It atomically opens every arm. The atomic delivery transition requires every previously unseen receipt.acceptedAt to equal services.now and compares that authoritative instant with every materialized Timer deadline; a Timer wins equality and equal Timer deadlines use immutable branch ordinal. One transition commits the winner, continuation, and cancellation of all losing arms and Timers. Current-time late or stale Message deliveries are fenced, backdated deliveries are rejected, and exact duplicate or Timer-preempted deliveries are replayed through causal facts. Instantiating and Parallel Event-Based Gateways remain excluded by this execution profile; at the BPMN model foundation, a Parallel Event-Based Gateway is valid only when instantiate is true. Receive Task branches, additional incoming flows, conditional/default branches, and non-Message/Timer event configurations also remain excluded. This bounded first-trigger/withdraw-losers slice is not the complete BPMN Event-Based Gateway surface or Process Execution Conformance."
     },
     {
       "id": "BPMN-EXECUTION-CORE-PROCESS-XML-SLICE",
@@ -140,9 +171,10 @@
       },
       "dependsOn": [
         "BPMN-EXECUTION-BASIC-TOKEN-KERNEL",
-        "BPMN-INTERCHANGE-CORE-PROCESS-XML-SLICE"
+        "BPMN-INTERCHANGE-CORE-PROCESS-XML-SLICE",
+        "BPMN-EXECUTION-EVENT-BASED-GATEWAY-CHOICE-SLICE"
       ],
-      "notes": "This is a deliberately narrower executable admission profile, not Process Execution Conformance. Profile bpmn-2.0.2-core-process-di-v5 admits while-style pre-test and BPMN post-tested Standard Loops plus FixedMultiInstance/1 and CollectionMultiInstance/1 only on generic Tasks. FixedMultiInstance/1 requires a version-bound loopCardinality. CollectionMultiInstance/1 requires exact external data and collection bindings, freezes one bounded array at activation, preserves indices/order/duplicates, exposes items only through scalar inputDataItem, and optionally gathers a complete codec-validated output array through loopDataOutputRef plus scalar outputDataItem. Both support sequential or parallel behavior All; completionCondition is admitted only without collection output. Unsupported process, gateway, event, activity, combined-loop, SubProcess-loop, progressive behavior, partial output, open-group, and implicit-activation semantics are rejected rather than inferred."
+      "notes": "This is a deliberately narrower executable admission profile, not Process Execution Conformance. Profile bpmn-2.0.2-core-process-di-v6 admits while-style pre-test and BPMN post-tested Standard Loops plus FixedMultiInstance/1 and CollectionMultiInstance/1 only on generic Tasks, and CatchEventChoice/1 for standalone Message/Timer catches or an exclusive non-instantiating Message/Timer Event-Based Gateway. FixedMultiInstance/1 requires a version-bound loopCardinality. CollectionMultiInstance/1 requires exact external data and collection bindings, freezes one bounded array at activation, preserves indices/order/duplicates, exposes items only through scalar inputDataItem, and optionally gathers a complete codec-validated output array through loopDataOutputRef plus scalar outputDataItem. CatchEventChoice/1 requires exact external Message bindings and excludes operationRef, timeCycle, other event definitions, retained early Messages, Start/Boundary/Receive/event-subprocess catches, and instantiating/Parallel event gateways. Unsupported process, gateway, event, activity, combined-loop, SubProcess-loop, progressive behavior, partial output, open-group, and implicit-activation semantics are rejected rather than inferred."
     },
     {
       "id": "BPMN-INTERCHANGE-BOUNDED-XML-INFOSET",
@@ -162,7 +194,7 @@
       "source": {
         "authority": "OMG",
         "document": "BPMN20.xsd and Semantic.xsd",
-        "section": "tDefinitions, tProcess, tActivity, tStandardLoopCharacteristics, tMultiInstanceLoopCharacteristics, flow nodes, and tSequenceFlow",
+        "section": "tDefinitions, tProcess, tActivity, tStandardLoopCharacteristics, tMultiInstanceLoopCharacteristics, tIntermediateCatchEvent, tMessageEventDefinition, tTimerEventDefinition, tEventBasedGateway, flow nodes, and tSequenceFlow",
         "url": "https://www.omg.org/spec/BPMN/2.0.2"
       },
       "dependsOn": [
@@ -170,7 +202,7 @@
         "BPMN-FOUNDATION-SEMANTIC-VALIDATION",
         "BPMN-INTERCHANGE-BOUNDED-XML-INFOSET"
       ],
-      "notes": "Profile bpmn-2.0.2-core-process-di-v5 covers ordinary processes and recursive subprocesses, generic tasks, source-level callActivity callable-element QNames, none start/end events, exclusive/parallel gateways, sequence flows, conditions, defaults, definitions metadata, explicit expression-version bindings, Standard Loop characteristics, and the represented tMultiInstanceLoopCharacteristics fields on generic Tasks. Multi-instance XML can round-trip cardinality, collection references, scalar inputDataItem/outputDataItem declarations with namespace-expanded itemSubjectRef QNames and xsd:string names including the empty string, sequential/parallel mode, completionCondition, behavior, and One/None event references in BPMN XSD order. Data-item IDs participate in global XML-ID validation, absent isCollection materializes false, and unrepresented children fail closed; complexBehaviorDefinition remains outside the slice. Executable collection semantics additionally require fingerprinted external bindings and declarations. Call activities are interchange-only until immutable child-target resolution and durable parent/child execution exist. This is a fail-closed implementation slice, not an OMG conformance subclass, complete semantic mapping, or general multi-instance profile."
+      "notes": "Profile bpmn-2.0.2-core-process-di-v6 covers ordinary processes and recursive subprocesses, generic tasks, source-level callActivity callable-element QNames, none start/end events, exclusive/parallel gateways, sequence flows, conditions, defaults, definitions metadata, explicit expression-version bindings, Standard Loop characteristics, the represented tMultiInstanceLoopCharacteristics fields on generic Tasks, normal-flow Message/Timer Intermediate Catch Events, and exclusive non-instantiating Event-Based Gateways. Catch XML round-trips one local Message definition without operationRef or one Timer timeDuration/timeDate definition, plus direct unconditional gateway branches; timeCycle, other Event definitions, multiple/parallel-multiple catches, Receive Tasks, and instantiating/Parallel event gateways fail closed. timeDuration and timeDate are tExpression content, so the XML layer does not claim that XSD directly constrains their text to xsd:duration or xsd:dateTime. Executable admission instead evaluates the expression, requires a string, and parses a bounded ISO-8601/XML Schema duration or dateTime subset. Multi-instance XML can round-trip cardinality, collection references, scalar inputDataItem/outputDataItem declarations with namespace-expanded itemSubjectRef QNames and xsd:string names including the empty string, sequential/parallel mode, completionCondition, behavior, and One/None event references in BPMN XSD order. Executable collection, Message, authorization, and correlation semantics additionally require fingerprinted external bindings. Call activities are interchange-only until immutable child-target resolution and durable parent/child execution exist. This is a fail-closed implementation slice, not an OMG conformance subclass, complete semantic mapping, or general event/multi-instance profile."
     },
     {
       "id": "BPMN-INTERCHANGE-SEMANTIC-MAPPING",
@@ -225,7 +257,7 @@
         "BPMN-DI-SEMANTIC-MODEL",
         "BPMN-INTERCHANGE-CORE-PROCESS-XML-SLICE"
       ],
-      "notes": "Profile bpmn-2.0.2-core-process-di-v5 maps the package's complete current normalized DI slice with global XML-ID and semantic reference-kind checks. It is not the complete BPMN DI interchange surface and has no normative XSD evidence yet."
+      "notes": "Profile bpmn-2.0.2-core-process-di-v6 maps the package's complete current normalized DI slice with global XML-ID and semantic reference-kind checks. It is not the complete BPMN DI interchange surface and has no normative XSD evidence yet."
     },
     {
       "id": "BPMN-DI-XML-ROUNDTRIP",
@@ -359,6 +391,23 @@
         "WFP-CONTROL-FLOW-CATALOG",
         "BPMN-EXECUTION-BASIC-TOKEN-KERNEL"
       ]
+    },
+    {
+      "id": "WFP-WCP16-DEFERRED-CHOICE-TRANSIENT",
+      "title": "WCP16 Deferred Choice - transient Message/Timer subset",
+      "facet": "execution",
+      "source": {
+        "authority": "WorkflowPatterns",
+        "document": "Workflow Patterns: The Definitive Guide",
+        "section": "4.2.2",
+        "pages": "115-116",
+        "url": "https://www.workflowpatterns.com/patterns/control/"
+      },
+      "dependsOn": [
+        "WFP-CONTROL-FLOW-CATALOG",
+        "BPMN-EXECUTION-EVENT-BASED-GATEWAY-CHOICE-SLICE"
+      ],
+      "notes": "CatchEventChoice/1 supplies the bounded transient-trigger form of Deferred Choice: all exact Message/Timer alternatives remain enabled after the gateway opens, one accepted trigger wins, and winner routing plus withdrawal of all losers is atomic. The delivery transition requires receipt.acceptedAt to equal services.now; that atomic acceptance instant and materialized Timer deadlines define the deterministic race. A Timer wins equality and equal Timers use immutable branch order. Late and duplicate deliveries are fenced, and replay consumes the recorded winner without rerunning the race. Early-message retention, persistent triggers, human work, Receive Tasks, signals, conditions, multiple events, and broader Event-Based Gateway configurations require different profiles and are not WCP16 evidence here."
     },
     {
       "id": "WFP-WCP13-MULTI-INSTANCE-DESIGN-TIME",

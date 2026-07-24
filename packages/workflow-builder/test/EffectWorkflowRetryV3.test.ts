@@ -629,10 +629,11 @@ const pollUntilObserved = Effect.fnUntraced(function*<
   workflow: W,
   executionId: string
 ) {
-  for (let attempt = 0; attempt < 1_000; attempt++) {
+  for (let attempt = 0; attempt < 5_000; attempt++) {
     const polled = yield* workflow.poll(executionId)
     if (Option.isSome(polled)) return polled.value
     yield* Effect.yieldNow
+    yield* Effect.sleep("1 millis").pipe(TestClock.withLive)
   }
   return yield* Effect.die(
     "Native workflow did not expose observable state"
@@ -645,7 +646,7 @@ const pollUntilComplete = Effect.fnUntraced(function*<
   workflow: W,
   executionId: string
 ) {
-  for (let attempt = 0; attempt < 1_000; attempt++) {
+  for (let attempt = 0; attempt < 5_000; attempt++) {
     const polled = yield* workflow.poll(executionId)
     if (
       Option.isSome(polled) &&
@@ -654,6 +655,7 @@ const pollUntilComplete = Effect.fnUntraced(function*<
       return polled.value
     }
     yield* Effect.yieldNow
+    yield* Effect.sleep("1 millis").pipe(TestClock.withLive)
   }
   return yield* Effect.die("Native workflow did not complete")
 })
@@ -990,6 +992,15 @@ const prepareBridgeKernel = (
         limits: {
           maxAutomaticTransitions: 100,
           maxExecutionInputCanonicalBytes: 1_048_576,
+          maxExecutionStateCanonicalBytes: 8_388_608,
+          maxTransitionJournalEvents: 10_000,
+          maxTransitionJournalCanonicalBytes: 16_777_216,
+          maxCatchWaitArms: 32,
+          maxTimerDelayMillis: 31_536_000_000,
+          maxTimerExpressionUtf8Bytes: 4_096,
+          maxMessageCorrelationComponents: 16,
+          maxMessageCorrelationCanonicalBytes: 16_384,
+          maxMessagePayloadCanonicalBytes: 1_048_576,
           maxMultiInstanceCardinality: 128,
           maxMultiInstanceCollectionCanonicalBytes: 1_048_576,
           maxMultiInstanceItemCanonicalBytes: 262_144,

@@ -117,7 +117,7 @@ Implemented foundations:
   from BPMN XML; and
 - a resource-bounded namespace-aware XML 1.0 infoset parser, semantic
   validator, and serializer;
-- strict profile `bpmn-2.0.2-core-process-di-v5`, which fails closed while
+- strict profile `bpmn-2.0.2-core-process-di-v6`, which fails closed while
   importing, validating, canonically exporting, and normalized-round-tripping
   definitions metadata, ordinary processes and recursive subprocesses, generic
   tasks, source-level call activities with namespace-expanded callable-element
@@ -133,23 +133,79 @@ Implemented foundations:
   Unrepresented data-item children fail closed. A mapped Standard Loop requires
   one version-bound formal
   `loopCondition`, materializes the BPMN `testBefore=false` default when
-  omitted, and requires a positive `loopMaximum`. BPMN 2.0.2 itself permits an
-  absent `loopMaximum` and a more general or absent `tExpression`
-  `loopCondition`; the stricter requirements are deliberate fail-closed
-  executable-profile constraints, not statements about BPMN validity; and
+  omitted, and requires a positive `loopMaximum`. Version `6` also maps
+  normal-flow Intermediate Catch Events with exactly one Message or one
+  `timeDuration`/`timeDate` Timer definition and exclusive, non-instantiating
+  Event-Based Gateways with direct catch-event branches. BPMN 2.0.2 itself
+  permits an absent `loopMaximum`, a more general or absent `tExpression`
+  `loopCondition`, Timer `timeCycle`, and additional Event definitions; the
+  stricter requirements are deliberate fail-closed executable-profile
+  constraints, not statements about BPMN validity. In particular,
+  `timeDuration` and `timeDate` contain `tExpression`; the BPMN XSD does not
+  directly constrain their text to `xsd:duration` or `xsd:dateTime`.
+  Executable admission evaluates the expression, requires a string, and parses
+  a bounded ISO-8601/XML Schema duration or date-time subset; and
 - a strict executable-admission facade that composes that named XML profile
   with the bounded token kernel without lowering through the version `1` DAG,
   and proves import, conditional/default routing, parallel split/join,
   subprocess, bounded Standard Loop, fixed Multi-Instance, and collection
-  Multi-Instance execution, journal replay, canonical export, re-import,
-  recompilation, and same-journal replay. Optional task, data-document, and
-  collection bindings are external compile inputs, not semantics inferred from
-  BPMN XML alone;
+  Multi-Instance execution. For `CatchEventChoice/1`, it compiles standalone
+  Message/Timer catch shapes and proves one Message/Timer gateway equality race
+  through journal replay, canonical export, re-import, recompilation, and
+  same-journal replay. Optional task, data-document, collection, and Message
+  bindings are external compile inputs, not semantics inferred from BPMN XML
+  alone;
+- portable executable profile `CatchEventChoice/1`, covering only normal-flow
+  Message and `timeDuration`/`timeDate` Timer Intermediate Catch Events,
+  standalone or directly following an exclusive non-instantiating Event-Based
+  Gateway. This slice follows BPMN 2.0.2 §§10.6.6 and 13.4.4 for two-or-more
+  unconditional event branches, first-trigger choice, and withdrawal of the
+  remaining branches, and §13.5.2 for waiting only after the Intermediate Event
+  is reached and consuming the occurrence. An exact external Message binding
+  commits a non-empty ordered key correlation expression, codec, and
+  authorization policy. The atomic delivery transition requires receipt
+  `acceptedAt` to equal `services.now` while validating the exact active arm
+  and choosing the winner; sender time is not authoritative. Exact redelivery
+  of an already committed receipt remains idempotent at later clock values. The slice is
+  transient-active-only, with no pre-wait inbox. A Timer wins when
+  its deadline equals a Message's `acceptedAt`, and equal Timer deadlines use
+  immutable branch order. Winner routing and loser-arm/Timer cancellation are
+  atomic. One execution-global `deliveryId` ledger consumes both Message
+  winners and Timer-preempted Messages. Journal replay consumes recorded
+  correlation, deadline, race, cancellation, fence, and ledger facts without
+  reading a clock, evaluating expressions, or selecting the race again.
+  Fingerprinted limits bound evaluated Timer lexical bytes, execution-state
+  canonical bytes, transition-journal event count, and journal canonical
+  bytes, beneath fixed parser/kernel ceilings. This prevents an admitted
+  profile from silently widening the in-memory decode/replay surface; histories
+  beyond one bounded journal require an explicit segmented/checkpoint design.
+  BPMN Table 10.99 requires `MessageEventDefinition.operationRef` for executable
+  Processes, while this profile rejects `operationRef` and uses the external
+  fingerprinted binding; §13.3.3 also permits predicate-based correlation,
+  which this profile rejects. It is therefore implementation-profile and WCP16
+  evidence, not Process Execution Conformance. Signals, Conditional,
+  Multiple/Parallel Multiple Events, `timeCycle`, Start/Boundary/Receive/event
+  subprocess catches, and instantiating/Parallel Event-Based Gateways remain
+  excluded;
+- an optional native `EffectWorkflowBpmnEventV3` adapter with one typed deferred
+  per wait group, including Message-only groups, absolute idempotent
+  `DurableClock` schedules, typed first-wins Timer/state-change wake hints, and
+  post-commit notification/recovery. A first native wake never declares the
+  BPMN winner: the adapter reloads portable state and the kernel remains the
+  authority. It delegates backend mechanics and does not implement a backend
+  SPI, persistence, an outbox/inbox, transport authentication, correlation,
+  cancellation, race selection, or replay. The host owns and persists the
+  explicit native `workflowName`/`executionId` address; the derived Effect token
+  is an address, not a credential. A post-commit hint can be reconstructed from
+  closed portable state after a crash, but reliable delivery requires a
+  host-owned transactional outbox or equivalent. Memory-backed integration
+  evidence is not production durability; persistent/cluster crash, restart,
+  and failover conformance remains pending;
 - an Effectful executable-preparation boundary whose domain-separated
   SHA-256 fingerprint commits to the normalized semantic model, root process,
   kernel semantic version, limits, named profile, and exact evaluator-build
-  manifest; kernel semantic version `5`, state version `6`, fingerprint version
-  `4`, and transition-journal version `5` fail closed on a model/profile
+  manifest; kernel semantic version `6`, state version `7`, fingerprint version
+  `5`, and transition-journal version `6` fail closed on a model/profile
   mismatch;
 - a strict Effect evaluator registry with full language/version/build/limit
   tuple resolution and no compatibility or latest fallback, plus exact
@@ -178,9 +234,10 @@ Implemented foundations:
   node-activity, timer, and deferred operations. Participant kind, digest,
   contracts, order, result identity, generation, and waiter-interruption policy
   are committed before execution; replay, typed failures, and native defects
-  are covered. This establishes a generic race primitive, not yet the complete
-  BPMN Activity lifecycle, Event-Based Gateway, event-subscription, or
-  human-work semantics; and
+  are covered. This generic native race primitive is not the portable
+  `CatchEventChoice/1` authority and does not establish the complete BPMN
+  Activity lifecycle, Event-Based Gateway surface, event-subscription
+  catalogue, or human-work semantics; and
 - managed native retry for exact node attempts, including policy-pinned failure
   identity, classifier resolution, attempt and elapsed admission budgets,
   replay-recorded jitter, durable-clock backoff, and a content-addressed
@@ -235,14 +292,18 @@ Implemented foundations:
 Not yet implemented and therefore not claimed:
 
 - semantic and DI XML mapping outside the strict named slice, lossless unknown
-  extension preservation, encoding protocol-v3 task bindings inside BPMN XML,
-  and import/export validation against the normative XSDs. The executable
-  facade accepts bindings only as explicit external compile options;
+  extension preservation, encoding protocol-v3 task or Message bindings inside
+  BPMN XML, and import/export validation against the normative XSDs. The
+  executable facade accepts bindings only as explicit external compile options;
 - the complete BPMN Common Executable metamodel, including its full data,
   resource, correlation, interface/operation, lane, artifact, and visual
   interchange surfaces;
 - token-transition and Activity lifecycle semantics beyond the explicitly
   bounded kernel subset;
+- Message `operationRef` execution, general BPMN key/predicate correlation,
+  durable early-message retention, Timer cycles, Signal/Conditional/Multiple
+  Events, Start/Boundary/Receive/event-subprocess catches, and instantiating or
+  Parallel Event-Based Gateways beyond `CatchEventChoice/1`;
 - externalized or streaming Multi-Instance item manifests, partial-result
   collection policy, Multi-Instance SubProcesses or CallActivities,
   One/None/Complex progressive behavior events, open/dynamic WCP15 fan-out,
@@ -313,11 +374,11 @@ status.
 The checked-in catalogue now separates the book's control-flow, data, resource,
 exception, service/correlation, flexibility, change, scientific, time, and
 workflow-activity families using printed-page locators from pp. 105–329. It
-also records executable evidence for only eight atomic control patterns:
+also records executable evidence for only nine atomic control patterns:
 Sequence, Parallel Split, Synchronization, Exclusive Choice, the bounded Task
 form of Structured Loop, fixed design-time and runtime-known Multi-Instance
 groups (WCP13/WCP14), and the fixed cancelling partial Multi-Instance join
-(WCP35).
+(WCP35), plus the transient Message/Timer subset of Deferred Choice (WCP16).
 
 This is intentionally not described as complete traceability. Requirement
 `WFP-ATOMIC-CATALOG-COMPLETE` remains unsupported until every named pattern or
@@ -330,13 +391,13 @@ complete TP1–TP10 coverage.
 
 ### Branching
 
-| Pattern and book pages    | Semantic obligation                                                                                               | BPMN                                                                      |
-| ------------------------- | ----------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
-| Parallel split, 110–111   | One arrival atomically emits one token on every outgoing flow.                                                    | **N**, diverging Parallel Gateway                                         |
-| Exclusive choice, 111–115 | Evaluate one committed snapshot; select exactly one ordered/default flow or raise a declared no-match incident.   | **N**, Exclusive Gateway                                                  |
-| Deferred choice, 115–116  | Keep alternatives enabled until one external event wins atomically; withdraw losers and define late-event policy. | **N/C**, Event-Based Gateway; human work needs an implementation contract |
-| Multi-choice, 117–119     | Select every true branch from one snapshot; explicitly handle an empty set.                                       | **N**, Inclusive Gateway                                                  |
-| Thread split, 120–121     | Emit a fixed token multiplicity on one path and pin shared-versus-copied data behavior.                           | **C**, `completionQuantity`; portability-sensitive                        |
+| Pattern and book pages    | Semantic obligation                                                                                               | BPMN                                                                                                                                                            |
+| ------------------------- | ----------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Parallel split, 110–111   | One arrival atomically emits one token on every outgoing flow.                                                    | **N**, diverging Parallel Gateway                                                                                                                               |
+| Exclusive choice, 111–115 | Evaluate one committed snapshot; select exactly one ordered/default flow or raise a declared no-match incident.   | **N**, Exclusive Gateway                                                                                                                                        |
+| Deferred choice, 115–116  | Keep alternatives enabled until one external event wins atomically; withdraw losers and define late-event policy. | **N/C**, Event-Based Gateway. `CatchEventChoice/1` covers only transient-active Message/Timer triggers; human work and retained triggers need another contract. |
+| Multi-choice, 117–119     | Select every true branch from one snapshot; explicitly handle an empty set.                                       | **N**, Inclusive Gateway                                                                                                                                        |
+| Thread split, 120–121     | Emit a fixed token multiplicity on one path and pin shared-versus-copied data behavior.                           | **C**, `completionQuantity`; portability-sensitive                                                                                                              |
 
 ### Joining and merging
 

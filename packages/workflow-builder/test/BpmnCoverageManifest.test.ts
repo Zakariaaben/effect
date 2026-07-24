@@ -184,6 +184,84 @@ describe("BPMN coverage manifest", () => {
     assert.deepStrictEqual(coverage.manifest.claims, [])
   })
 
+  it("records CatchEventChoice/1 as bounded WCP16 evidence without widening a BPMN claim", () => {
+    const coverage = validated()
+    const requirements = new Map(
+      coverage.catalog.requirements.map((requirement) => [requirement.id, requirement])
+    )
+    const entries = new Map(
+      coverage.manifest.entries.map((entry) => [entry.requirementId, entry])
+    )
+    const catchRequirement = requirements.get(
+      "BPMN-EXECUTION-INTERMEDIATE-CATCH-MESSAGE-TIMER-SLICE"
+    )
+    const gatewayRequirement = requirements.get(
+      "BPMN-EXECUTION-EVENT-BASED-GATEWAY-CHOICE-SLICE"
+    )
+    const deferredChoiceRequirement = requirements.get(
+      "WFP-WCP16-DEFERRED-CHOICE-TRANSIENT"
+    )
+    const deferredChoiceEntry = entries.get(
+      "WFP-WCP16-DEFERRED-CHOICE-TRANSIENT"
+    )
+
+    assert.strictEqual(catchRequirement?.source.section, "10.5.4, 10.5.5, Tables 10.99 and 10.101, 13.3.3, and 13.5.2")
+    assert.deepStrictEqual(gatewayRequirement?.dependsOn, [
+      "BPMN-EXECUTION-INTERMEDIATE-CATCH-MESSAGE-TIMER-SLICE"
+    ])
+    assert.strictEqual(deferredChoiceRequirement?.source.section, "4.2.2")
+    assert.strictEqual(deferredChoiceRequirement?.source.pages, "115-116")
+    assert.strictEqual(
+      entries.get(
+        "BPMN-EXECUTION-INTERMEDIATE-CATCH-MESSAGE-TIMER-SLICE"
+      )?.supportLevel,
+      "executable"
+    )
+    assert.strictEqual(
+      entries.get(
+        "BPMN-EXECUTION-EVENT-BASED-GATEWAY-CHOICE-SLICE"
+      )?.supportLevel,
+      "executable"
+    )
+    assert.strictEqual(deferredChoiceEntry?.supportLevel, "executable")
+    assert(
+      entries.get(
+        "BPMN-EXECUTION-EVENT-BASED-GATEWAY-CHOICE-SLICE"
+      )?.evidence.some(
+        (evidence) =>
+          evidence.kind === "roundtrip-test" &&
+          evidence.path === "test/BpmnCatchEventExecutable.test.ts" &&
+          evidence.testName ===
+            "imports XML, executes an equal-deadline Message/Timer choice, and replays it after canonical recompilation"
+      )
+    )
+    assert(
+      entries.get(
+        "BPMN-EXECUTION-CORE-PROCESS-XML-SLICE"
+      )?.evidence.some(
+        (evidence) =>
+          evidence.kind === "replay-test" &&
+          evidence.path === "test/BpmnCatchEventExecutable.test.ts" &&
+          evidence.testName ===
+            "imports XML, executes an equal-deadline Message/Timer choice, and replays it after canonical recompilation"
+      )
+    )
+    assert(
+      deferredChoiceEntry?.evidence.some(
+        (evidence) =>
+          evidence.kind === "replay-test" &&
+          evidence.path === "test/BpmnCatchEventKernel.test.ts" &&
+          evidence.testName ===
+            "consumes a Timer-preempted delivery globally across catch activations and replays its exact ledger"
+      )
+    )
+    assert.strictEqual(
+      entries.get("BPMN-PROFILE-PROCESS-EXECUTION-COMPLETE")?.supportLevel,
+      "unsupported"
+    )
+    assert.deepStrictEqual(coverage.manifest.claims, [])
+  })
+
   it("ships strict JSON Schemas for requirement and coverage tooling", () => {
     const coverageSchema = readJson("conformance/bpmn-coverage.schema.json") as {
       readonly $schema?: unknown

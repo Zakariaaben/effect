@@ -21,10 +21,12 @@ import * as Result from "effect/Result"
 import * as Schema from "effect/Schema"
 import * as BpmnActivityV3 from "./BpmnActivityV3.ts"
 import * as BpmnData from "./BpmnData.ts"
+import * as BpmnEventV3 from "./BpmnEventV3.ts"
 import * as BpmnExecutionState from "./BpmnExecutionState.ts"
 import * as BpmnExpression from "./BpmnExpression.ts"
 import * as BpmnExpressionEvaluator from "./BpmnExpressionEvaluator.ts"
 import * as BpmnModel from "./BpmnModel.ts"
+import * as BpmnTime from "./BpmnTime.ts"
 import * as Diagnostic from "./Diagnostic.ts"
 import * as DigestV2 from "./DigestV2.ts"
 import * as Json from "./internal/json.ts"
@@ -150,7 +152,33 @@ export const KernelSemanticVersion = BpmnExecutionState.BpmnKernelSemanticVersio
  * @category constants
  * @since 4.0.0
  */
-export const TransitionJournalVersion = 5 as const
+export const TransitionJournalVersion = 6 as const
+
+/**
+ * Hard ceiling for one execution-state snapshot presented to a compiled
+ * kernel. Fingerprinted profiles may choose a smaller byte budget.
+ *
+ * @category constants
+ * @since 4.0.0
+ */
+export const MaximumExecutionStateCanonicalBytes = 8 * 1_024 * 1_024
+
+/**
+ * Hard ceiling for the event count in one transition journal.
+ *
+ * @category constants
+ * @since 4.0.0
+ */
+export const MaximumTransitionJournalEvents = 65_536 as const
+
+/**
+ * Hard ceiling for one transition-journal JSON snapshot. Fingerprinted
+ * profiles may choose a smaller byte budget.
+ *
+ * @category constants
+ * @since 4.0.0
+ */
+export const MaximumTransitionJournalCanonicalBytes = 16 * 1_024 * 1_024
 
 /**
  * Version of the durable execution-start command.
@@ -298,6 +326,7 @@ export const TransitionEvent = Schema.Union([
       "flow-advanced",
       "task-completed",
       "task-succeeded",
+      "catch-event-completed",
       "parallel-join-arrival",
       "end-reached",
       "subprocess-entered"
@@ -328,6 +357,112 @@ export const TransitionEvent = Schema.Union([
     taskNodeId: Identifier,
     scopeInstanceId: Identifier,
     enteredAt: ProtocolV2Wire.Timestamp
+  }),
+  Schema.TaggedStruct("MessageCorrelationEvaluated", {
+    waitGroupId: Identifier,
+    armId: Identifier,
+    catchEventNodeId: Identifier,
+    generation: PositiveInt,
+    expression: BpmnModel.Expression,
+    evaluatorBinding: BpmnExpression.EvaluatorBinding,
+    usage: Schema.Struct({
+      sourceUtf8Bytes: ProtocolV2Wire.NonNegativeSafeInt,
+      contextCanonicalBytes: ProtocolV2Wire.NonNegativeSafeInt,
+      steps: ProtocolV2Wire.NonNegativeSafeInt
+    }),
+    correlationKey: BpmnEventV3.CorrelationKey,
+    correlationCanonicalBytes: ProtocolV2Wire.NonNegativeSafeInt
+  }),
+  Schema.TaggedStruct("TimerExpressionEvaluated", {
+    waitGroupId: Identifier,
+    armId: Identifier,
+    timerId: Identifier,
+    catchEventNodeId: Identifier,
+    generation: PositiveInt,
+    timerKind: Schema.Literals(["timeDuration", "timeDate"]),
+    expression: BpmnModel.Expression,
+    evaluatorBinding: BpmnExpression.EvaluatorBinding,
+    usage: Schema.Struct({
+      sourceUtf8Bytes: ProtocolV2Wire.NonNegativeSafeInt,
+      contextCanonicalBytes: ProtocolV2Wire.NonNegativeSafeInt,
+      steps: ProtocolV2Wire.NonNegativeSafeInt
+    }),
+    evaluatedValue: Schema.String,
+    lexicalVersion: Schema.Literal(BpmnTime.LexicalVersion),
+    lexical: Schema.String,
+    delayMillis: ProtocolV2Wire.NonNegativeSafeInt,
+    scheduledAt: ProtocolV2Wire.Timestamp,
+    dueAt: ProtocolV2Wire.Timestamp
+  }),
+  Schema.TaggedStruct("CatchWaitOpened", {
+    group: BpmnExecutionState.CatchWaitGroup,
+    subscriptions: Schema.NonEmptyArray(BpmnExecutionState.Subscription),
+    timers: Schema.Array(BpmnExecutionState.Timer)
+  }),
+  Schema.TaggedStruct("TimerArmAcknowledged", {
+    target: BpmnEventV3.CatchArmTarget,
+    timerId: Identifier,
+    receipt: BpmnEventV3.TimerArmReceipt,
+    acknowledgedAt: ProtocolV2Wire.Timestamp
+  }),
+  Schema.TaggedStruct("CatchWaitResolved", {
+    waitGroupId: Identifier,
+    winner: BpmnExecutionState.CatchWaitWinner,
+    trigger: Schema.Union([
+      Schema.TaggedStruct("ImmediateTimer", {
+        timerId: Identifier,
+        observedAt: ProtocolV2Wire.Timestamp
+      }),
+      Schema.TaggedStruct("MessageDelivery", {
+        target: BpmnEventV3.CatchArmTarget,
+        receipt: BpmnEventV3.MessageReceipt
+      }),
+      Schema.TaggedStruct("TimerObservation", {
+        target: BpmnEventV3.CatchArmTarget,
+        timerId: Identifier,
+        observedAt: ProtocolV2Wire.Timestamp
+      })
+    ]),
+    cancelledArmIds: Schema.Array(Identifier),
+    cancelledTimerIds: Schema.Array(Identifier),
+    closedAt: ProtocolV2Wire.Timestamp
+  }),
+  Schema.TaggedStruct("CatchWaitCancelled", {
+    waitGroupId: Identifier,
+    reason: Schema.Literals([
+      "scope-cancelled",
+      "execution-cancelled",
+      "execution-failed",
+      "execution-terminated"
+    ]),
+    armIds: Schema.NonEmptyArray(Identifier),
+    timerIds: Schema.Array(Identifier),
+    cancelledAt: ProtocolV2Wire.Timestamp
+  }),
+  Schema.TaggedStruct("CatchIngressReplayed", {
+    ingressKind: Schema.Literals([
+      "message",
+      "timer-arm",
+      "timer-observation"
+    ]),
+    target: BpmnEventV3.CatchArmTarget,
+    externalId: Identifier,
+    observedAt: ProtocolV2Wire.Timestamp
+  }),
+  Schema.TaggedStruct("CatchIngressFenced", {
+    ingressKind: Schema.Literals([
+      "message",
+      "timer-arm",
+      "timer-observation"
+    ]),
+    target: BpmnEventV3.CatchArmTarget,
+    externalId: Identifier,
+    reason: Schema.Literals([
+      "wait-closed",
+      "arm-lost",
+      "stale-generation"
+    ]),
+    observedAt: ProtocolV2Wire.Timestamp
   }),
   Schema.TaggedStruct("LoopOpened", {
     frameId: Identifier,
@@ -542,7 +677,11 @@ export const TransitionEvent = Schema.Union([
   }),
   Schema.TaggedStruct("OutgoingSelected", {
     sourceNodeId: Identifier,
-    routingKind: Schema.Literals(["activity", "exclusive-gateway"]),
+    routingKind: Schema.Literals([
+      "activity",
+      "exclusive-gateway",
+      "catch-event"
+    ]),
     sequenceFlowIds: Schema.Array(Identifier)
   }),
   Schema.TaggedStruct("TaskCompletionReplayed", {
@@ -732,6 +871,40 @@ export interface MultiInstanceCompletionEvaluationContext extends EvaluationCont
 }
 
 /**
+ * Evaluation of one exact external Message correlation key when its catch arm
+ * opens.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export interface MessageCorrelationEvaluationContext extends EvaluationContextBase {
+  readonly _tag: "MessageCorrelation"
+  readonly catchEvent: BpmnModel.IntermediateCatchEvent
+  readonly binding: BpmnEventV3.MessageBinding
+  readonly waitGroupId: string
+  readonly armId: string
+  readonly generation: number
+}
+
+/**
+ * Evaluation of one Timer catch expression against its persisted scheduling
+ * anchor.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export interface TimerExpressionEvaluationContext extends EvaluationContextBase {
+  readonly _tag: "TimerExpression"
+  readonly catchEvent: BpmnModel.IntermediateCatchEvent
+  readonly timerKind: "timeDuration" | "timeDate"
+  readonly waitGroupId: string
+  readonly armId: string
+  readonly timerId: string
+  readonly generation: number
+  readonly scheduledAt: ProtocolV2Wire.Timestamp
+}
+
+/**
  * Exact immutable context supplied to one expression evaluator.
  *
  * @category models
@@ -743,6 +916,8 @@ export type EvaluationContext =
   | MultiInstanceCardinalityEvaluationContext
   | MultiInstanceCollectionEvaluationContext
   | MultiInstanceCompletionEvaluationContext
+  | MessageCorrelationEvaluationContext
+  | TimerExpressionEvaluationContext
 
 /**
  * Services needed while advancing executable BPMN state.
@@ -769,6 +944,23 @@ export interface Services {
 export const KernelLimits = Schema.Struct({
   maxAutomaticTransitions: PositiveInt,
   maxExecutionInputCanonicalBytes: PositiveInt,
+  maxExecutionStateCanonicalBytes: PositiveInt.check(
+    Schema.isLessThanOrEqualTo(MaximumExecutionStateCanonicalBytes)
+  ),
+  maxTransitionJournalEvents: PositiveInt.check(
+    Schema.isLessThanOrEqualTo(MaximumTransitionJournalEvents)
+  ),
+  maxTransitionJournalCanonicalBytes: PositiveInt.check(
+    Schema.isLessThanOrEqualTo(MaximumTransitionJournalCanonicalBytes)
+  ),
+  maxCatchWaitArms: PositiveInt,
+  maxTimerDelayMillis: BpmnTime.MaximumDelayMillis,
+  maxTimerExpressionUtf8Bytes: PositiveInt.check(
+    Schema.isLessThanOrEqualTo(BpmnTime.MaximumTimerLexicalUtf8Bytes)
+  ),
+  maxMessageCorrelationComponents: PositiveInt,
+  maxMessageCorrelationCanonicalBytes: PositiveInt,
+  maxMessagePayloadCanonicalBytes: PositiveInt,
   maxMultiInstanceCardinality: PositiveInt,
   maxMultiInstanceCollectionCanonicalBytes: PositiveInt,
   maxMultiInstanceItemCanonicalBytes: PositiveInt,
@@ -799,6 +991,7 @@ export const CompileOptions = Schema.Struct({
   limits: KernelLimits,
   evaluatorBindings: Schema.Array(BpmnExpression.EvaluatorBinding),
   taskBindings: Schema.optionalKey(Schema.Array(BpmnActivityV3.TaskBinding)),
+  messageBindings: Schema.optionalKey(Schema.Array(BpmnEventV3.MessageBinding)),
   dataDocument: Schema.optionalKey(BpmnData.BpmnDataDocument),
   collectionBindings: Schema.optionalKey(
     Schema.Array(MultiInstanceCollectionBinding)
@@ -833,6 +1026,7 @@ export const ExecutableFingerprintDocument = Schema.Struct({
   limits: KernelLimits,
   evaluatorBindings: Schema.Array(BpmnExpression.EvaluatorBinding),
   taskBindings: Schema.Array(BpmnActivityV3.TaskBinding),
+  messageBindings: Schema.Array(BpmnEventV3.MessageBinding),
   dataDocument: Schema.NullOr(BpmnData.BpmnDataDocument),
   collectionBindings: Schema.Array(MultiInstanceCollectionBinding),
   model: BpmnModel.BpmnModel
@@ -863,6 +1057,7 @@ export interface CompiledKernel {
   readonly profileId: string
   readonly evaluatorBindings: ReadonlyArray<BpmnExpression.EvaluatorBinding>
   readonly taskBindings: ReadonlyArray<BpmnActivityV3.TaskBinding>
+  readonly messageBindings: ReadonlyArray<BpmnEventV3.MessageBinding>
   readonly dataDocument: BpmnData.BpmnDataDocument | null
   readonly collectionBindings: ReadonlyArray<MultiInstanceCollectionBinding>
   readonly rootProcessId: string
@@ -873,6 +1068,10 @@ export interface CompiledKernel {
   readonly flowById: ReadonlyMap<string, BpmnModel.SequenceFlow>
   readonly orderedOutgoingByNodeId: ReadonlyMap<string, ReadonlyArray<string>>
   readonly taskBindingByTaskNodeId: ReadonlyMap<string, BpmnActivityV3.TaskBinding>
+  readonly messageBindingByCatchEventNodeId: ReadonlyMap<
+    string,
+    BpmnEventV3.MessageBinding
+  >
   readonly collectionBindingByTaskNodeId: ReadonlyMap<
     string,
     MultiInstanceCollectionBinding
@@ -885,6 +1084,7 @@ interface CompiledStructure {
   readonly profileId: string
   readonly evaluatorBindings: ReadonlyArray<BpmnExpression.EvaluatorBinding>
   readonly taskBindings: ReadonlyArray<BpmnActivityV3.TaskBinding>
+  readonly messageBindings: ReadonlyArray<BpmnEventV3.MessageBinding>
   readonly dataDocument: BpmnData.BpmnDataDocument | null
   readonly collectionBindings: ReadonlyArray<MultiInstanceCollectionBinding>
   readonly rootProcessId: string
@@ -898,6 +1098,10 @@ interface CompiledStructure {
     ReadonlyArray<string>
   >
   readonly taskBindingByTaskNodeId: ReadonlyMap<string, BpmnActivityV3.TaskBinding>
+  readonly messageBindingByCatchEventNodeId: ReadonlyMap<
+    string,
+    BpmnEventV3.MessageBinding
+  >
   readonly collectionBindingByTaskNodeId: ReadonlyMap<
     string,
     MultiInstanceCollectionBinding
@@ -1017,7 +1221,17 @@ const supportedScopeNode = (
   node: BpmnModel.FlowNode
 ): node is BpmnModel.SubProcess => node._tag === "SubProcess"
 
-type Mutable<T> = T extends ReadonlyArray<infer U> ? Array<Mutable<U>>
+type Mutable<T> = T extends
+  | string
+  | number
+  | boolean
+  | bigint
+  | symbol
+  | null
+  | undefined ? T
+  : T extends readonly [infer Head, ...infer Rest]
+    ? [Mutable<Head>, ...{ -readonly [K in keyof Rest]: Mutable<Rest[K]> }]
+  : T extends ReadonlyArray<infer U> ? Array<Mutable<U>>
   : T extends object ? { -readonly [K in keyof T]: Mutable<T[K]> }
   : T
 
@@ -1028,6 +1242,12 @@ type MutableGatewayFrame = Mutable<BpmnExecutionState.GatewayFrame>
 type MutableLoopFrame = Mutable<BpmnExecutionState.LoopFrame>
 type MutableMultiInstanceGroup = Mutable<BpmnExecutionState.MultiInstanceGroup>
 type MutableMultiInstanceMember = Mutable<BpmnExecutionState.MultiInstanceMember>
+type MutableCatchWaitGroup = Mutable<BpmnExecutionState.CatchWaitGroup>
+type MutableSubscription = Mutable<BpmnExecutionState.Subscription>
+type MutableTimer = Mutable<BpmnExecutionState.Timer>
+type MutableMessageDeliveryRecord = Mutable<
+  BpmnExecutionState.MessageDeliveryRecord
+>
 
 const directClone = <A>(value: A): Mutable<A> => structuredClone(value) as Mutable<A>
 
@@ -1042,6 +1262,22 @@ const decodeInitializeCommand = Schema.decodeUnknownResult(
 )
 const decodeCompleteTaskCommand = Schema.decodeUnknownResult(CompleteTaskCommand, strictParseOptions)
 const decodeResolveTaskCommand = Schema.decodeUnknownResult(ResolveTaskCommand, strictParseOptions)
+const decodeDeliverMessageCommand = Schema.decodeUnknownResult(
+  BpmnEventV3.DeliverMessageCommand,
+  strictParseOptions
+)
+const decodeAcknowledgeTimerArmCommand = Schema.decodeUnknownResult(
+  BpmnEventV3.AcknowledgeTimerArmCommand,
+  strictParseOptions
+)
+const decodeObserveDueTimerCommand = Schema.decodeUnknownResult(
+  BpmnEventV3.ObserveDueTimerCommand,
+  strictParseOptions
+)
+const decodeCorrelationKey = Schema.decodeUnknownResult(
+  BpmnEventV3.CorrelationKey,
+  strictParseOptions
+)
 const decodeTransitionJournal = Schema.decodeUnknownResult(TransitionJournal, strictParseOptions)
 const decodeTaskOccurrenceCoordinates = Schema.decodeUnknownResult(
   TaskOccurrenceCoordinates,
@@ -1094,6 +1330,49 @@ const latestStateTimestamp = (
         timestamps.push(member.endedAt)
       }
     }
+  }
+  for (const group of state.catchWaitGroups) {
+    timestamps.push(group.openedAt)
+    if (group.closedAt !== undefined) {
+      timestamps.push(group.closedAt)
+    }
+    if (group.winner !== undefined) {
+      timestamps.push(group.winner.recordedAt)
+    }
+  }
+  for (const subscription of state.subscriptions) {
+    timestamps.push(subscription.openedAt)
+    if (subscription.closedAt !== undefined) {
+      timestamps.push(subscription.closedAt)
+    }
+    if (
+      subscription._tag === "MessageCatchSubscription" &&
+      subscription.receipt !== undefined
+    ) {
+      timestamps.push(subscription.receipt.acceptedAt)
+    }
+  }
+  for (const timer of state.timers) {
+    timestamps.push(timer.scheduledAt)
+    if (timer.armReceipt !== undefined) {
+      timestamps.push(timer.armReceipt.armedAt)
+    }
+    if (timer.armAcknowledgedAt !== undefined) {
+      timestamps.push(timer.armAcknowledgedAt)
+    }
+    if (timer.observedAt !== undefined) {
+      timestamps.push(timer.observedAt)
+    }
+    if (timer.firedAt !== undefined) {
+      timestamps.push(timer.firedAt)
+    }
+    if (timer.cancelledAt !== undefined) {
+      timestamps.push(timer.cancelledAt)
+    }
+  }
+  for (const delivery of state.messageDeliveries) {
+    timestamps.push(delivery.receipt.acceptedAt)
+    timestamps.push(delivery.recordedAt)
   }
   return timestamps.reduce((latest, timestamp) => timestamp > latest ? timestamp : latest)
 }
@@ -1577,6 +1856,56 @@ const canonicalUtf8Bytes = (
   }
 }
 
+const utf8Bytes = (value: string): number | undefined => {
+  try {
+    return new TextEncoder().encode(value).byteLength
+  } catch {
+    return undefined
+  }
+}
+
+interface TimerLexicalLimitFailure {
+  readonly path: ReadonlyArray<string | number>
+  readonly actual?: number
+}
+
+const oversizedTimerLexical = (
+  timersInput: Schema.Json | undefined,
+  path: ReadonlyArray<string | number>,
+  maximum: number
+): TimerLexicalLimitFailure | undefined => {
+  if (!Array.isArray(timersInput)) {
+    return undefined
+  }
+  for (let index = 0; index < timersInput.length; index++) {
+    const timer = timersInput[index]
+    if (
+      timer === null ||
+      typeof timer !== "object" ||
+      Array.isArray(timer)
+    ) {
+      continue
+    }
+    const schedule = timer.schedule
+    if (
+      schedule === null ||
+      typeof schedule !== "object" ||
+      Array.isArray(schedule) ||
+      typeof schedule.lexical !== "string"
+    ) {
+      continue
+    }
+    const actual = utf8Bytes(schedule.lexical)
+    if (actual === undefined || actual > maximum) {
+      return {
+        path: [...path, index, "schedule", "lexical"],
+        ...(actual === undefined ? undefined : { actual })
+      }
+    }
+  }
+  return undefined
+}
+
 const standardLoopBranch = (
   invocation: BpmnExecutionState.InvocationIdentity
 ):
@@ -1639,7 +1968,46 @@ const validateKernelState = (
   kernel: CompiledKernel,
   input: unknown
 ): Result.Result<BpmnExecutionState.BpmnExecutionState, Diagnostic.CompilationError> => {
-  const validated = BpmnExecutionState.validate(kernel.model, input)
+  const stateSnapshot = Json.snapshot(input, {
+    maxTotalBytes: kernel.limits.maxExecutionStateCanonicalBytes
+  })
+  if (Result.isFailure(stateSnapshot)) {
+    return Result.fail(compilationError(error(
+      Codes.InvalidKernelState,
+      stateSnapshot.failure.message,
+      ["state", ...stateSnapshot.failure.path],
+      {
+        maximumCanonicalBytes: kernel.limits.maxExecutionStateCanonicalBytes
+      }
+    )))
+  }
+  const stateDocument = stateSnapshot.success
+  const stateTimerFailure = stateDocument !== null &&
+      typeof stateDocument === "object" &&
+      !Array.isArray(stateDocument)
+    ? oversizedTimerLexical(
+      (stateDocument as Schema.JsonObject).timers,
+      ["timers"],
+      kernel.limits.maxTimerExpressionUtf8Bytes
+    )
+    : undefined
+  if (stateTimerFailure !== undefined) {
+    return Result.fail(compilationError(error(
+      Codes.InvalidKernelState,
+      "Persisted Timer lexical value exceeds its compiled UTF-8 byte limit",
+      ["state", ...stateTimerFailure.path],
+      {
+        ...(stateTimerFailure.actual === undefined
+          ? undefined
+          : { actual: stateTimerFailure.actual }),
+        maximum: kernel.limits.maxTimerExpressionUtf8Bytes
+      }
+    )))
+  }
+  const validated = BpmnExecutionState.validate(
+    kernel.model,
+    stateSnapshot.success
+  )
   if (Result.isFailure(validated)) {
     return Result.fail(validated.failure)
   }
@@ -1849,9 +2217,20 @@ const validateKernelState = (
     }
     if (token.position._tag === "AtNode") {
       const node = kernel.nodeById.get(token.position.nodeId)
-      if (node?._tag !== "Task") {
+      const catchWait = state.catchWaitGroups.find((group) => group.ownerTokenId === token.tokenId)
+      const isCatchWaitNode = catchWait !== undefined &&
+        (
+          catchWait.source._tag === "StandaloneCatch" &&
+            node?._tag === "IntermediateCatchEvent" &&
+            catchWait.source.catchEventNodeId === node.id ||
+          catchWait.source._tag === "EventBasedGateway" &&
+            node?._tag === "Gateway" &&
+            node.gatewayKind === "event-based" &&
+            catchWait.source.gatewayNodeId === node.id
+        )
+      if (node?._tag !== "Task" && !isCatchWaitNode) {
         stateError(
-          `Stable node token '${token.tokenId}' must identify a task in this token-kernel subset`,
+          `Stable node token '${token.tokenId}' must identify a Task or one exact active/closed catch wait`,
           ["tokens", index, "position", "nodeId"]
         )
       }
@@ -2130,10 +2509,196 @@ const validateKernelState = (
     }
   }
 
+  for (let index = 0; index < state.catchWaitGroups.length; index++) {
+    const group = state.catchWaitGroups[index]!
+    if (group.armIds.length > kernel.limits.maxCatchWaitArms) {
+      stateError(
+        `Catch wait '${group.waitGroupId}' exceeds the compiled arm limit`,
+        ["catchWaitGroups", index, "armIds"],
+        {
+          actual: group.armIds.length,
+          maximum: kernel.limits.maxCatchWaitArms
+        }
+      )
+    }
+    if (group.status !== "won" || group.winner === undefined) {
+      continue
+    }
+    const winner = group.winner
+    const groupTimers = state.timers.filter((timer) => timer.waitGroupId === group.waitGroupId)
+    if (winner._tag === "MessageWinner") {
+      const timerAlreadyDue = groupTimers.find((timer) => logicalTimerDeadline(timer) <= winner.acceptedAt)
+      if (timerAlreadyDue !== undefined) {
+        stateError(
+          `Message winner '${winner.deliveryId}' cannot outrank due Timer '${timerAlreadyDue.timerId}'`,
+          ["catchWaitGroups", index, "winner"]
+        )
+      }
+      continue
+    }
+    const expectedTimer = groupTimers
+      .filter((timer) => logicalTimerDeadline(timer) <= winner.observedAt)
+      .sort((left, right) => {
+        const deadline = logicalTimerDeadline(left).localeCompare(
+          logicalTimerDeadline(right)
+        )
+        if (deadline !== 0) {
+          return deadline
+        }
+        const leftOrdinal = state.subscriptions.find((arm) =>
+          arm.waitGroupId === group.waitGroupId &&
+          arm.armId === left.armId
+        )?.ordinal ?? Number.MAX_SAFE_INTEGER
+        const rightOrdinal = state.subscriptions.find((arm) =>
+          arm.waitGroupId === group.waitGroupId &&
+          arm.armId === right.armId
+        )?.ordinal ?? Number.MAX_SAFE_INTEGER
+        const ordinal = leftOrdinal - rightOrdinal
+        return ordinal !== 0
+          ? ordinal
+          : left.timerId.localeCompare(right.timerId)
+      })[0]
+    if (
+      expectedTimer === undefined ||
+      expectedTimer.timerId !== winner.timerId ||
+      expectedTimer.armId !== winner.armId ||
+      expectedTimer.schedule.dueAt !== winner.dueAt ||
+      logicalTimerDeadline(expectedTimer) !== winner.selectedAt
+    ) {
+      stateError(
+        `Timer winner '${winner.timerId}' is not the deterministic earliest eligible Timer`,
+        ["catchWaitGroups", index, "winner"]
+      )
+    }
+  }
+  for (let index = 0; index < state.subscriptions.length; index++) {
+    const arm = state.subscriptions[index]!
+    if (arm._tag !== "MessageCatchSubscription") {
+      continue
+    }
+    const binding = kernel.messageBindingByCatchEventNodeId.get(
+      arm.ownerNodeId
+    )
+    const correlationBytes = canonicalUtf8Bytes(
+      arm.correlationKey as Schema.Json
+    )
+    if (
+      binding === undefined ||
+      binding.messageRef !== arm.messageRef
+    ) {
+      stateError(
+        `Message arm '${arm.armId}' does not match its compiled binding`,
+        ["subscriptions", index]
+      )
+    }
+    if (
+      arm.correlationKey.length >
+        kernel.limits.maxMessageCorrelationComponents ||
+      Result.isFailure(correlationBytes) ||
+      correlationBytes.success >
+        kernel.limits.maxMessageCorrelationCanonicalBytes
+    ) {
+      stateError(
+        `Message arm '${arm.armId}' correlation exceeds its compiled bound`,
+        ["subscriptions", index, "correlationKey"]
+      )
+    }
+    if (arm.receipt !== undefined) {
+      const payloadBytes = canonicalUtf8Bytes(arm.receipt.payload)
+      if (
+        binding === undefined ||
+        !sameJson(
+          arm.receipt.payloadContract,
+          binding.payloadContract
+        ) ||
+        !sameJson(
+          arm.receipt.authorization.policy,
+          binding.authorizationPolicy
+        )
+      ) {
+        stateError(
+          `Message arm '${arm.armId}' receipt does not match its compiled payload and authorization pins`,
+          ["subscriptions", index, "receipt"]
+        )
+      }
+      if (
+        Result.isFailure(payloadBytes) ||
+        payloadBytes.success >
+          kernel.limits.maxMessagePayloadCanonicalBytes
+      ) {
+        stateError(
+          `Message arm '${arm.armId}' payload exceeds its compiled canonical-byte limit`,
+          ["subscriptions", index, "receipt", "payload"]
+        )
+      }
+    }
+  }
+  for (let index = 0; index < state.messageDeliveries.length; index++) {
+    const delivery = state.messageDeliveries[index]!
+    const arm = state.subscriptions.find((candidate) =>
+      candidate.waitGroupId === delivery.target.waitGroupId &&
+      candidate.armId === delivery.target.armId
+    )
+    const binding = arm?._tag === "MessageCatchSubscription"
+      ? kernel.messageBindingByCatchEventNodeId.get(arm.ownerNodeId)
+      : undefined
+    const payloadBytes = canonicalUtf8Bytes(delivery.receipt.payload)
+    if (
+      arm?._tag !== "MessageCatchSubscription" ||
+      binding === undefined ||
+      !sameJson(
+        delivery.receipt.payloadContract,
+        binding.payloadContract
+      ) ||
+      !sameJson(
+        delivery.receipt.authorization.policy,
+        binding.authorizationPolicy
+      ) ||
+      Result.isFailure(payloadBytes) ||
+      payloadBytes.success >
+        kernel.limits.maxMessagePayloadCanonicalBytes
+    ) {
+      stateError(
+        `Message delivery '${delivery.receipt.deliveryId}' does not match its compiled payload, authorization, or size contract`,
+        ["messageDeliveries", index]
+      )
+    }
+  }
+  for (let index = 0; index < state.timers.length; index++) {
+    const timer = state.timers[index]!
+    const lexicalBytes = utf8Bytes(timer.schedule.lexical)
+    if (
+      timer.schedule.delayMillis >
+        kernel.limits.maxTimerDelayMillis
+    ) {
+      stateError(
+        `Timer '${timer.timerId}' exceeds its compiled delay bound`,
+        ["timers", index, "schedule", "delayMillis"],
+        {
+          actual: timer.schedule.delayMillis,
+          maximum: kernel.limits.maxTimerDelayMillis
+        }
+      )
+    }
+    if (
+      lexicalBytes === undefined ||
+      lexicalBytes > kernel.limits.maxTimerExpressionUtf8Bytes
+    ) {
+      stateError(
+        `Timer '${timer.timerId}' lexical value exceeds its compiled UTF-8 byte bound`,
+        ["timers", index, "schedule", "lexical"],
+        lexicalBytes === undefined
+          ? undefined
+          : {
+            actual: lexicalBytes,
+            maximum: kernel.limits.maxTimerExpressionUtf8Bytes
+          }
+      )
+    }
+  }
+
   const unsupportedStructures = [
     ["callFrames", state.callFrames],
-    ["subscriptions", state.subscriptions],
-    ["timers", state.timers],
     ["workItems", state.workItems],
     ["compensationRegistrations", state.compensationRegistrations],
     ["cancellationRegions", state.cancellationRegions]
@@ -2339,6 +2904,24 @@ type EvaluationTarget =
     readonly group: MutableMultiInstanceGroup
     readonly completedMember: MutableMultiInstanceMember
   }
+  | {
+    readonly _tag: "MessageCorrelation"
+    readonly catchEvent: BpmnModel.IntermediateCatchEvent
+    readonly binding: BpmnEventV3.MessageBinding
+    readonly waitGroupId: string
+    readonly armId: string
+    readonly generation: number
+  }
+  | {
+    readonly _tag: "TimerExpression"
+    readonly catchEvent: BpmnModel.IntermediateCatchEvent
+    readonly timerKind: "timeDuration" | "timeDate"
+    readonly waitGroupId: string
+    readonly armId: string
+    readonly timerId: string
+    readonly generation: number
+    readonly scheduledAt: ProtocolV2Wire.Timestamp
+  }
 
 const multiInstanceCounters = (
   group: Pick<BpmnExecutionState.MultiInstanceGroup, "members">
@@ -2367,6 +2950,9 @@ const evaluateExpression = (
 ): Result.Result<Schema.Json, Diagnostic.CompilationError> => {
   const targetId = target._tag === "SequenceFlowCondition"
     ? target.sequenceFlow.id
+    : target._tag === "MessageCorrelation" ||
+        target._tag === "TimerExpression"
+    ? target.catchEvent.id
     : target.activity.id
   const targetLabel = target._tag === "SequenceFlowCondition"
     ? `sequence flow '${targetId}'`
@@ -2376,7 +2962,11 @@ const evaluateExpression = (
     ? `multi-instance cardinality on activity '${targetId}'`
     : target._tag === "MultiInstanceCollection"
     ? `multi-instance collection on activity '${targetId}'`
-    : `multi-instance completion condition on activity '${targetId}'`
+    : target._tag === "MultiInstanceCompletionCondition"
+    ? `multi-instance completion condition on activity '${targetId}'`
+    : target._tag === "MessageCorrelation"
+    ? `Message correlation on catch event '${targetId}'`
+    : `Timer expression on catch event '${targetId}'`
   const targetPath: ReadonlyArray<Diagnostic.PathSegment> = target._tag === "SequenceFlowCondition"
     ? ["sequenceFlows"]
     : ["flowNodes"]
@@ -2402,12 +2992,30 @@ const evaluateExpression = (
       activation: target.activation,
       dataInputRef: target.dataInputRef
     }
-    : {
+    : target._tag === "MultiInstanceCompletionCondition"
+    ? {
       activityId: targetId,
       groupId: target.group.groupId,
       activation: target.group.activation,
       itemIndex: target.completedMember.index,
       itemKey: target.completedMember.itemKey
+    }
+    : target._tag === "MessageCorrelation"
+    ? {
+      catchEventNodeId: target.catchEvent.id,
+      waitGroupId: target.waitGroupId,
+      armId: target.armId,
+      generation: target.generation,
+      messageRef: target.binding.messageRef
+    }
+    : {
+      catchEventNodeId: target.catchEvent.id,
+      waitGroupId: target.waitGroupId,
+      armId: target.armId,
+      timerId: target.timerId,
+      generation: target.generation,
+      timerKind: target.timerKind,
+      scheduledAt: target.scheduledAt
     }
   if (services.evaluateExpression === undefined) {
     return Result.fail(compilationError(error(
@@ -2528,7 +3136,8 @@ const evaluateExpression = (
       scopeInstance: frozenScope,
       state: frozenState
     }
-    : {
+    : target._tag === "MultiInstanceCompletionCondition"
+    ? {
       _tag: "MultiInstanceCompletionCondition" as const,
       expression,
       activity: target.activity,
@@ -2538,6 +3147,31 @@ const evaluateExpression = (
         loopCounter: frozenMember!.index,
         ...multiInstanceCounters(frozenGroup!)
       },
+      scopeInstance: frozenScope,
+      state: frozenState
+    }
+    : target._tag === "MessageCorrelation"
+    ? {
+      _tag: "MessageCorrelation" as const,
+      expression,
+      catchEvent: target.catchEvent,
+      binding: target.binding,
+      waitGroupId: target.waitGroupId,
+      armId: target.armId,
+      generation: target.generation,
+      scopeInstance: frozenScope,
+      state: frozenState
+    }
+    : {
+      _tag: "TimerExpression" as const,
+      expression,
+      catchEvent: target.catchEvent,
+      timerKind: target.timerKind,
+      waitGroupId: target.waitGroupId,
+      armId: target.armId,
+      timerId: target.timerId,
+      generation: target.generation,
+      scheduledAt: target.scheduledAt,
       scopeInstance: frozenScope,
       state: frozenState
     }
@@ -2597,8 +3231,11 @@ const evaluateExpression = (
     context: contextSnapshot.success,
     expectedResult: target._tag === "MultiInstanceCardinality"
       ? "non-negative-integer"
-      : target._tag === "MultiInstanceCollection"
+      : target._tag === "MultiInstanceCollection" ||
+          target._tag === "MessageCorrelation"
       ? "json-array"
+      : target._tag === "TimerExpression"
+      ? "string"
       : "boolean"
   }
 
@@ -2673,8 +3310,11 @@ const evaluateExpression = (
       ? typeof outcome.result !== "number" ||
         !Number.isSafeInteger(outcome.result) ||
         outcome.result < 0
-      : target._tag === "MultiInstanceCollection"
+      : target._tag === "MultiInstanceCollection" ||
+          target._tag === "MessageCorrelation"
       ? !Array.isArray(outcome.result)
+      : target._tag === "TimerExpression"
+      ? typeof outcome.result !== "string"
       : typeof outcome.result !== "boolean"
   ) {
     return Result.fail(compilationError(error(
@@ -2685,8 +3325,11 @@ const evaluateExpression = (
         ...targetDetails as Record<string, Schema.Json>,
         expectedResult: target._tag === "MultiInstanceCardinality"
           ? "non-negative-integer"
-          : target._tag === "MultiInstanceCollection"
+          : target._tag === "MultiInstanceCollection" ||
+              target._tag === "MessageCorrelation"
           ? "json-array"
+          : target._tag === "TimerExpression"
+          ? "string"
           : "boolean"
       }
     )))
@@ -2743,6 +3386,100 @@ const evaluateExpression = (
     }
     collectionCanonicalBytes = measuredCollection.success
     itemCanonicalBytes = measuredItems
+  }
+  let correlationCanonicalBytes: number | undefined
+  let correlationKey: BpmnEventV3.CorrelationKey | undefined
+  if (target._tag === "MessageCorrelation") {
+    const decodedCorrelation = decodeCorrelationKey(outcome.result)
+    const measuredCorrelation = Array.isArray(outcome.result)
+      ? canonicalUtf8Bytes(outcome.result as Schema.Json)
+      : undefined
+    if (
+      Result.isFailure(decodedCorrelation) ||
+      measuredCorrelation === undefined ||
+      Result.isFailure(measuredCorrelation) ||
+      decodedCorrelation.success.length >
+        kernel.limits.maxMessageCorrelationComponents ||
+      measuredCorrelation.success >
+        kernel.limits.maxMessageCorrelationCanonicalBytes
+    ) {
+      return Result.fail(compilationError(error(
+        Codes.InvalidKernelLimits,
+        `Message correlation for catch '${target.catchEvent.id}' must be one bounded, ordered, non-empty atomic key`,
+        ["limits"],
+        {
+          maximumComponents: kernel.limits.maxMessageCorrelationComponents,
+          maximumCanonicalBytes: kernel.limits.maxMessageCorrelationCanonicalBytes
+        }
+      )))
+    }
+    correlationKey = decodedCorrelation.success
+    correlationCanonicalBytes = measuredCorrelation.success
+  }
+  let timerResolution:
+    | BpmnTime.DurationResolution
+    | BpmnTime.TimeDateResolution
+    | undefined
+  if (target._tag === "TimerExpression") {
+    const evaluatedUtf8Bytes = utf8Bytes(outcome.result as string)
+    if (
+      evaluatedUtf8Bytes === undefined ||
+      evaluatedUtf8Bytes >
+        kernel.limits.maxTimerExpressionUtf8Bytes
+    ) {
+      return Result.fail(compilationError(error(
+        Codes.InvalidKernelLimits,
+        `Timer expression for catch '${target.catchEvent.id}' exceeds its compiled UTF-8 byte limit`,
+        ["limits", "maxTimerExpressionUtf8Bytes"],
+        evaluatedUtf8Bytes === undefined
+          ? undefined
+          : {
+            actual: evaluatedUtf8Bytes,
+            maximum: kernel.limits.maxTimerExpressionUtf8Bytes
+          }
+      )))
+    }
+    const resolved = target.timerKind === "timeDuration"
+      ? BpmnTime.durationDueAt(
+        target.scheduledAt,
+        outcome.result,
+        kernel.limits.maxTimerDelayMillis
+      )
+      : BpmnTime.timeDateDueAt(
+        target.scheduledAt,
+        outcome.result,
+        kernel.limits.maxTimerDelayMillis
+      )
+    if (Result.isFailure(resolved)) {
+      return Result.fail(compilationError(error(
+        Codes.EvaluationFailed,
+        `Timer expression for catch '${target.catchEvent.id}' returned an unsupported time value`,
+        ["flowNodes"],
+        {
+          timerCode: resolved.failure.code,
+          timerMessage: resolved.failure.message
+        }
+      )))
+    }
+    const normalizedUtf8Bytes = utf8Bytes(resolved.success.lexical)
+    if (
+      normalizedUtf8Bytes === undefined ||
+      normalizedUtf8Bytes >
+        kernel.limits.maxTimerExpressionUtf8Bytes
+    ) {
+      return Result.fail(compilationError(error(
+        Codes.InvalidKernelLimits,
+        `Normalized Timer value for catch '${target.catchEvent.id}' exceeds its compiled UTF-8 byte limit`,
+        ["limits", "maxTimerExpressionUtf8Bytes"],
+        normalizedUtf8Bytes === undefined
+          ? undefined
+          : {
+            actual: normalizedUtf8Bytes,
+            maximum: kernel.limits.maxTimerExpressionUtf8Bytes
+          }
+      )))
+    }
+    timerResolution = resolved.success
   }
   const usage = {
     sourceUtf8Bytes,
@@ -2821,6 +3558,42 @@ const evaluateExpression = (
       })
       break
     }
+    case "MessageCorrelation": {
+      recordEvent(journal, {
+        _tag: "MessageCorrelationEvaluated",
+        waitGroupId: target.waitGroupId,
+        armId: target.armId,
+        catchEventNodeId: target.catchEvent.id,
+        generation: target.generation,
+        expression,
+        evaluatorBinding,
+        usage,
+        correlationKey: correlationKey!,
+        correlationCanonicalBytes: correlationCanonicalBytes!
+      })
+      break
+    }
+    case "TimerExpression": {
+      recordEvent(journal, {
+        _tag: "TimerExpressionEvaluated",
+        waitGroupId: target.waitGroupId,
+        armId: target.armId,
+        timerId: target.timerId,
+        catchEventNodeId: target.catchEvent.id,
+        generation: target.generation,
+        timerKind: target.timerKind,
+        expression,
+        evaluatorBinding,
+        usage,
+        evaluatedValue: outcome.result as string,
+        lexicalVersion: timerResolution!.lexicalVersion,
+        lexical: timerResolution!.lexical,
+        delayMillis: timerResolution!.delayMillis,
+        scheduledAt: target.scheduledAt,
+        dueAt: timerResolution!.dueAt
+      })
+      break
+    }
   }
   return Result.succeed(outcome.result)
 }
@@ -2833,6 +3606,8 @@ const evaluateBooleanExpression = (
     EvaluationTarget,
     | { readonly _tag: "MultiInstanceCardinality" }
     | { readonly _tag: "MultiInstanceCollection" }
+    | { readonly _tag: "MessageCorrelation" }
+    | { readonly _tag: "TimerExpression" }
   >,
   scopeInstance: MutableScopeInstance,
   state: MutableState,
@@ -2916,6 +3691,7 @@ const consumeToken = (
     | "flow-advanced"
     | "task-completed"
     | "task-succeeded"
+    | "catch-event-completed"
     | "parallel-join-arrival"
     | "end-reached"
     | "subprocess-entered",
@@ -4061,6 +4837,603 @@ const findScope = (
   scopeInstanceId: string
 ): MutableScopeInstance | undefined => state.scopeInstances.find((scope) => scope.scopeInstanceId === scopeInstanceId)
 
+interface CatchWaitBranch {
+  readonly catchEvent: BpmnModel.IntermediateCatchEvent
+  readonly sourceSequenceFlowId?: string
+}
+
+const logicalTimerDeadline = (
+  timer: Pick<BpmnExecutionState.Timer, "scheduledAt" | "schedule">
+): ProtocolV2Wire.Timestamp =>
+  timer.schedule.dueAt < timer.scheduledAt
+    ? timer.scheduledAt
+    : timer.schedule.dueAt
+
+type CatchWaitTrigger = Extract<
+  TransitionEvent,
+  { readonly _tag: "CatchWaitResolved" }
+>["trigger"]
+
+const resolveCatchWait = (
+  kernel: CompiledKernel,
+  state: MutableState,
+  group: MutableCatchWaitGroup,
+  winner: BpmnExecutionState.CatchWaitWinner,
+  trigger: CatchWaitTrigger,
+  journal: Array<TransitionEvent>
+): Result.Result<void, Diagnostic.CompilationError> => {
+  const messageReceipt = trigger._tag === "MessageDelivery"
+    ? trigger.receipt
+    : undefined
+  if (group.status !== "waiting") {
+    return Result.fail(compilationError(error(
+      Codes.InvalidCommand,
+      `Catch wait '${group.waitGroupId}' is already closed`,
+      ["catchWaitGroups"]
+    )))
+  }
+  const winnerArm = state.subscriptions.find((arm) =>
+    arm.waitGroupId === group.waitGroupId &&
+    arm.armId === winner.armId
+  )
+  const winnerTimer = winner._tag === "TimerWinner"
+    ? state.timers.find((timer) =>
+      timer.waitGroupId === group.waitGroupId &&
+      timer.armId === winner.armId &&
+      timer.timerId === winner.timerId
+    )
+    : undefined
+  const triggerTarget = trigger._tag === "ImmediateTimer"
+    ? undefined
+    : trigger.target
+  const triggerArm = triggerTarget === undefined
+    ? undefined
+    : state.subscriptions.find((arm) =>
+      arm.waitGroupId === group.waitGroupId &&
+      arm.armId === triggerTarget.armId
+    )
+  const exactTriggerTarget = triggerTarget === undefined
+    ? false
+    : triggerTarget.waitGroupId === group.waitGroupId &&
+      triggerTarget.scopeInstanceId === group.scopeInstanceId &&
+      triggerTarget.tokenId === group.ownerTokenId &&
+      triggerTarget.generation === group.generation &&
+      triggerArm !== undefined &&
+      triggerTarget.catchEventNodeId === triggerArm.ownerNodeId &&
+      triggerArm.scopeInstanceId === triggerTarget.scopeInstanceId &&
+      triggerArm.tokenId === triggerTarget.tokenId &&
+      triggerArm.generation === triggerTarget.generation
+  const validTrigger = winner._tag === "MessageWinner"
+    ? trigger._tag === "MessageDelivery" &&
+      messageReceipt !== undefined &&
+      exactTriggerTarget &&
+      triggerArm?._tag === "MessageCatchSubscription" &&
+      triggerArm.armId === winner.armId &&
+      messageReceipt.deliveryId === winner.deliveryId &&
+      winner.acceptedAt === messageReceipt.acceptedAt &&
+      winner.selectedAt === messageReceipt.acceptedAt
+    : winnerTimer !== undefined &&
+      (
+        trigger._tag === "ImmediateTimer"
+          ? trigger.timerId === winner.timerId &&
+            trigger.observedAt === winner.observedAt
+          : trigger._tag === "TimerObservation"
+          ? exactTriggerTarget &&
+            triggerArm?._tag === "TimerCatchSubscription" &&
+            state.timers.some((timer) =>
+              timer.waitGroupId === group.waitGroupId &&
+              timer.armId === triggerArm.armId &&
+              timer.timerId === trigger.timerId &&
+              logicalTimerDeadline(timer) <= trigger.observedAt
+            ) &&
+            trigger.observedAt === winner.observedAt
+          : exactTriggerTarget &&
+            triggerArm?._tag === "MessageCatchSubscription" &&
+            logicalTimerDeadline(winnerTimer) <=
+              trigger.receipt.acceptedAt &&
+            winner.observedAt === trigger.receipt.acceptedAt
+      )
+  if (
+    winnerArm === undefined ||
+    !validTrigger ||
+    (messageReceipt !== undefined &&
+      state.messageDeliveries.some((delivery) => delivery.receipt.deliveryId === messageReceipt.deliveryId)) ||
+    (winner._tag === "MessageWinner" &&
+      (winnerArm._tag !== "MessageCatchSubscription" ||
+        messageReceipt === undefined)) ||
+    (winner._tag === "TimerWinner" &&
+      (winnerArm._tag !== "TimerCatchSubscription" ||
+        winnerTimer === undefined))
+  ) {
+    return Result.fail(compilationError(error(
+      Codes.InvalidCommand,
+      `Catch wait '${group.waitGroupId}' winner does not identify one exact arm`,
+      ["catchWaitGroups"]
+    )))
+  }
+
+  if (trigger._tag === "MessageDelivery") {
+    const delivery: MutableMessageDeliveryRecord = {
+      target: directClone(trigger.target),
+      receipt: directClone(trigger.receipt),
+      disposition: winner._tag === "MessageWinner"
+        ? "message-winner"
+        : "timer-preempted",
+      recordedAt: winner.recordedAt
+    }
+    state.messageDeliveries.push(delivery)
+  }
+  group.status = "won"
+  group.winner = directClone(winner)
+  group.closedAt = winner.recordedAt
+  const cancelledArmIds: Array<string> = []
+  const cancelledTimerIds: Array<string> = []
+  for (const armId of group.armIds) {
+    const arm = state.subscriptions.find((candidate) =>
+      candidate.waitGroupId === group.waitGroupId &&
+      candidate.armId === armId
+    )
+    if (arm === undefined) {
+      return Result.fail(compilationError(error(
+        Codes.InvalidKernelState,
+        `Catch wait '${group.waitGroupId}' lost arm '${armId}'`,
+        ["subscriptions"]
+      )))
+    }
+    arm.closedAt = winner.recordedAt
+    if (arm.armId === winner.armId) {
+      arm.status = "won"
+      delete arm.cancellationReason
+      if (
+        arm._tag === "MessageCatchSubscription" &&
+        messageReceipt !== undefined
+      ) {
+        arm.receipt = directClone(messageReceipt)
+      }
+    } else {
+      arm.status = "cancelled"
+      arm.cancellationReason = "choice-lost"
+      if (arm._tag === "MessageCatchSubscription") {
+        delete arm.receipt
+      }
+      cancelledArmIds.push(arm.armId)
+    }
+  }
+  for (const armId of group.armIds) {
+    const timer = state.timers.find((candidate) =>
+      candidate.waitGroupId === group.waitGroupId &&
+      candidate.armId === armId
+    )
+    if (timer === undefined) {
+      continue
+    }
+    if (
+      winner._tag === "TimerWinner" &&
+      timer.timerId === winner.timerId
+    ) {
+      timer.status = "fired"
+      timer.observedAt = winner.observedAt
+      timer.firedAt = winner.selectedAt
+      delete timer.cancelledAt
+      delete timer.cancellationReason
+    } else {
+      timer.status = "cancelled"
+      timer.cancelledAt = winner.recordedAt
+      timer.cancellationReason = "choice-lost"
+      delete timer.observedAt
+      delete timer.firedAt
+      cancelledTimerIds.push(timer.timerId)
+    }
+  }
+  recordEvent(journal, {
+    _tag: "CatchWaitResolved",
+    waitGroupId: group.waitGroupId,
+    winner,
+    trigger,
+    cancelledArmIds,
+    cancelledTimerIds,
+    closedAt: winner.recordedAt
+  })
+
+  const ownerToken = state.tokens.find((token) => token.tokenId === group.ownerTokenId)
+  const scope = findScope(state, group.scopeInstanceId)
+  const catchEvent = kernel.nodeById.get(winnerArm.ownerNodeId)
+  if (
+    ownerToken === undefined ||
+    ownerToken.status !== "active" ||
+    scope === undefined ||
+    catchEvent?._tag !== "IntermediateCatchEvent"
+  ) {
+    return Result.fail(compilationError(error(
+      Codes.InvalidKernelState,
+      `Catch wait '${group.waitGroupId}' cannot consume and route its winning activation`,
+      ["catchWaitGroups"]
+    )))
+  }
+  consumeToken(
+    ownerToken,
+    journal,
+    "catch-event-completed",
+    winner.recordedAt
+  )
+  const outgoing = kernel.orderedOutgoingByNodeId.get(catchEvent.id) ?? []
+  recordEvent(journal, {
+    _tag: "OutgoingSelected",
+    sourceNodeId: catchEvent.id,
+    routingKind: "catch-event",
+    sequenceFlowIds: outgoing
+  })
+  emitFlowTokens(
+    state,
+    journal,
+    scope,
+    outgoing,
+    winner.recordedAt
+  )
+  return Result.succeed(undefined)
+}
+
+const cancelCatchWait = (
+  state: MutableState,
+  group: MutableCatchWaitGroup,
+  reason: Extract<
+    BpmnExecutionState.CatchWaitGroup["cancellationReason"],
+    string
+  >,
+  journal: Array<TransitionEvent>,
+  now: ProtocolV2Wire.Timestamp
+): void => {
+  if (group.status !== "waiting") {
+    return
+  }
+  group.status = "cancelled"
+  group.cancellationReason = reason
+  group.closedAt = now
+  const timerIds: Array<string> = []
+  for (const armId of group.armIds) {
+    const arm = state.subscriptions.find((candidate) =>
+      candidate.waitGroupId === group.waitGroupId &&
+      candidate.armId === armId
+    )
+    if (arm === undefined) {
+      continue
+    }
+    arm.status = "cancelled"
+    arm.closedAt = now
+    arm.cancellationReason = reason
+    if (arm._tag === "MessageCatchSubscription") {
+      delete arm.receipt
+    }
+  }
+  for (const armId of group.armIds) {
+    const timer = state.timers.find((candidate) =>
+      candidate.waitGroupId === group.waitGroupId &&
+      candidate.armId === armId
+    )
+    if (timer === undefined) {
+      continue
+    }
+    timer.status = "cancelled"
+    timer.cancelledAt = now
+    timer.cancellationReason = reason
+    delete timer.observedAt
+    delete timer.firedAt
+    timerIds.push(timer.timerId)
+  }
+  recordEvent(journal, {
+    _tag: "CatchWaitCancelled",
+    waitGroupId: group.waitGroupId,
+    reason,
+    armIds: group.armIds,
+    timerIds,
+    cancelledAt: now
+  })
+}
+
+const openCatchWait = (
+  kernel: CompiledKernel,
+  services: Services,
+  state: MutableState,
+  source:
+    | BpmnModel.IntermediateCatchEvent
+    | BpmnModel.Gateway,
+  ownerToken: MutableToken,
+  scope: MutableScopeInstance,
+  branches: ReadonlyArray<CatchWaitBranch>,
+  journal: Array<TransitionEvent>
+): Result.Result<void, Diagnostic.CompilationError> => {
+  if (
+    branches.length === 0 ||
+    branches.length > kernel.limits.maxCatchWaitArms
+  ) {
+    return Result.fail(compilationError(error(
+      Codes.InvalidKernelLimits,
+      `Catch wait at '${source.id}' has '${branches.length}' arms outside the compiled bound`,
+      ["limits", "maxCatchWaitArms"]
+    )))
+  }
+  const waitGroupId = nextId(
+    state.catchWaitGroups.map((group) => group.waitGroupId),
+    "catch-wait:"
+  )
+  const armIds: Array<string> = []
+  const subscriptions: Array<MutableSubscription> = []
+  const timers: Array<MutableTimer> = []
+  for (let ordinal = 0; ordinal < branches.length; ordinal++) {
+    const branch = branches[ordinal]!
+    const definitions = resolvedEventDefinitions(
+      kernel.model,
+      branch.catchEvent
+    )
+    const definition = definitions.length === 1
+      ? definitions[0]
+      : undefined
+    const armId = nextId(
+      [
+        ...state.subscriptions.map((arm) => arm.armId),
+        ...armIds
+      ],
+      "catch-arm:"
+    )
+    armIds.push(armId)
+    const common = {
+      armId,
+      waitGroupId,
+      ownerNodeId: branch.catchEvent.id,
+      ...(branch.sourceSequenceFlowId === undefined
+        ? undefined
+        : { sourceSequenceFlowId: branch.sourceSequenceFlowId }),
+      processId: branch.catchEvent.processId,
+      scopeInstanceId: scope.scopeInstanceId,
+      tokenId: ownerToken.tokenId,
+      generation: scope.invocation.generation,
+      ordinal,
+      status: "waiting" as const,
+      openedAt: services.now
+    }
+    if (definition?._tag === "MessageEventDefinition") {
+      const binding = kernel.messageBindingByCatchEventNodeId.get(
+        branch.catchEvent.id
+      )
+      if (
+        binding === undefined ||
+        definition.messageRef === undefined ||
+        binding.messageRef !== definition.messageRef
+      ) {
+        return Result.fail(compilationError(error(
+          Codes.InvalidExecutableStructure,
+          `Message catch '${branch.catchEvent.id}' has no exact compiled binding`,
+          ["flowNodes"]
+        )))
+      }
+      const evaluated = evaluateExpression(
+        kernel,
+        services,
+        binding.correlationExpression,
+        {
+          _tag: "MessageCorrelation",
+          catchEvent: branch.catchEvent,
+          binding,
+          waitGroupId,
+          armId,
+          generation: scope.invocation.generation
+        },
+        scope,
+        state,
+        journal
+      )
+      const correlation = Result.isSuccess(evaluated)
+        ? decodeCorrelationKey(evaluated.success)
+        : undefined
+      if (
+        Result.isFailure(evaluated) ||
+        correlation === undefined ||
+        Result.isFailure(correlation)
+      ) {
+        return Result.isFailure(evaluated)
+          ? Result.fail(evaluated.failure)
+          : Result.fail(compilationError(error(
+            Codes.EvaluationFailed,
+            `Message correlation for catch '${branch.catchEvent.id}' is invalid`,
+            ["flowNodes"]
+          )))
+      }
+      subscriptions.push({
+        _tag: "MessageCatchSubscription",
+        ...common,
+        messageRef: binding.messageRef,
+        correlationKey: [
+          correlation.success[0],
+          ...correlation.success.slice(1)
+        ]
+      })
+      continue
+    }
+    if (definition?._tag !== "TimerEventDefinition") {
+      return Result.fail(compilationError(error(
+        Codes.InvalidExecutableStructure,
+        `Catch '${branch.catchEvent.id}' has no executable Message or Timer definition`,
+        ["flowNodes"]
+      )))
+    }
+    const timerKind = definition.timeDuration !== undefined
+      ? "timeDuration" as const
+      : "timeDate" as const
+    const expression = timerKind === "timeDuration"
+      ? definition.timeDuration
+      : definition.timeDate
+    if (expression === undefined) {
+      return Result.fail(compilationError(error(
+        Codes.InvalidExecutableStructure,
+        `Timer catch '${branch.catchEvent.id}' has no executable expression`,
+        ["flowNodes"]
+      )))
+    }
+    const timerId = nextId(
+      [
+        ...state.timers.map((timer) => timer.timerId),
+        ...timers.map((timer) => timer.timerId)
+      ],
+      "catch-timer:"
+    )
+    const evaluated = evaluateExpression(
+      kernel,
+      services,
+      expression,
+      {
+        _tag: "TimerExpression",
+        catchEvent: branch.catchEvent,
+        timerKind,
+        waitGroupId,
+        armId,
+        timerId,
+        generation: scope.invocation.generation,
+        scheduledAt: services.now
+      },
+      scope,
+      state,
+      journal
+    )
+    if (
+      Result.isFailure(evaluated) ||
+      typeof evaluated.success !== "string"
+    ) {
+      return Result.isFailure(evaluated)
+        ? Result.fail(evaluated.failure)
+        : Result.fail(compilationError(error(
+          Codes.EvaluationFailed,
+          `Timer expression for catch '${branch.catchEvent.id}' must return a string`,
+          ["flowNodes"]
+        )))
+    }
+    const resolved = timerKind === "timeDuration"
+      ? BpmnTime.durationDueAt(
+        services.now,
+        evaluated.success,
+        kernel.limits.maxTimerDelayMillis
+      )
+      : BpmnTime.timeDateDueAt(
+        services.now,
+        evaluated.success,
+        kernel.limits.maxTimerDelayMillis
+      )
+    if (Result.isFailure(resolved)) {
+      return Result.fail(compilationError(error(
+        Codes.EvaluationFailed,
+        `Timer expression for catch '${branch.catchEvent.id}' cannot be materialized`,
+        ["flowNodes"],
+        { timerCode: resolved.failure.code }
+      )))
+    }
+    subscriptions.push({
+      _tag: "TimerCatchSubscription",
+      ...common,
+      timerId
+    })
+    timers.push({
+      timerId,
+      armId,
+      waitGroupId,
+      processId: branch.catchEvent.processId,
+      scopeInstanceId: scope.scopeInstanceId,
+      tokenId: ownerToken.tokenId,
+      generation: scope.invocation.generation,
+      schedule: {
+        _tag: timerKind === "timeDuration"
+          ? "TimeDuration"
+          : "TimeDate",
+        lexicalVersion: resolved.success.lexicalVersion,
+        lexical: resolved.success.lexical,
+        delayMillis: resolved.success.delayMillis,
+        dueAt: resolved.success.dueAt
+      },
+      scheduledAt: services.now,
+      status: "scheduled"
+    })
+  }
+
+  const nonEmptyArmIds: [string, ...Array<string>] = [
+    armIds[0]!,
+    ...armIds.slice(1)
+  ]
+  const nonEmptySubscriptions: [
+    MutableSubscription,
+    ...Array<MutableSubscription>
+  ] = [
+    subscriptions[0]!,
+    ...subscriptions.slice(1)
+  ]
+  const group: MutableCatchWaitGroup = {
+    waitGroupId,
+    source: source._tag === "IntermediateCatchEvent"
+      ? {
+        _tag: "StandaloneCatch",
+        catchEventNodeId: source.id
+      }
+      : {
+        _tag: "EventBasedGateway",
+        gatewayNodeId: source.id
+      },
+    ownerTokenId: ownerToken.tokenId,
+    processId: source.processId,
+    scopeInstanceId: scope.scopeInstanceId,
+    generation: scope.invocation.generation,
+    armIds: nonEmptyArmIds,
+    status: "waiting",
+    openedAt: services.now
+  }
+  state.catchWaitGroups.push(group)
+  state.subscriptions.push(...subscriptions)
+  state.timers.push(...timers)
+  recordEvent(journal, {
+    _tag: "CatchWaitOpened",
+    group,
+    subscriptions: nonEmptySubscriptions,
+    timers
+  })
+
+  const immediatelyDue = timers
+    .filter((timer) => logicalTimerDeadline(timer) <= services.now)
+    .sort((left, right) => {
+      const due = logicalTimerDeadline(left).localeCompare(
+        logicalTimerDeadline(right)
+      )
+      if (due !== 0) {
+        return due
+      }
+      const leftArm = subscriptions.find((arm) => arm.armId === left.armId)!
+      const rightArm = subscriptions.find((arm) => arm.armId === right.armId)!
+      const ordinal = leftArm.ordinal - rightArm.ordinal
+      return ordinal !== 0
+        ? ordinal
+        : left.timerId.localeCompare(right.timerId)
+    })[0]
+  if (immediatelyDue !== undefined) {
+    const selectedAt = logicalTimerDeadline(immediatelyDue)
+    return resolveCatchWait(
+      kernel,
+      state,
+      group,
+      {
+        _tag: "TimerWinner",
+        armId: immediatelyDue.armId,
+        timerId: immediatelyDue.timerId,
+        dueAt: immediatelyDue.schedule.dueAt,
+        observedAt: services.now,
+        selectedAt,
+        recordedAt: services.now
+      },
+      {
+        _tag: "ImmediateTimer",
+        timerId: immediatelyDue.timerId,
+        observedAt: services.now
+      },
+      journal
+    )
+  }
+  return Result.succeed(undefined)
+}
+
 type RootFailureKind =
   | "UnmappedBusinessFailure"
   | "UncaughtBpmnError"
@@ -4139,6 +5512,15 @@ const failExecutionFromTask = (
         now
       )
     }
+  }
+  for (const group of state.catchWaitGroups) {
+    cancelCatchWait(
+      state,
+      group,
+      "execution-failed",
+      journal,
+      now
+    )
   }
   const failureScopeIds = new Set(
     failureChain.map((scope) => scope.scopeInstanceId)
@@ -4441,6 +5823,37 @@ const routeNodeArrival = (
       })
       return Result.succeed(undefined)
     }
+    if (target._tag === "IntermediateCatchEvent") {
+      const waiting = createToken(
+        state as unknown as BpmnExecutionState.BpmnExecutionState,
+        scope,
+        {
+          _tag: "AtNode",
+          nodeId: target.id
+        },
+        services.now
+      )
+      state.tokens.push(waiting)
+      recordEvent(journal, {
+        _tag: "TokenEmitted",
+        tokenId: waiting.tokenId,
+        processId: waiting.processId,
+        scopeInstanceId: waiting.scopeInstanceId,
+        invocation: waiting.invocation,
+        position: waiting.position,
+        createdAt: waiting.createdAt
+      })
+      return openCatchWait(
+        kernel,
+        services,
+        state,
+        target,
+        waiting,
+        scope,
+        [{ catchEvent: target }],
+        journal
+      )
+    }
     if (target._tag === "SubProcess") {
       return Result.map(
         enterScope(
@@ -4460,6 +5873,60 @@ const routeNodeArrival = (
       return Result.succeed(undefined)
     }
     if (target._tag === "Gateway") {
+      if (target.gatewayKind === "event-based") {
+        const waiting = createToken(
+          state as unknown as BpmnExecutionState.BpmnExecutionState,
+          scope,
+          {
+            _tag: "AtNode",
+            nodeId: target.id
+          },
+          services.now
+        )
+        state.tokens.push(waiting)
+        recordEvent(journal, {
+          _tag: "TokenEmitted",
+          tokenId: waiting.tokenId,
+          processId: waiting.processId,
+          scopeInstanceId: waiting.scopeInstanceId,
+          invocation: waiting.invocation,
+          position: waiting.position,
+          createdAt: waiting.createdAt
+        })
+        const branches: Array<CatchWaitBranch> = []
+        for (
+          const outgoingId of kernel.orderedOutgoingByNodeId.get(target.id) ?? []
+        ) {
+          const outgoing = kernel.flowById.get(outgoingId)
+          const catchEvent = outgoing === undefined
+            ? undefined
+            : kernel.nodeById.get(outgoing.targetId)
+          if (
+            outgoing === undefined ||
+            catchEvent?._tag !== "IntermediateCatchEvent"
+          ) {
+            return Result.fail(compilationError(error(
+              Codes.InvalidExecutableStructure,
+              `Event-based gateway '${target.id}' has an invalid compiled arm`,
+              ["flowNodes"]
+            )))
+          }
+          branches.push({
+            catchEvent,
+            sourceSequenceFlowId: outgoing.id
+          })
+        }
+        return openCatchWait(
+          kernel,
+          services,
+          state,
+          target,
+          waiting,
+          scope,
+          branches,
+          journal
+        )
+      }
       if (target.gatewayKind === "exclusive") {
         if (target.gatewayDirection === "diverging") {
           return routeExclusiveGateway(kernel, services, state, target, scope, journal)
@@ -4655,6 +6122,45 @@ interface PendingTaskWait {
   readonly enteredAt: ProtocolV2Wire.Timestamp
 }
 
+interface PendingCatchOpen {
+  readonly source:
+    | BpmnModel.IntermediateCatchEvent
+    | BpmnModel.Gateway
+  readonly ownerTokenId: string
+  readonly scopeInstanceId: string
+  readonly generation: number
+  readonly openedAt: ProtocolV2Wire.Timestamp
+  readonly waitGroupId: string
+  readonly branches: ReadonlyArray<CatchWaitBranch>
+  readonly subscriptions: Array<MutableSubscription>
+  readonly timers: Array<MutableTimer>
+  nextBranchIndex: number
+}
+
+interface PendingCatchResolution {
+  readonly waitGroupId: string
+  readonly ownerTokenId: string
+  readonly catchEvent: BpmnModel.IntermediateCatchEvent
+  readonly scopeInstanceId: string
+  readonly recordedAt: ProtocolV2Wire.Timestamp
+  readonly outgoingSequenceFlowIds: ReadonlyArray<string>
+  stage: "consume" | "selection"
+}
+
+interface PendingCatchFence {
+  readonly ingressKind: "message"
+  readonly target: BpmnEventV3.CatchArmTarget
+  readonly externalId: string
+  readonly reason: "wait-closed"
+  readonly observedAt: ProtocolV2Wire.Timestamp
+}
+
+interface PendingImmediateTimer {
+  readonly waitGroupId: string
+  readonly timerId: string
+  readonly observedAt: ProtocolV2Wire.Timestamp
+}
+
 interface PendingResolvedTask {
   readonly resolution: BpmnActivityV3.ActivityResolution
   readonly kind: "Succeeded" | "Caught"
@@ -4798,6 +6304,7 @@ interface PendingFailureCleanup {
     readonly groupId: string
     readonly itemIndexes: Array<number>
   }>
+  readonly catchWaitGroupIds: Array<string>
   readonly interruptedScopeIds: Array<string>
   readonly failedScopeIds: Array<string>
   readonly rootScopeInstanceId: string
@@ -4858,8 +6365,10 @@ const emptyReplayState = (
   loopFrames: [],
   multiInstanceGroups: [],
   callFrames: [],
+  catchWaitGroups: [],
   subscriptions: [],
   timers: [],
+  messageDeliveries: [],
   workItems: [],
   compensationRegistrations: [],
   cancellationRegions: []
@@ -5002,6 +6511,10 @@ const replayJournal = (
   let pendingScopeEntry: PendingScopeEntry | undefined
   let pendingGatewayArrival: PendingGatewayArrival | undefined
   let pendingTaskWait: PendingTaskWait | undefined
+  let pendingCatchOpen: PendingCatchOpen | undefined
+  let pendingCatchResolution: PendingCatchResolution | undefined
+  let pendingCatchFence: PendingCatchFence | undefined
+  let pendingImmediateTimer: PendingImmediateTimer | undefined
   let pendingResolvedTask: PendingResolvedTask | undefined
   let pendingBoundaryErrorCatch: PendingBoundaryErrorCatch | undefined
   let pendingLoopTransition: PendingLoopTransition | undefined
@@ -5049,6 +6562,19 @@ const replayJournal = (
       ? event.createdAt
       : event._tag === "TaskWaiting"
       ? event.enteredAt
+      : event._tag === "TimerExpressionEvaluated"
+      ? event.scheduledAt
+      : event._tag === "CatchWaitOpened"
+      ? event.group.openedAt
+      : event._tag === "TimerArmAcknowledged"
+      ? event.acknowledgedAt
+      : event._tag === "CatchWaitResolved"
+      ? event.closedAt
+      : event._tag === "CatchWaitCancelled"
+      ? event.cancelledAt
+      : event._tag === "CatchIngressReplayed" ||
+          event._tag === "CatchIngressFenced"
+      ? event.observedAt
       : event._tag === "LoopOpened"
       ? event.openedAt
       : event._tag === "LoopIterationStarted"
@@ -5108,6 +6634,59 @@ const replayJournal = (
     }
     if (pendingTaskWait !== undefined && event._tag !== "TaskWaiting") {
       return journalFailure(index, "The journal omitted or reordered a causally required task wait")
+    }
+    if (pendingCatchOpen !== undefined) {
+      const branch = pendingCatchOpen.branches[
+        pendingCatchOpen.nextBranchIndex
+      ]
+      const definition = branch === undefined
+        ? undefined
+        : resolvedEventDefinitions(
+          kernel.model,
+          branch.catchEvent
+        )[0]
+      const expectedTag = branch === undefined
+        ? "CatchWaitOpened"
+        : definition?._tag === "MessageEventDefinition"
+        ? "MessageCorrelationEvaluated"
+        : "TimerExpressionEvaluated"
+      if (event._tag !== expectedTag) {
+        return journalFailure(
+          index,
+          "The journal omitted or reordered a causally required catch-wait opening transition"
+        )
+      }
+    }
+    if (
+      pendingImmediateTimer !== undefined &&
+      event._tag !== "CatchWaitResolved"
+    ) {
+      return journalFailure(
+        index,
+        "An immediately due Timer must resolve its catch wait atomically"
+      )
+    }
+    if (pendingCatchResolution !== undefined) {
+      const expectedTag = pendingCatchResolution.stage === "consume"
+        ? "TokenConsumed"
+        : "OutgoingSelected"
+      if (event._tag !== expectedTag) {
+        return journalFailure(
+          index,
+          "A catch-wait winner must be followed by its exact token and routing transitions"
+        )
+      }
+    }
+    if (
+      pendingCatchFence !== undefined &&
+      pendingEmissions.length === 0 &&
+      pendingCatchResolution === undefined &&
+      event._tag !== "CatchIngressFenced"
+    ) {
+      return journalFailure(
+        index,
+        "A Message arriving after a Timer deadline must retain its exact fencing audit event"
+      )
     }
     if (pendingScopeEntry !== undefined && event._tag !== "ScopeEntered") {
       return journalFailure(index, "The journal omitted or reordered a causally required subprocess entry")
@@ -5213,6 +6792,8 @@ const replayJournal = (
         )
         : pendingFailureCleanup.multiInstanceGroups.length > 0
         ? "MultiInstanceGroupCancelled"
+        : pendingFailureCleanup.catchWaitGroupIds.length > 0
+        ? "CatchWaitCancelled"
         : pendingFailureCleanup.interruptedScopeIds.length > 0
         ? "ScopeInterruptedByError"
         : pendingFailureCleanup.failedScopeIds.length > 0
@@ -5225,7 +6806,9 @@ const replayJournal = (
     if (
       (state.status === "completed" || state.status === "failed") &&
       event._tag !== "TaskCompletionReplayed" &&
-      event._tag !== "TaskOutcomeReplayed"
+      event._tag !== "TaskOutcomeReplayed" &&
+      event._tag !== "CatchIngressReplayed" &&
+      event._tag !== "CatchIngressFenced"
     ) {
       return journalFailure(index, "A terminal execution cannot accept further state-changing events")
     }
@@ -5331,11 +6914,73 @@ const replayJournal = (
           createdAt: event.createdAt
         })
         if (event.position._tag === "AtNode") {
-          pendingTaskWait = {
-            tokenId: event.tokenId,
-            taskNodeId: event.position.nodeId,
+          const node = kernel.nodeById.get(event.position.nodeId)
+          if (node?._tag === "Task") {
+            pendingTaskWait = {
+              tokenId: event.tokenId,
+              taskNodeId: event.position.nodeId,
+              scopeInstanceId: event.scopeInstanceId,
+              enteredAt: event.createdAt
+            }
+            break
+          }
+          const branches: Array<CatchWaitBranch> = []
+          if (node?._tag === "IntermediateCatchEvent") {
+            branches.push({ catchEvent: node })
+          } else if (
+            node?._tag === "Gateway" &&
+            node.gatewayKind === "event-based"
+          ) {
+            for (
+              const outgoingId of kernel.orderedOutgoingByNodeId.get(node.id) ?? []
+            ) {
+              const outgoing = kernel.flowById.get(outgoingId)
+              const catchEvent = outgoing === undefined
+                ? undefined
+                : kernel.nodeById.get(outgoing.targetId)
+              if (
+                outgoing === undefined ||
+                catchEvent?._tag !== "IntermediateCatchEvent"
+              ) {
+                return journalFailure(
+                  index,
+                  `Catch wait token '${event.tokenId}' has an invalid compiled Event-Based Gateway arm`
+                )
+              }
+              branches.push({
+                catchEvent,
+                sourceSequenceFlowId: outgoing.id
+              })
+            }
+          } else {
+            return journalFailure(
+              index,
+              `Stable node token '${event.tokenId}' is neither a Task nor a supported catch wait`
+            )
+          }
+          if (
+            branches.length === 0 ||
+            branches.length > kernel.limits.maxCatchWaitArms
+          ) {
+            return journalFailure(
+              index,
+              `Catch wait token '${event.tokenId}' has an invalid arm count`
+            )
+          }
+          pendingCatchOpen = {
+            source: node,
+            ownerTokenId: event.tokenId,
             scopeInstanceId: event.scopeInstanceId,
-            enteredAt: event.createdAt
+            generation: scope.invocation.generation,
+            openedAt: event.createdAt,
+            waitGroupId: nextId(
+              state.catchWaitGroups.map((group) => group.waitGroupId),
+              "catch-wait:"
+            ),
+            branches,
+            subscriptions: [],
+            timers: [],
+            nextBranchIndex: 0
           }
         }
         break
@@ -5359,6 +7004,939 @@ const replayJournal = (
           return journalFailure(index, `Task wait '${event.tokenId}' references a non-task node`)
         }
         pendingTaskWait = undefined
+        break
+      }
+
+      case "MessageCorrelationEvaluated": {
+        const pending = pendingCatchOpen
+        const branch = pending?.branches[pending.nextBranchIndex]
+        const definitions = branch === undefined
+          ? []
+          : resolvedEventDefinitions(kernel.model, branch.catchEvent)
+        const definition = definitions.length === 1
+          ? definitions[0]
+          : undefined
+        const binding = branch === undefined
+          ? undefined
+          : kernel.messageBindingByCatchEventNodeId.get(
+            branch.catchEvent.id
+          )
+        const scope = pending === undefined
+          ? undefined
+          : findScope(state, pending.scopeInstanceId)
+        const expectedArmId = pending === undefined
+          ? undefined
+          : nextId(
+            [
+              ...state.subscriptions.map((arm) => arm.armId),
+              ...pending.subscriptions.map((arm) => arm.armId)
+            ],
+            "catch-arm:"
+          )
+        const expectedEvaluator = binding === undefined
+          ? undefined
+          : kernel.evaluatorBindings.find((candidate) =>
+            candidate.language ===
+              binding.correlationExpression.language &&
+            candidate.languageVersion ===
+              binding.correlationExpression.version
+          )
+        if (
+          pending === undefined ||
+          branch === undefined ||
+          definition?._tag !== "MessageEventDefinition" ||
+          definition.messageRef === undefined ||
+          binding === undefined ||
+          binding.messageRef !== definition.messageRef ||
+          scope === undefined ||
+          scope.status !== "active" ||
+          expectedArmId === undefined ||
+          expectedEvaluator === undefined ||
+          event.waitGroupId !== pending.waitGroupId ||
+          event.armId !== expectedArmId ||
+          event.catchEventNodeId !== branch.catchEvent.id ||
+          event.generation !== pending.generation ||
+          !sameExpression(
+            event.expression,
+            binding.correlationExpression
+          ) ||
+          BpmnExpression.evaluatorBindingKey(event.evaluatorBinding) !==
+            BpmnExpression.evaluatorBindingKey(expectedEvaluator)
+        ) {
+          return journalFailure(
+            index,
+            `Message correlation '${event.waitGroupId}:${event.armId}' has no exact catch-wait cause`
+          )
+        }
+        const contextSnapshot = Json.snapshot({
+          _tag: "MessageCorrelation",
+          expression: binding.correlationExpression,
+          catchEvent: branch.catchEvent,
+          binding,
+          waitGroupId: pending.waitGroupId,
+          armId: expectedArmId,
+          generation: pending.generation,
+          scopeInstance: scope,
+          state
+        })
+        if (Result.isFailure(contextSnapshot)) {
+          return journalFailure(
+            index,
+            `Message correlation '${event.waitGroupId}:${event.armId}' has no canonical context`
+          )
+        }
+        const measuredCorrelation = canonicalUtf8Bytes(
+          event.correlationKey as Schema.Json
+        )
+        let sourceUtf8Bytes: number
+        let contextCanonicalBytes: number
+        try {
+          sourceUtf8Bytes = new TextEncoder().encode(
+            binding.correlationExpression.source
+          ).byteLength
+          contextCanonicalBytes = new TextEncoder().encode(
+            Json.canonicalizeSnapshot(contextSnapshot.success)
+          ).byteLength
+        } catch {
+          return journalFailure(
+            index,
+            `Message correlation '${event.waitGroupId}:${event.armId}' has invalid usage evidence`
+          )
+        }
+        if (
+          event.usage.sourceUtf8Bytes !== sourceUtf8Bytes ||
+          event.usage.contextCanonicalBytes !== contextCanonicalBytes ||
+          event.usage.steps > expectedEvaluator.limits.maxSteps ||
+          sourceUtf8Bytes >
+            expectedEvaluator.limits.maxSourceUtf8Bytes ||
+          contextCanonicalBytes >
+            expectedEvaluator.limits.maxContextCanonicalBytes ||
+          event.correlationKey.length >
+            kernel.limits.maxMessageCorrelationComponents ||
+          Result.isFailure(measuredCorrelation) ||
+          measuredCorrelation.success !==
+            event.correlationCanonicalBytes ||
+          measuredCorrelation.success >
+            kernel.limits.maxMessageCorrelationCanonicalBytes
+        ) {
+          return journalFailure(
+            index,
+            `Message correlation '${event.waitGroupId}:${event.armId}' has invalid usage or size evidence`
+          )
+        }
+        pending.subscriptions.push({
+          _tag: "MessageCatchSubscription",
+          armId: expectedArmId,
+          waitGroupId: pending.waitGroupId,
+          ownerNodeId: branch.catchEvent.id,
+          ...(branch.sourceSequenceFlowId === undefined
+            ? undefined
+            : { sourceSequenceFlowId: branch.sourceSequenceFlowId }),
+          processId: branch.catchEvent.processId,
+          scopeInstanceId: pending.scopeInstanceId,
+          tokenId: pending.ownerTokenId,
+          generation: pending.generation,
+          ordinal: pending.nextBranchIndex,
+          status: "waiting",
+          openedAt: pending.openedAt,
+          messageRef: binding.messageRef,
+          correlationKey: directClone(event.correlationKey)
+        })
+        pending.nextBranchIndex++
+        break
+      }
+
+      case "TimerExpressionEvaluated": {
+        const pending = pendingCatchOpen
+        const branch = pending?.branches[pending.nextBranchIndex]
+        const definitions = branch === undefined
+          ? []
+          : resolvedEventDefinitions(kernel.model, branch.catchEvent)
+        const definition = definitions.length === 1
+          ? definitions[0]
+          : undefined
+        const timerKind = definition?._tag === "TimerEventDefinition" &&
+            definition.timeDuration !== undefined
+          ? "timeDuration" as const
+          : "timeDate" as const
+        const expression = definition?._tag === "TimerEventDefinition"
+          ? timerKind === "timeDuration"
+            ? definition.timeDuration
+            : definition.timeDate
+          : undefined
+        const scope = pending === undefined
+          ? undefined
+          : findScope(state, pending.scopeInstanceId)
+        const expectedArmId = pending === undefined
+          ? undefined
+          : nextId(
+            [
+              ...state.subscriptions.map((arm) => arm.armId),
+              ...pending.subscriptions.map((arm) => arm.armId)
+            ],
+            "catch-arm:"
+          )
+        const expectedTimerId = pending === undefined
+          ? undefined
+          : nextId(
+            [
+              ...state.timers.map((timer) => timer.timerId),
+              ...pending.timers.map((timer) => timer.timerId)
+            ],
+            "catch-timer:"
+          )
+        const expectedEvaluator = expression === undefined
+          ? undefined
+          : kernel.evaluatorBindings.find((candidate) =>
+            candidate.language === expression.language &&
+            candidate.languageVersion === expression.version
+          )
+        if (
+          pending === undefined ||
+          branch === undefined ||
+          definition?._tag !== "TimerEventDefinition" ||
+          expression === undefined ||
+          scope === undefined ||
+          scope.status !== "active" ||
+          expectedArmId === undefined ||
+          expectedTimerId === undefined ||
+          expectedEvaluator === undefined ||
+          event.waitGroupId !== pending.waitGroupId ||
+          event.armId !== expectedArmId ||
+          event.timerId !== expectedTimerId ||
+          event.catchEventNodeId !== branch.catchEvent.id ||
+          event.generation !== pending.generation ||
+          event.timerKind !== timerKind ||
+          event.scheduledAt !== pending.openedAt ||
+          !sameExpression(event.expression, expression) ||
+          BpmnExpression.evaluatorBindingKey(event.evaluatorBinding) !==
+            BpmnExpression.evaluatorBindingKey(expectedEvaluator)
+        ) {
+          return journalFailure(
+            index,
+            `Timer expression '${event.waitGroupId}:${event.armId}' has no exact catch-wait cause`
+          )
+        }
+        const contextSnapshot = Json.snapshot({
+          _tag: "TimerExpression",
+          expression,
+          catchEvent: branch.catchEvent,
+          timerKind,
+          waitGroupId: pending.waitGroupId,
+          armId: expectedArmId,
+          timerId: expectedTimerId,
+          generation: pending.generation,
+          scheduledAt: pending.openedAt,
+          scopeInstance: scope,
+          state
+        })
+        if (Result.isFailure(contextSnapshot)) {
+          return journalFailure(
+            index,
+            `Timer expression '${event.waitGroupId}:${event.armId}' has no canonical context`
+          )
+        }
+        const evaluatedUtf8Bytes = utf8Bytes(event.evaluatedValue)
+        const lexicalUtf8Bytes = utf8Bytes(event.lexical)
+        if (
+          evaluatedUtf8Bytes === undefined ||
+          lexicalUtf8Bytes === undefined ||
+          evaluatedUtf8Bytes >
+            kernel.limits.maxTimerExpressionUtf8Bytes ||
+          lexicalUtf8Bytes >
+            kernel.limits.maxTimerExpressionUtf8Bytes
+        ) {
+          return journalFailure(
+            index,
+            `Timer expression '${event.waitGroupId}:${event.armId}' exceeds its compiled UTF-8 byte limit`,
+            ["evaluatedValue"],
+            {
+              maximum: kernel.limits.maxTimerExpressionUtf8Bytes
+            }
+          )
+        }
+        const resolution = timerKind === "timeDuration"
+          ? BpmnTime.durationDueAt(
+            pending.openedAt,
+            event.evaluatedValue,
+            kernel.limits.maxTimerDelayMillis
+          )
+          : BpmnTime.timeDateDueAt(
+            pending.openedAt,
+            event.evaluatedValue,
+            kernel.limits.maxTimerDelayMillis
+          )
+        let sourceUtf8Bytes: number
+        let contextCanonicalBytes: number
+        try {
+          sourceUtf8Bytes = new TextEncoder().encode(
+            expression.source
+          ).byteLength
+          contextCanonicalBytes = new TextEncoder().encode(
+            Json.canonicalizeSnapshot(contextSnapshot.success)
+          ).byteLength
+        } catch {
+          return journalFailure(
+            index,
+            `Timer expression '${event.waitGroupId}:${event.armId}' has invalid usage evidence`
+          )
+        }
+        if (
+          Result.isFailure(resolution) ||
+          event.usage.sourceUtf8Bytes !== sourceUtf8Bytes ||
+          event.usage.contextCanonicalBytes !== contextCanonicalBytes ||
+          event.usage.steps > expectedEvaluator.limits.maxSteps ||
+          sourceUtf8Bytes >
+            expectedEvaluator.limits.maxSourceUtf8Bytes ||
+          contextCanonicalBytes >
+            expectedEvaluator.limits.maxContextCanonicalBytes ||
+          event.lexicalVersion !== resolution.success.lexicalVersion ||
+          event.lexical !== resolution.success.lexical ||
+          event.delayMillis !== resolution.success.delayMillis ||
+          event.dueAt !== resolution.success.dueAt
+        ) {
+          return journalFailure(
+            index,
+            `Timer expression '${event.waitGroupId}:${event.armId}' has invalid lexical, usage, or deadline evidence`
+          )
+        }
+        pending.subscriptions.push({
+          _tag: "TimerCatchSubscription",
+          armId: expectedArmId,
+          waitGroupId: pending.waitGroupId,
+          ownerNodeId: branch.catchEvent.id,
+          ...(branch.sourceSequenceFlowId === undefined
+            ? undefined
+            : { sourceSequenceFlowId: branch.sourceSequenceFlowId }),
+          processId: branch.catchEvent.processId,
+          scopeInstanceId: pending.scopeInstanceId,
+          tokenId: pending.ownerTokenId,
+          generation: pending.generation,
+          ordinal: pending.nextBranchIndex,
+          status: "waiting",
+          openedAt: pending.openedAt,
+          timerId: expectedTimerId
+        })
+        pending.timers.push({
+          timerId: expectedTimerId,
+          armId: expectedArmId,
+          waitGroupId: pending.waitGroupId,
+          processId: branch.catchEvent.processId,
+          scopeInstanceId: pending.scopeInstanceId,
+          tokenId: pending.ownerTokenId,
+          generation: pending.generation,
+          schedule: {
+            _tag: timerKind === "timeDuration"
+              ? "TimeDuration"
+              : "TimeDate",
+            lexicalVersion: resolution.success.lexicalVersion,
+            lexical: resolution.success.lexical,
+            delayMillis: resolution.success.delayMillis,
+            dueAt: resolution.success.dueAt
+          },
+          scheduledAt: pending.openedAt,
+          status: "scheduled"
+        })
+        pending.nextBranchIndex++
+        break
+      }
+
+      case "CatchWaitOpened": {
+        const pending = pendingCatchOpen
+        const token = pending === undefined
+          ? undefined
+          : state.tokens.find((candidate) => candidate.tokenId === pending.ownerTokenId)
+        const scope = pending === undefined
+          ? undefined
+          : findScope(state, pending.scopeInstanceId)
+        if (
+          pending === undefined ||
+          pending.nextBranchIndex !== pending.branches.length ||
+          pending.subscriptions.length !== pending.branches.length ||
+          token === undefined ||
+          token.status !== "active" ||
+          token.position._tag !== "AtNode" ||
+          token.position.nodeId !== pending.source.id ||
+          scope === undefined ||
+          scope.status !== "active"
+        ) {
+          return journalFailure(
+            index,
+            `Catch wait '${event.group.waitGroupId}' has no completed atomic opening cause`
+          )
+        }
+        const expectedGroup: BpmnExecutionState.CatchWaitGroup = {
+          waitGroupId: pending.waitGroupId,
+          source: pending.source._tag === "IntermediateCatchEvent"
+            ? {
+              _tag: "StandaloneCatch",
+              catchEventNodeId: pending.source.id
+            }
+            : {
+              _tag: "EventBasedGateway",
+              gatewayNodeId: pending.source.id
+            },
+          ownerTokenId: pending.ownerTokenId,
+          processId: pending.source.processId,
+          scopeInstanceId: pending.scopeInstanceId,
+          generation: pending.generation,
+          armIds: [
+            pending.subscriptions[0]!.armId,
+            ...pending.subscriptions.slice(1).map((arm) => arm.armId)
+          ],
+          status: "waiting",
+          openedAt: pending.openedAt
+        }
+        if (
+          !sameJson(event.group, expectedGroup) ||
+          !sameJson(event.subscriptions, pending.subscriptions) ||
+          !sameJson(event.timers, pending.timers)
+        ) {
+          return journalFailure(
+            index,
+            `Catch wait '${event.group.waitGroupId}' does not match its frozen arms and schedules`
+          )
+        }
+        const group = directClone(event.group) as MutableCatchWaitGroup
+        state.catchWaitGroups.push(group)
+        state.subscriptions.push(
+          ...event.subscriptions.map((arm) => directClone(arm) as MutableSubscription)
+        )
+        state.timers.push(
+          ...event.timers.map((timer) => directClone(timer) as MutableTimer)
+        )
+        const immediatelyDue = state.timers
+          .filter((timer) =>
+            timer.waitGroupId === group.waitGroupId &&
+            logicalTimerDeadline(timer) <= group.openedAt
+          )
+          .sort((left, right) => {
+            const deadline = logicalTimerDeadline(left).localeCompare(
+              logicalTimerDeadline(right)
+            )
+            if (deadline !== 0) {
+              return deadline
+            }
+            const leftOrdinal = state.subscriptions.find((arm) =>
+              arm.waitGroupId === group.waitGroupId &&
+              arm.armId === left.armId
+            )?.ordinal ?? Number.MAX_SAFE_INTEGER
+            const rightOrdinal = state.subscriptions.find((arm) =>
+              arm.waitGroupId === group.waitGroupId &&
+              arm.armId === right.armId
+            )?.ordinal ?? Number.MAX_SAFE_INTEGER
+            const ordinal = leftOrdinal - rightOrdinal
+            return ordinal !== 0
+              ? ordinal
+              : left.timerId.localeCompare(right.timerId)
+          })[0]
+        pendingCatchOpen = undefined
+        pendingImmediateTimer = immediatelyDue === undefined
+          ? undefined
+          : {
+            waitGroupId: group.waitGroupId,
+            timerId: immediatelyDue.timerId,
+            observedAt: group.openedAt
+          }
+        break
+      }
+
+      case "TimerArmAcknowledged": {
+        const target = exactCatchTarget(state, event.target)
+        const timer = target === undefined
+          ? undefined
+          : state.timers.find((candidate) =>
+            candidate.timerId === event.timerId &&
+            candidate.waitGroupId === target.group.waitGroupId &&
+            candidate.armId === target.arm.armId
+          )
+        if (
+          target === undefined ||
+          target.group.status !== "waiting" ||
+          target.arm.status !== "waiting" ||
+          target.arm._tag !== "TimerCatchSubscription" ||
+          timer === undefined ||
+          timer.status !== "scheduled" ||
+          timer.armReceipt !== undefined ||
+          timer.armAcknowledgedAt !== undefined ||
+          event.receipt.armedAt < timer.scheduledAt ||
+          event.receipt.armedAt > event.acknowledgedAt ||
+          state.timers.some((candidate) =>
+            candidate.timerId !== timer.timerId &&
+            candidate.armReceipt !== undefined &&
+            (
+              candidate.armReceipt.scheduleId ===
+                event.receipt.scheduleId ||
+              candidate.armReceipt.receiptId ===
+                event.receipt.receiptId
+            )
+          )
+        ) {
+          return journalFailure(
+            index,
+            `Timer acknowledgement '${event.timerId}' does not match one unarmed active Timer`
+          )
+        }
+        timer.status = "armed"
+        timer.armReceipt = directClone(event.receipt)
+        timer.armAcknowledgedAt = event.acknowledgedAt
+        break
+      }
+
+      case "CatchWaitResolved": {
+        const group = state.catchWaitGroups.find((candidate) => candidate.waitGroupId === event.waitGroupId)
+        const winnerArm = group === undefined
+          ? undefined
+          : state.subscriptions.find((arm) =>
+            arm.waitGroupId === group.waitGroupId &&
+            arm.armId === event.winner.armId
+          )
+        const ownerToken = group === undefined
+          ? undefined
+          : state.tokens.find((token) => token.tokenId === group.ownerTokenId)
+        const scope = group === undefined
+          ? undefined
+          : findScope(state, group.scopeInstanceId)
+        const catchEvent = winnerArm === undefined
+          ? undefined
+          : kernel.nodeById.get(winnerArm.ownerNodeId)
+        if (
+          group === undefined ||
+          group.status !== "waiting" ||
+          winnerArm === undefined ||
+          winnerArm.status !== "waiting" ||
+          ownerToken === undefined ||
+          ownerToken.status !== "active" ||
+          ownerToken.position._tag !== "AtNode" ||
+          scope === undefined ||
+          scope.status !== "active" ||
+          catchEvent?._tag !== "IntermediateCatchEvent" ||
+          event.closedAt !== event.winner.recordedAt ||
+          event.closedAt < group.openedAt
+        ) {
+          return journalFailure(
+            index,
+            `Catch wait resolution '${event.waitGroupId}' has no exact active wait`
+          )
+        }
+        let expectedWinner:
+          | BpmnExecutionState.CatchWaitWinner
+          | undefined
+        let requiredFence: PendingCatchFence | undefined
+        if (event.trigger._tag === "ImmediateTimer") {
+          const trigger = event.trigger
+          const immediate = pendingImmediateTimer
+          const timer = state.timers.find((candidate) =>
+            candidate.waitGroupId === group.waitGroupId &&
+            candidate.timerId === trigger.timerId
+          )
+          const eligible = eligibleTimer(
+            state,
+            group,
+            trigger.observedAt
+          )
+          if (
+            immediate === undefined ||
+            immediate.waitGroupId !== group.waitGroupId ||
+            immediate.timerId !== trigger.timerId ||
+            immediate.observedAt !== trigger.observedAt ||
+            trigger.observedAt !== group.openedAt ||
+            event.closedAt !== group.openedAt ||
+            timer === undefined ||
+            eligible === undefined ||
+            eligible.timerId !== timer.timerId
+          ) {
+            return journalFailure(
+              index,
+              `Immediate Timer resolution '${event.waitGroupId}' is not the deterministic opening winner`
+            )
+          }
+          expectedWinner = {
+            _tag: "TimerWinner",
+            armId: timer.armId,
+            timerId: timer.timerId,
+            dueAt: timer.schedule.dueAt,
+            observedAt: trigger.observedAt,
+            selectedAt: logicalTimerDeadline(timer),
+            recordedAt: event.closedAt
+          }
+        } else if (event.trigger._tag === "TimerObservation") {
+          const trigger = event.trigger
+          const target = exactCatchTarget(state, trigger.target)
+          const targetTimer = target === undefined
+            ? undefined
+            : state.timers.find((candidate) =>
+              candidate.waitGroupId === target.group.waitGroupId &&
+              candidate.armId === target.arm.armId &&
+              candidate.timerId === trigger.timerId
+            )
+          const eligible = eligibleTimer(
+            state,
+            group,
+            trigger.observedAt
+          )
+          if (
+            pendingImmediateTimer !== undefined ||
+            target === undefined ||
+            target.group.waitGroupId !== group.waitGroupId ||
+            target.group.status !== "waiting" ||
+            target.arm.status !== "waiting" ||
+            target.arm._tag !== "TimerCatchSubscription" ||
+            targetTimer === undefined ||
+            trigger.observedAt <
+              logicalTimerDeadline(targetTimer) ||
+            trigger.observedAt > event.closedAt ||
+            eligible === undefined
+          ) {
+            return journalFailure(
+              index,
+              `Timer observation for wait '${event.waitGroupId}' does not prove one due deterministic winner`
+            )
+          }
+          expectedWinner = {
+            _tag: "TimerWinner",
+            armId: eligible.armId,
+            timerId: eligible.timerId,
+            dueAt: eligible.schedule.dueAt,
+            observedAt: trigger.observedAt,
+            selectedAt: logicalTimerDeadline(eligible),
+            recordedAt: event.closedAt
+          }
+        } else {
+          const target = exactCatchTarget(state, event.trigger.target)
+          const receipt = event.trigger.receipt
+          const binding = target?.arm._tag ===
+              "MessageCatchSubscription"
+            ? kernel.messageBindingByCatchEventNodeId.get(
+              target.arm.ownerNodeId
+            )
+            : undefined
+          const payloadBytes = canonicalUtf8Bytes(receipt.payload)
+          if (
+            pendingImmediateTimer !== undefined ||
+            target === undefined ||
+            target.group.waitGroupId !== group.waitGroupId ||
+            target.group.status !== "waiting" ||
+            target.arm.status !== "waiting" ||
+            target.arm._tag !== "MessageCatchSubscription" ||
+            binding === undefined ||
+            receipt.acceptedAt < target.arm.openedAt ||
+            receipt.acceptedAt !== event.closedAt ||
+            receipt.messageRef !== target.arm.messageRef ||
+            !sameJson(
+              receipt.correlationKey,
+              target.arm.correlationKey
+            ) ||
+            !sameJson(
+              receipt.payloadContract,
+              binding.payloadContract
+            ) ||
+            !sameJson(
+              receipt.authorization.policy,
+              binding.authorizationPolicy
+            ) ||
+            Result.isFailure(payloadBytes) ||
+            payloadBytes.success >
+              kernel.limits.maxMessagePayloadCanonicalBytes ||
+            state.messageDeliveries.some((delivery) => delivery.receipt.deliveryId === receipt.deliveryId)
+          ) {
+            return journalFailure(
+              index,
+              `Message delivery '${receipt.deliveryId}' does not prove one authorized active catch`
+            )
+          }
+          const dueTimer = eligibleTimer(
+            state,
+            group,
+            receipt.acceptedAt
+          )
+          if (dueTimer === undefined) {
+            expectedWinner = {
+              _tag: "MessageWinner",
+              armId: target.arm.armId,
+              deliveryId: receipt.deliveryId,
+              acceptedAt: receipt.acceptedAt,
+              selectedAt: receipt.acceptedAt,
+              recordedAt: event.closedAt
+            }
+          } else {
+            expectedWinner = {
+              _tag: "TimerWinner",
+              armId: dueTimer.armId,
+              timerId: dueTimer.timerId,
+              dueAt: dueTimer.schedule.dueAt,
+              observedAt: receipt.acceptedAt,
+              selectedAt: logicalTimerDeadline(dueTimer),
+              recordedAt: event.closedAt
+            }
+            requiredFence = {
+              ingressKind: "message",
+              target: directClone(event.trigger.target),
+              externalId: receipt.deliveryId,
+              reason: "wait-closed",
+              observedAt: event.closedAt
+            }
+          }
+        }
+        const cancelledArmIds = group.armIds.filter((armId) => armId !== event.winner.armId)
+        const cancelledTimerIds = group.armIds.flatMap((armId) => {
+          const timer = state.timers.find((candidate) =>
+            candidate.waitGroupId === group.waitGroupId &&
+            candidate.armId === armId
+          )
+          return timer === undefined ||
+              event.winner._tag === "TimerWinner" &&
+                timer.timerId === event.winner.timerId
+            ? []
+            : [timer.timerId]
+        })
+        if (
+          expectedWinner === undefined ||
+          !sameJson(event.winner, expectedWinner) ||
+          !sameStringArray(
+            event.cancelledArmIds,
+            cancelledArmIds
+          ) ||
+          !sameStringArray(
+            event.cancelledTimerIds,
+            cancelledTimerIds
+          )
+        ) {
+          return journalFailure(
+            index,
+            `Catch wait resolution '${event.waitGroupId}' does not identify its deterministic winner and losers`
+          )
+        }
+        if (event.trigger._tag === "MessageDelivery") {
+          state.messageDeliveries.push({
+            target: directClone(event.trigger.target),
+            receipt: directClone(event.trigger.receipt),
+            disposition: event.winner._tag === "MessageWinner"
+              ? "message-winner"
+              : "timer-preempted",
+            recordedAt: event.closedAt
+          })
+        }
+        group.status = "won"
+        group.winner = directClone(event.winner)
+        group.closedAt = event.closedAt
+        const messageReceipt = event.trigger._tag === "MessageDelivery"
+          ? event.trigger.receipt
+          : undefined
+        for (const armId of group.armIds) {
+          const arm = state.subscriptions.find((candidate) =>
+            candidate.waitGroupId === group.waitGroupId &&
+            candidate.armId === armId
+          )
+          if (arm === undefined) {
+            return journalFailure(
+              index,
+              `Catch wait resolution '${event.waitGroupId}' lost arm '${armId}'`
+            )
+          }
+          arm.closedAt = event.closedAt
+          if (arm.armId === event.winner.armId) {
+            arm.status = "won"
+            delete arm.cancellationReason
+            if (
+              event.winner._tag === "MessageWinner" &&
+              arm._tag === "MessageCatchSubscription" &&
+              messageReceipt !== undefined
+            ) {
+              arm.receipt = directClone(messageReceipt)
+            }
+          } else {
+            arm.status = "cancelled"
+            arm.cancellationReason = "choice-lost"
+            if (arm._tag === "MessageCatchSubscription") {
+              delete arm.receipt
+            }
+          }
+        }
+        for (const timer of state.timers) {
+          if (timer.waitGroupId !== group.waitGroupId) {
+            continue
+          }
+          if (
+            event.winner._tag === "TimerWinner" &&
+            timer.timerId === event.winner.timerId
+          ) {
+            timer.status = "fired"
+            timer.observedAt = event.winner.observedAt
+            timer.firedAt = event.winner.selectedAt
+            delete timer.cancelledAt
+            delete timer.cancellationReason
+          } else {
+            timer.status = "cancelled"
+            timer.cancelledAt = event.closedAt
+            timer.cancellationReason = "choice-lost"
+            delete timer.observedAt
+            delete timer.firedAt
+          }
+        }
+        pendingImmediateTimer = undefined
+        pendingCatchResolution = {
+          waitGroupId: group.waitGroupId,
+          ownerTokenId: group.ownerTokenId,
+          catchEvent,
+          scopeInstanceId: group.scopeInstanceId,
+          recordedAt: event.closedAt,
+          outgoingSequenceFlowIds: kernel.orderedOutgoingByNodeId.get(catchEvent.id) ?? [],
+          stage: "consume"
+        }
+        pendingCatchFence = requiredFence
+        break
+      }
+
+      case "CatchWaitCancelled": {
+        const cleanup = pendingFailureCleanup
+        const expectedGroupId = cleanup?.catchWaitGroupIds[0]
+        const group = state.catchWaitGroups.find((candidate) => candidate.waitGroupId === event.waitGroupId)
+        const expectedTimerIds = group?.armIds.flatMap((armId) => {
+          const timer = state.timers.find((candidate) =>
+            candidate.waitGroupId === group.waitGroupId &&
+            candidate.armId === armId
+          )
+          return timer === undefined ? [] : [timer.timerId]
+        }) ?? []
+        if (
+          cleanup === undefined ||
+          expectedGroupId === undefined ||
+          event.waitGroupId !== expectedGroupId ||
+          event.reason !== "execution-failed" ||
+          event.cancelledAt !== cleanup.resolution.resolvedAt ||
+          group === undefined ||
+          group.status !== "waiting" ||
+          !sameStringArray(event.armIds, group.armIds) ||
+          !sameStringArray(event.timerIds, expectedTimerIds)
+        ) {
+          return journalFailure(
+            index,
+            `Catch-wait cancellation '${event.waitGroupId}' is not the next unmatched-failure cleanup`
+          )
+        }
+        group.status = "cancelled"
+        group.cancellationReason = event.reason
+        group.closedAt = event.cancelledAt
+        for (const armId of group.armIds) {
+          const arm = state.subscriptions.find((candidate) =>
+            candidate.waitGroupId === group.waitGroupId &&
+            candidate.armId === armId
+          )
+          if (arm === undefined || arm.status !== "waiting") {
+            return journalFailure(
+              index,
+              `Catch-wait cancellation '${event.waitGroupId}' lost active arm '${armId}'`
+            )
+          }
+          arm.status = "cancelled"
+          arm.closedAt = event.cancelledAt
+          arm.cancellationReason = event.reason
+          if (arm._tag === "MessageCatchSubscription") {
+            delete arm.receipt
+          }
+        }
+        for (const timerId of expectedTimerIds) {
+          const timer = state.timers.find((candidate) => candidate.timerId === timerId)
+          if (
+            timer === undefined ||
+            (timer.status !== "scheduled" && timer.status !== "armed")
+          ) {
+            return journalFailure(
+              index,
+              `Catch-wait cancellation '${event.waitGroupId}' lost active Timer '${timerId}'`
+            )
+          }
+          timer.status = "cancelled"
+          timer.cancelledAt = event.cancelledAt
+          timer.cancellationReason = event.reason
+          delete timer.observedAt
+          delete timer.firedAt
+        }
+        cleanup.catchWaitGroupIds.shift()
+        break
+      }
+
+      case "CatchIngressReplayed": {
+        if (pendingCatchFence !== undefined) {
+          return journalFailure(
+            index,
+            "A required Message fence cannot be replaced by a replay audit event"
+          )
+        }
+        const target = exactCatchTarget(state, event.target)
+        const timer = target === undefined
+          ? undefined
+          : state.timers.find((candidate) =>
+            candidate.waitGroupId === target.group.waitGroupId &&
+            candidate.armId === target.arm.armId
+          )
+        const valid = target !== undefined &&
+          (
+            event.ingressKind === "message"
+              ? state.messageDeliveries.some((delivery) =>
+                delivery.receipt.deliveryId === event.externalId &&
+                sameJson(delivery.target, event.target)
+              )
+              : event.ingressKind === "timer-arm"
+              ? target.arm._tag === "TimerCatchSubscription" &&
+                timer?.armReceipt?.receiptId === event.externalId
+              : target.group.winner?._tag === "TimerWinner" &&
+                target.group.winner.timerId === event.externalId
+          )
+        if (!valid) {
+          return journalFailure(
+            index,
+            `Catch ingress replay '${event.ingressKind}:${event.externalId}' has no identical persisted fact`
+          )
+        }
+        break
+      }
+
+      case "CatchIngressFenced": {
+        if (pendingCatchFence !== undefined) {
+          const expected = pendingCatchFence
+          if (
+            event.ingressKind !== expected.ingressKind ||
+            !sameJson(event.target, expected.target) ||
+            event.externalId !== expected.externalId ||
+            event.reason !== expected.reason ||
+            event.observedAt !== expected.observedAt
+          ) {
+            return journalFailure(
+              index,
+              `Catch ingress fence '${event.externalId}' does not match the Message that lost to a due Timer`
+            )
+          }
+          pendingCatchFence = undefined
+          break
+        }
+        const target = exactCatchTarget(state, event.target)
+        const matchingGroup = state.catchWaitGroups.find((candidate) =>
+          candidate.waitGroupId === event.target.waitGroupId &&
+          candidate.scopeInstanceId === event.target.scopeInstanceId &&
+          candidate.ownerTokenId === event.target.tokenId &&
+          candidate.generation === event.target.generation
+        )
+        const validReason = event.reason === "stale-generation"
+          ? target === undefined
+          : event.reason === "wait-closed"
+          ? target !== undefined &&
+            (
+              target.group.status !== "waiting" ||
+              target.arm.status !== "waiting"
+            )
+          : matchingGroup !== undefined &&
+            !state.subscriptions.some((arm) =>
+              arm.waitGroupId === matchingGroup.waitGroupId &&
+              arm.armId === event.target.armId
+            )
+        if (!validReason) {
+          return journalFailure(
+            index,
+            `Catch ingress fence '${event.ingressKind}:${event.externalId}' does not match the persisted wait generation`
+          )
+        }
         break
       }
 
@@ -6605,6 +9183,9 @@ const replayJournal = (
                 .filter((member) => member.status === "active" || member.status === "pending")
                 .map((member) => member.index)
             })),
+          catchWaitGroupIds: state.catchWaitGroups
+            .filter((group) => group.status === "waiting")
+            .map((group) => group.waitGroupId),
           interruptedScopeIds: [...state.scopeInstances]
             .reverse()
             .filter((scope) =>
@@ -6625,6 +9206,31 @@ const replayJournal = (
         }
         if (event.consumedAt < token.createdAt) {
           return journalFailure(index, `Token '${event.tokenId}' was consumed before it was created`)
+        }
+        const catchResolution = pendingCatchResolution
+        if (catchResolution?.stage === "consume") {
+          const group = state.catchWaitGroups.find((candidate) => candidate.waitGroupId === catchResolution.waitGroupId)
+          const sourceNodeId = group?.source._tag === "StandaloneCatch"
+            ? group.source.catchEventNodeId
+            : group?.source.gatewayNodeId
+          if (
+            event.tokenId !== catchResolution.ownerTokenId ||
+            event.reason !== "catch-event-completed" ||
+            event.consumedAt !== catchResolution.recordedAt ||
+            token.position._tag !== "AtNode" ||
+            token.position.nodeId !== sourceNodeId ||
+            group === undefined ||
+            group.status !== "won"
+          ) {
+            return journalFailure(
+              index,
+              `Catch-wait token consumption '${event.tokenId}' does not match its winner`
+            )
+          }
+          token.status = "consumed"
+          token.consumedAt = event.consumedAt
+          catchResolution.stage = "selection"
+          break
         }
         if (token.position._tag === "AtNode") {
           const task = kernel.nodeById.get(token.position.nodeId)
@@ -6789,6 +9395,14 @@ const replayJournal = (
                 createdAt: event.consumedAt
               }]
             }
+          } else if (target._tag === "IntermediateCatchEvent") {
+            pendingEmissions = [{
+              processId: scope.processId,
+              scopeInstanceId: scope.scopeInstanceId,
+              invocation: directClone(scope.invocation),
+              position: { _tag: "AtNode", nodeId: target.id },
+              createdAt: event.consumedAt
+            }]
           } else if (target._tag === "SubProcess") {
             const generation = state.scopeInstances.filter((candidate) =>
               candidate.definitionId === target.id &&
@@ -6805,7 +9419,15 @@ const replayJournal = (
               enteredAt: event.consumedAt
             }
           } else if (target._tag === "Gateway") {
-            if (target.gatewayKind === "exclusive" && target.gatewayDirection === "diverging") {
+            if (target.gatewayKind === "event-based") {
+              pendingEmissions = [{
+                processId: scope.processId,
+                scopeInstanceId: scope.scopeInstanceId,
+                invocation: directClone(scope.invocation),
+                position: { _tag: "AtNode", nodeId: target.id },
+                createdAt: event.consumedAt
+              }]
+            } else if (target.gatewayKind === "exclusive" && target.gatewayDirection === "diverging") {
               pendingRoute = {
                 sourceNode: target,
                 scopeInstanceId: scope.scopeInstanceId,
@@ -7242,6 +9864,37 @@ const replayJournal = (
       }
 
       case "OutgoingSelected": {
+        const catchResolution = pendingCatchResolution
+        if (catchResolution?.stage === "selection") {
+          const scope = findScope(
+            state,
+            catchResolution.scopeInstanceId
+          )
+          if (
+            event.sourceNodeId !== catchResolution.catchEvent.id ||
+            event.routingKind !== "catch-event" ||
+            !sameStringArray(
+              event.sequenceFlowIds,
+              catchResolution.outgoingSequenceFlowIds
+            ) ||
+            scope === undefined ||
+            scope.status !== "active" ||
+            scope.definitionId !==
+              catchResolution.catchEvent.parentScopeId
+          ) {
+            return journalFailure(
+              index,
+              `Catch-event routing for '${event.sourceNodeId}' does not match its winning arm`
+            )
+          }
+          pendingCatchResolution = undefined
+          queueFlowEmissions(
+            scope,
+            event.sequenceFlowIds,
+            catchResolution.recordedAt
+          )
+          break
+        }
         if (pendingRoute === undefined) {
           return journalFailure(index, `Outgoing selection '${event.sourceNodeId}' has no routing cause`)
         }
@@ -7486,7 +10139,8 @@ const replayJournal = (
           state.tokens.some((token) => token.status === "active") ||
           state.gatewayFrames.some((frame) => frame.status === "waiting" || frame.status === "satisfied") ||
           state.loopFrames.some((frame) => frame.status === "active") ||
-          state.multiInstanceGroups.some((group) => group.status === "active")
+          state.multiInstanceGroups.some((group) => group.status === "active") ||
+          state.catchWaitGroups.some((group) => group.status === "waiting")
         ) {
           return journalFailure(index, "Execution completion is inconsistent with the terminal marking")
         }
@@ -7505,6 +10159,7 @@ const replayJournal = (
           cleanup.frameIds.length !== 0 ||
           cleanup.loopFrameIds.length !== 0 ||
           cleanup.multiInstanceGroups.length !== 0 ||
+          cleanup.catchWaitGroupIds.length !== 0 ||
           cleanup.interruptedScopeIds.length !== 0 ||
           cleanup.failedScopeIds.length !== 0 ||
           event.rootScopeInstanceId !== cleanup.rootScopeInstanceId ||
@@ -7520,7 +10175,8 @@ const replayJournal = (
           state.tokens.some((token) => token.status === "active") ||
           state.gatewayFrames.some((frame) => frame.status === "waiting" || frame.status === "satisfied") ||
           state.loopFrames.some((frame) => frame.status === "active") ||
-          state.multiInstanceGroups.some((group) => group.status === "active")
+          state.multiInstanceGroups.some((group) => group.status === "active") ||
+          state.catchWaitGroups.some((group) => group.status === "waiting")
         ) {
           return journalFailure(
             index,
@@ -7541,6 +10197,10 @@ const replayJournal = (
     pendingScopeEntry !== undefined ||
     pendingGatewayArrival !== undefined ||
     pendingTaskWait !== undefined ||
+    pendingCatchOpen !== undefined ||
+    pendingCatchResolution !== undefined ||
+    pendingCatchFence !== undefined ||
+    pendingImmediateTimer !== undefined ||
     pendingResolvedTask !== undefined ||
     pendingBoundaryErrorCatch !== undefined ||
     pendingLoopTransition !== undefined ||
@@ -7559,7 +10219,10 @@ type ResolvedEventDefinition =
 
 const resolvedEventDefinitions = (
   model: BpmnModel.BpmnModel,
-  event: BpmnModel.BoundaryEvent
+  event:
+    | BpmnModel.StartEvent
+    | BpmnModel.BoundaryEvent
+    | BpmnModel.IntermediateCatchEvent
 ): ReadonlyArray<ResolvedEventDefinition> => {
   const declaredById = new Map(
     (model.eventDefinitions ?? []).map((definition) =>
@@ -7621,6 +10284,28 @@ const canonicalTaskBindings = (
         })
       )
       .sort((left, right) => left.taskNodeId.localeCompare(right.taskNodeId))
+  )
+
+const canonicalMessageBindings = (
+  bindings: ReadonlyArray<BpmnEventV3.MessageBinding>
+): ReadonlyArray<BpmnEventV3.MessageBinding> =>
+  Object.freeze(
+    bindings
+      .map((binding) =>
+        Object.freeze({
+          ...binding,
+          correlationExpression: Object.freeze({
+            ...binding.correlationExpression
+          }),
+          payloadContract: Object.freeze({
+            ...binding.payloadContract
+          }),
+          authorizationPolicy: Object.freeze({
+            ...binding.authorizationPolicy
+          })
+        })
+      )
+      .sort((left, right) => left.catchEventNodeId.localeCompare(right.catchEventNodeId))
   )
 
 const canonicalCollectionBindings = (
@@ -7697,6 +10382,9 @@ const compileStructure = (
 ): Result.Result<CompiledStructure, Diagnostic.CompilationError> => {
   const { limits, profileId, rootProcessId } = options
   const taskBindings = canonicalTaskBindings(options.taskBindings ?? [])
+  const messageBindings = canonicalMessageBindings(
+    options.messageBindings ?? []
+  )
   const collectionBindings = canonicalCollectionBindings(
     options.collectionBindings ?? []
   )
@@ -7739,6 +10427,15 @@ const compileStructure = (
       binding.collectionExpression
     )
   }
+  for (const binding of messageBindings) {
+    requiredExpressionBindings.set(
+      JSON.stringify([
+        binding.correlationExpression.language,
+        binding.correlationExpression.version
+      ]),
+      binding.correlationExpression
+    )
+  }
   for (const node of model.flowNodes) {
     const characteristics = node._tag === "Task" ||
         node._tag === "SubProcess"
@@ -7778,6 +10475,23 @@ const compileStructure = (
             characteristics.completionCondition.version
           ]),
           characteristics.completionCondition
+        )
+      }
+    }
+    if (node._tag === "IntermediateCatchEvent") {
+      const definitions = resolvedEventDefinitions(model, node)
+      const timer = definitions.length === 1 &&
+          definitions[0]?._tag === "TimerEventDefinition"
+        ? definitions[0]
+        : undefined
+      const timerExpression = timer?.timeDuration ?? timer?.timeDate
+      if (timerExpression !== undefined) {
+        requiredExpressionBindings.set(
+          JSON.stringify([
+            timerExpression.language,
+            timerExpression.version
+          ]),
+          timerExpression
         )
       }
     }
@@ -7898,6 +10612,49 @@ const compileStructure = (
           [...path, "errorMappings", mappingIndex, "errorRef"]
         ))
       }
+    }
+  }
+  const messageBindingByCatchEventNodeId = new Map<
+    string,
+    BpmnEventV3.MessageBinding
+  >()
+  for (let index = 0; index < messageBindings.length; index++) {
+    const binding = messageBindings[index]!
+    const path = ["options", "messageBindings", index] as const
+    const node = nodeById.get(binding.catchEventNodeId)
+    const definitions = node?._tag === "IntermediateCatchEvent"
+      ? resolvedEventDefinitions(model, node)
+      : []
+    const definition = definitions.length === 1 &&
+        definitions[0]?._tag === "MessageEventDefinition"
+      ? definitions[0]
+      : undefined
+    if (
+      node?._tag !== "IntermediateCatchEvent" ||
+      node.processId !== rootProcessId ||
+      definition === undefined ||
+      definition.messageRef === undefined ||
+      definition.messageRef !== binding.messageRef
+    ) {
+      diagnostics.push(error(
+        Codes.InvalidKernelProfile,
+        `Message binding '${binding.catchEventNodeId}:${binding.messageRef}' must match one exact Message intermediate catch event`,
+        path
+      ))
+    }
+    if (
+      messageBindingByCatchEventNodeId.has(binding.catchEventNodeId)
+    ) {
+      diagnostics.push(error(
+        Codes.InvalidKernelProfile,
+        `Catch event '${binding.catchEventNodeId}' has more than one Message binding`,
+        [...path, "catchEventNodeId"]
+      ))
+    } else {
+      messageBindingByCatchEventNodeId.set(
+        binding.catchEventNodeId,
+        binding
+      )
     }
   }
   const collectionBindingByTaskNodeId = new Map<
@@ -8028,17 +10785,73 @@ const compileStructure = (
     }
     if (
       node._tag === "CallActivity" || node._tag === "Transaction" || node._tag === "AdHocSubProcess" ||
-      node._tag === "EventSubProcess" || node._tag === "IntermediateCatchEvent" ||
+      node._tag === "EventSubProcess" ||
       node._tag === "IntermediateThrowEvent"
     ) {
       diagnostics.push(error(
-        node._tag === "IntermediateCatchEvent" || node._tag === "IntermediateThrowEvent"
+        node._tag === "IntermediateThrowEvent"
           ? Codes.UnsupportedEvent
           : Codes.UnsupportedNode,
         `Node '${node.id}' of type '${node._tag}' is outside the executable token-kernel subset`,
         path
       ))
       continue
+    }
+    if (node._tag === "IntermediateCatchEvent") {
+      const definitions = resolvedEventDefinitions(model, node)
+      const definition = definitions.length === 1
+        ? definitions[0]
+        : undefined
+      const outgoing = node.outgoingSequenceFlowIds[0] === undefined
+        ? undefined
+        : flowById.get(node.outgoingSequenceFlowIds[0])
+      const commonShape = node.parallelMultiple !== true &&
+        node.incomingSequenceFlowIds.length === 1 &&
+        node.outgoingSequenceFlowIds.length === 1 &&
+        outgoing?.kind === "normal"
+      if (!commonShape) {
+        diagnostics.push(error(
+          Codes.UnsupportedEvent,
+          `Intermediate catch event '${node.id}' requires one incoming flow, one normal outgoing flow, and non-multiple semantics`,
+          path
+        ))
+      }
+      if (definition?._tag === "MessageEventDefinition") {
+        const binding = messageBindingByCatchEventNodeId.get(node.id)
+        if (
+          definition.messageRef === undefined ||
+          definition.operationRef !== undefined ||
+          binding === undefined ||
+          binding.messageRef !== definition.messageRef
+        ) {
+          diagnostics.push(error(
+            Codes.UnsupportedEvent,
+            `Message catch '${node.id}' requires one exact external Message binding and a local messageRef without operationRef`,
+            path
+          ))
+        }
+      } else if (definition?._tag === "TimerEventDefinition") {
+        const supportedTimer = definition.timeCycle === undefined &&
+          (
+            definition.timeDuration !== undefined &&
+              definition.timeDate === undefined ||
+            definition.timeDate !== undefined &&
+              definition.timeDuration === undefined
+          )
+        if (!supportedTimer) {
+          diagnostics.push(error(
+            Codes.UnsupportedEvent,
+            `Timer catch '${node.id}' requires exactly one timeDuration or timeDate; timeCycle is outside this profile`,
+            path
+          ))
+        }
+      } else {
+        diagnostics.push(error(
+          Codes.UnsupportedEvent,
+          `Intermediate catch event '${node.id}' must declare exactly one Message or Timer event definition`,
+          path
+        ))
+      }
     }
     if (node._tag === "Task" || node._tag === "SubProcess") {
       if (node.incomingSequenceFlowIds.length === 0) {
@@ -8245,6 +11058,60 @@ const compileStructure = (
       ))
     }
     if (node._tag === "Gateway") {
+      if (node.gatewayKind === "event-based") {
+        if (
+          node.gatewayDirection !== "diverging" ||
+          node.instantiate === true ||
+          (node.eventGatewayType !== undefined &&
+            node.eventGatewayType !== "exclusive") ||
+          node.defaultFlowId !== undefined ||
+          node.activationCondition !== undefined ||
+          node.incomingSequenceFlowIds.length !== 1 ||
+          node.outgoingSequenceFlowIds.length < 2 ||
+          node.outgoingSequenceFlowIds.length >
+            limits.maxCatchWaitArms
+        ) {
+          diagnostics.push(error(
+            Codes.UnsupportedGateway,
+            `Event-based gateway '${node.id}' must be exclusive, non-instantiating, diverging, have one incoming flow, and between two and the compiled maximum number of outgoing arms`,
+            path,
+            {
+              actualArms: node.outgoingSequenceFlowIds.length,
+              maximumArms: limits.maxCatchWaitArms
+            }
+          ))
+        }
+        const targetIds = new Set<string>()
+        for (
+          let outgoingIndex = 0;
+          outgoingIndex < node.outgoingSequenceFlowIds.length;
+          outgoingIndex++
+        ) {
+          const flowId = node.outgoingSequenceFlowIds[outgoingIndex]!
+          const flow = flowById.get(flowId)
+          const target = flow === undefined
+            ? undefined
+            : nodeById.get(flow.targetId)
+          if (
+            flow === undefined ||
+            flow.kind !== "normal" ||
+            flow.condition !== undefined ||
+            target?._tag !== "IntermediateCatchEvent" ||
+            target.incomingSequenceFlowIds.length !== 1 ||
+            target.incomingSequenceFlowIds[0] !== flow.id ||
+            targetIds.has(target.id)
+          ) {
+            diagnostics.push(error(
+              Codes.UnsupportedGateway,
+              `Event-based gateway '${node.id}' arm '${flowId}' must be one unique direct normal branch to an exclusive Message or Timer catch`,
+              [...path, "outgoingSequenceFlowIds", outgoingIndex]
+            ))
+          } else {
+            targetIds.add(target.id)
+          }
+        }
+        continue
+      }
       if (!["exclusive", "parallel"].includes(node.gatewayKind)) {
         diagnostics.push(error(
           Codes.UnsupportedGateway,
@@ -8379,6 +11246,7 @@ const compileStructure = (
     profileId,
     evaluatorBindings,
     taskBindings,
+    messageBindings,
     dataDocument,
     collectionBindings,
     rootProcessId,
@@ -8389,6 +11257,9 @@ const compileStructure = (
     flowById: new Map(flowById),
     orderedOutgoingByNodeId: internalOutgoing,
     taskBindingByTaskNodeId: new Map(taskBindingByTaskNodeId),
+    messageBindingByCatchEventNodeId: new Map(
+      messageBindingByCatchEventNodeId
+    ),
     collectionBindingByTaskNodeId: new Map(
       collectionBindingByTaskNodeId
     ),
@@ -8416,6 +11287,9 @@ const authorizeKernel = (
     flowById: new Map(structure.flowById),
     orderedOutgoingByNodeId: publicOutgoing,
     taskBindingByTaskNodeId: new Map(structure.taskBindingByTaskNodeId),
+    messageBindingByCatchEventNodeId: new Map(
+      structure.messageBindingByCatchEventNodeId
+    ),
     collectionBindingByTaskNodeId: new Map(
       structure.collectionBindingByTaskNodeId
     ),
@@ -8480,6 +11354,7 @@ export const prepare = Effect.fnUntraced(function*(
     limits: structure.limits,
     evaluatorBindings: structure.evaluatorBindings,
     taskBindings: structure.taskBindings,
+    messageBindings: structure.messageBindings,
     dataDocument: structure.dataDocument,
     collectionBindings: structure.collectionBindings,
     model: structure.model
@@ -8582,8 +11457,10 @@ export const initialize = (
     loopFrames: [],
     multiInstanceGroups: [],
     callFrames: [],
+    catchWaitGroups: [],
     subscriptions: [],
     timers: [],
+    messageDeliveries: [],
     workItems: [],
     compensationRegistrations: [],
     cancellationRegions: []
@@ -8665,6 +11542,677 @@ export const advance = (
 }
 
 /**
+ * Validates an execution snapshot against one prepared kernel authority
+ * without advancing it or consulting runtime services.
+ *
+ * **Details**
+ *
+ * Optional backends use this boundary before performing external scheduling
+ * or wake-up work. A structurally valid state is insufficient: the prepared
+ * kernel also enforces its fingerprinted bindings, limits, Message policy
+ * pins, Timer deadlines, and deterministic race winner.
+ *
+ * @category constructors
+ * @since 4.0.0
+ */
+export const validateExecutionState = (
+  kernel: CompiledKernel,
+  stateInput: unknown
+): Result.Result<
+  BpmnExecutionState.BpmnExecutionState,
+  Diagnostic.CompilationError
+> => {
+  const resolvedKernel = resolveKernel(kernel)
+  return Result.isFailure(resolvedKernel)
+    ? Result.fail(resolvedKernel.failure)
+    : validateKernelState(resolvedKernel.success, stateInput)
+}
+
+interface ExactCatchTarget {
+  readonly group: MutableCatchWaitGroup
+  readonly arm: MutableSubscription
+  readonly token: MutableToken
+}
+
+const exactCatchTarget = (
+  state: MutableState,
+  target: BpmnEventV3.CatchArmTarget
+): ExactCatchTarget | undefined => {
+  const group = state.catchWaitGroups.find((candidate) => candidate.waitGroupId === target.waitGroupId)
+  const arm = state.subscriptions.find((candidate) =>
+    candidate.armId === target.armId &&
+    candidate.waitGroupId === target.waitGroupId
+  )
+  const token = state.tokens.find((candidate) => candidate.tokenId === target.tokenId)
+  if (
+    group === undefined ||
+    arm === undefined ||
+    token === undefined ||
+    group.scopeInstanceId !== target.scopeInstanceId ||
+    group.ownerTokenId !== target.tokenId ||
+    group.generation !== target.generation ||
+    arm.scopeInstanceId !== target.scopeInstanceId ||
+    arm.ownerNodeId !== target.catchEventNodeId ||
+    arm.tokenId !== target.tokenId ||
+    arm.generation !== target.generation
+  ) {
+    return undefined
+  }
+  return { group, arm, token }
+}
+
+const eligibleTimer = (
+  state: MutableState,
+  group: MutableCatchWaitGroup,
+  at: ProtocolV2Wire.Timestamp
+): MutableTimer | undefined =>
+  state.timers
+    .filter((timer) =>
+      timer.waitGroupId === group.waitGroupId &&
+      (timer.status === "scheduled" || timer.status === "armed") &&
+      logicalTimerDeadline(timer) <= at
+    )
+    .sort((left, right) => {
+      const deadline = logicalTimerDeadline(left).localeCompare(
+        logicalTimerDeadline(right)
+      )
+      if (deadline !== 0) {
+        return deadline
+      }
+      const leftOrdinal = state.subscriptions.find((arm) => arm.armId === left.armId)?.ordinal ??
+        Number.MAX_SAFE_INTEGER
+      const rightOrdinal = state.subscriptions.find((arm) => arm.armId === right.armId)?.ordinal ??
+        Number.MAX_SAFE_INTEGER
+      const ordinal = leftOrdinal - rightOrdinal
+      return ordinal !== 0
+        ? ordinal
+        : left.timerId.localeCompare(right.timerId)
+    })[0]
+
+const fencedCatchIngress = (
+  state: BpmnExecutionState.BpmnExecutionState,
+  ingressKind: "message" | "timer-arm" | "timer-observation",
+  target: BpmnEventV3.CatchArmTarget,
+  externalId: string,
+  reason: "wait-closed" | "arm-lost" | "stale-generation",
+  observedAt: ProtocolV2Wire.Timestamp
+): TransitionBatch => {
+  const journal: Array<TransitionEvent> = []
+  recordEvent(journal, {
+    _tag: "CatchIngressFenced",
+    ingressKind,
+    target,
+    externalId,
+    reason,
+    observedAt
+  })
+  return {
+    state,
+    events: immutableEvents(journal)
+  }
+}
+
+/**
+ * Persists the idempotent acknowledgement of one application-selected
+ * durable timer schedule.
+ *
+ * @category constructors
+ * @since 4.0.0
+ */
+export const acknowledgeTimerArm = (
+  kernel: CompiledKernel,
+  stateInput: unknown,
+  commandInput: unknown,
+  services: Services
+): Result.Result<TransitionBatch, Diagnostic.CompilationError> => {
+  const resolvedKernel = resolveKernel(kernel)
+  if (Result.isFailure(resolvedKernel)) {
+    return Result.fail(resolvedKernel.failure)
+  }
+  const authority = resolvedKernel.success
+  const commandSnapshot = Json.snapshot(commandInput)
+  if (Result.isFailure(commandSnapshot)) {
+    return Result.fail(compilationError(error(
+      Codes.InvalidCommand,
+      commandSnapshot.failure.message,
+      ["command", ...commandSnapshot.failure.path]
+    )))
+  }
+  const decoded = decodeAcknowledgeTimerArmCommand(
+    commandSnapshot.success
+  )
+  if (Result.isFailure(decoded)) {
+    return Result.fail(compilationError(error(
+      Codes.InvalidCommand,
+      "Invalid Timer arm acknowledgement command",
+      ["command"],
+      { issue: String(decoded.failure) }
+    )))
+  }
+  const command = commandSnapshot.success as unknown as BpmnEventV3.AcknowledgeTimerArmCommand
+  const validated = validateKernelState(authority, stateInput)
+  if (Result.isFailure(validated)) {
+    return Result.fail(validated.failure)
+  }
+  const resolvedServices = resolveServices(
+    services,
+    latestStateTimestamp(validated.success)
+  )
+  if (Result.isFailure(resolvedServices)) {
+    return Result.fail(resolvedServices.failure)
+  }
+  const now = resolvedServices.success.now
+  const state = directClone(validated.success) as MutableState
+  const target = exactCatchTarget(state, command.target)
+  if (target === undefined) {
+    return Result.succeed(fencedCatchIngress(
+      validated.success,
+      "timer-arm",
+      command.target,
+      command.receipt.receiptId,
+      "stale-generation",
+      now
+    ))
+  }
+  const timer = state.timers.find((candidate) =>
+    candidate.timerId === command.timerId &&
+    candidate.armId === target.arm.armId &&
+    candidate.waitGroupId === target.group.waitGroupId
+  )
+  if (target.group.status !== "waiting" || target.arm.status !== "waiting") {
+    if (
+      timer?.armReceipt !== undefined &&
+      sameJson(timer.armReceipt, command.receipt)
+    ) {
+      const journal: Array<TransitionEvent> = []
+      recordEvent(journal, {
+        _tag: "CatchIngressReplayed",
+        ingressKind: "timer-arm",
+        target: command.target,
+        externalId: command.receipt.receiptId,
+        observedAt: now
+      })
+      return Result.succeed({
+        state: validated.success,
+        events: immutableEvents(journal)
+      })
+    }
+    return Result.succeed(fencedCatchIngress(
+      validated.success,
+      "timer-arm",
+      command.target,
+      command.receipt.receiptId,
+      "wait-closed",
+      now
+    ))
+  }
+  if (
+    target.arm._tag !== "TimerCatchSubscription" ||
+    timer === undefined ||
+    command.receipt.armedAt < timer.scheduledAt ||
+    command.receipt.armedAt > now
+  ) {
+    return Result.fail(compilationError(error(
+      Codes.InvalidCommand,
+      `Timer arm acknowledgement does not match active timer '${command.timerId}'`,
+      ["command"]
+    )))
+  }
+  if (timer.armReceipt !== undefined) {
+    if (!sameJson(timer.armReceipt, command.receipt)) {
+      return Result.fail(compilationError(error(
+        Codes.InvalidCommand,
+        `Timer '${timer.timerId}' was already armed with a different receipt`,
+        ["command", "receipt"]
+      )))
+    }
+    const journal: Array<TransitionEvent> = []
+    recordEvent(journal, {
+      _tag: "CatchIngressReplayed",
+      ingressKind: "timer-arm",
+      target: command.target,
+      externalId: command.receipt.receiptId,
+      observedAt: now
+    })
+    return Result.succeed({
+      state: validated.success,
+      events: immutableEvents(journal)
+    })
+  }
+  if (
+    state.timers.some((candidate) =>
+      candidate.timerId !== timer.timerId &&
+      candidate.armReceipt !== undefined &&
+      (
+        candidate.armReceipt.scheduleId === command.receipt.scheduleId ||
+        candidate.armReceipt.receiptId === command.receipt.receiptId
+      )
+    )
+  ) {
+    return Result.fail(compilationError(error(
+      Codes.InvalidCommand,
+      "Timer arm scheduleId and receiptId must be globally unique in one execution",
+      ["command", "receipt"]
+    )))
+  }
+  timer.status = "armed"
+  timer.armReceipt = directClone(command.receipt)
+  timer.armAcknowledgedAt = now
+  const journal: Array<TransitionEvent> = []
+  recordEvent(journal, {
+    _tag: "TimerArmAcknowledged",
+    target: command.target,
+    timerId: timer.timerId,
+    receipt: command.receipt,
+    acknowledgedAt: now
+  })
+  const checked = validateKernelState(authority, state)
+  if (Result.isFailure(checked)) {
+    return Result.fail(checked.failure)
+  }
+  return Result.succeed({
+    state: checked.success,
+    events: immutableEvents(journal)
+  })
+}
+
+/**
+ * Delivers one trusted external Message receipt to an exact active catch arm.
+ *
+ * **Details**
+ *
+ * This no-inbox profile accepts or fences a previously unseen delivery only
+ * when `receipt.acceptedAt` exactly equals `services.now`. A caller cannot
+ * submit an older transport or sender timestamp to outrank a Timer. Exact
+ * redelivery of an already committed receipt remains idempotent at a later
+ * clock value. The durable host must commit the returned state transition and
+ * journal events atomically; persisting either side alone does not constitute
+ * Message acceptance.
+ *
+ * @category constructors
+ * @since 4.0.0
+ */
+export const deliverMessage = (
+  kernel: CompiledKernel,
+  stateInput: unknown,
+  commandInput: unknown,
+  services: Services
+): Result.Result<TransitionBatch, Diagnostic.CompilationError> => {
+  const resolvedKernel = resolveKernel(kernel)
+  if (Result.isFailure(resolvedKernel)) {
+    return Result.fail(resolvedKernel.failure)
+  }
+  const authority = resolvedKernel.success
+  const commandSnapshot = Json.snapshot(commandInput)
+  if (Result.isFailure(commandSnapshot)) {
+    return Result.fail(compilationError(error(
+      Codes.InvalidCommand,
+      commandSnapshot.failure.message,
+      ["command", ...commandSnapshot.failure.path]
+    )))
+  }
+  const decoded = decodeDeliverMessageCommand(commandSnapshot.success)
+  if (Result.isFailure(decoded)) {
+    return Result.fail(compilationError(error(
+      Codes.InvalidCommand,
+      "Invalid external Message delivery command",
+      ["command"],
+      { issue: String(decoded.failure) }
+    )))
+  }
+  const command = commandSnapshot.success as unknown as BpmnEventV3.DeliverMessageCommand
+  const validated = validateKernelState(authority, stateInput)
+  if (Result.isFailure(validated)) {
+    return Result.fail(validated.failure)
+  }
+  const resolvedServices = resolveServices(
+    services,
+    latestStateTimestamp(validated.success)
+  )
+  if (Result.isFailure(resolvedServices)) {
+    return Result.fail(resolvedServices.failure)
+  }
+  const runtimeServices = resolvedServices.success
+  const state = directClone(validated.success) as MutableState
+  const target = exactCatchTarget(state, command.target)
+  const existingDelivery = state.messageDeliveries.find((delivery) =>
+    delivery.receipt.deliveryId === command.receipt.deliveryId
+  )
+  if (existingDelivery !== undefined) {
+    if (
+      target === undefined ||
+      !sameJson(existingDelivery.target, command.target) ||
+      !sameJson(existingDelivery.receipt, command.receipt)
+    ) {
+      return Result.fail(compilationError(error(
+        Codes.InvalidCommand,
+        `Message delivery '${command.receipt.deliveryId}' was already consumed by another exact receipt`,
+        ["command", "receipt", "deliveryId"]
+      )))
+    }
+    const journal: Array<TransitionEvent> = []
+    recordEvent(journal, {
+      _tag: "CatchIngressReplayed",
+      ingressKind: "message",
+      target: command.target,
+      externalId: command.receipt.deliveryId,
+      observedAt: runtimeServices.now
+    })
+    return Result.succeed({
+      state: validated.success,
+      events: immutableEvents(journal)
+    })
+  }
+  if (command.receipt.acceptedAt !== runtimeServices.now) {
+    return Result.fail(compilationError(error(
+      Codes.InvalidCommand,
+      `Message delivery '${command.receipt.deliveryId}' acceptedAt must exactly equal the trusted kernel clock; delayed or sender-stamped acceptance is forbidden`,
+      ["command", "receipt", "acceptedAt"],
+      {
+        acceptedAt: command.receipt.acceptedAt,
+        trustedNow: runtimeServices.now
+      }
+    )))
+  }
+  if (target === undefined) {
+    return Result.succeed(fencedCatchIngress(
+      validated.success,
+      "message",
+      command.target,
+      command.receipt.deliveryId,
+      "stale-generation",
+      runtimeServices.now
+    ))
+  }
+  if (target.group.status !== "waiting" || target.arm.status !== "waiting") {
+    return Result.succeed(fencedCatchIngress(
+      validated.success,
+      "message",
+      command.target,
+      command.receipt.deliveryId,
+      "wait-closed",
+      runtimeServices.now
+    ))
+  }
+  const binding = authority.messageBindingByCatchEventNodeId.get(
+    target.arm.ownerNodeId
+  )
+  const payloadBytes = canonicalUtf8Bytes(command.receipt.payload)
+  if (
+    target.arm._tag !== "MessageCatchSubscription" ||
+    binding === undefined ||
+    command.receipt.acceptedAt < target.arm.openedAt ||
+    command.receipt.messageRef !== target.arm.messageRef ||
+    !sameJson(
+      command.receipt.correlationKey,
+      target.arm.correlationKey
+    ) ||
+    !sameJson(
+      command.receipt.payloadContract,
+      binding.payloadContract
+    ) ||
+    !sameJson(
+      command.receipt.authorization.policy,
+      binding.authorizationPolicy
+    ) ||
+    Result.isFailure(payloadBytes) ||
+    payloadBytes.success >
+      authority.limits.maxMessagePayloadCanonicalBytes
+  ) {
+    return Result.fail(compilationError(error(
+      Codes.InvalidCommand,
+      `Message delivery '${command.receipt.deliveryId}' does not match the active binding, correlation, authorization, time window, or payload bound`,
+      ["command", "receipt"]
+    )))
+  }
+  const journal: Array<TransitionEvent> = []
+  const dueTimer = eligibleTimer(
+    state,
+    target.group,
+    command.receipt.acceptedAt
+  )
+  if (dueTimer !== undefined) {
+    const resolved = resolveCatchWait(
+      authority,
+      state,
+      target.group,
+      {
+        _tag: "TimerWinner",
+        armId: dueTimer.armId,
+        timerId: dueTimer.timerId,
+        dueAt: dueTimer.schedule.dueAt,
+        observedAt: command.receipt.acceptedAt,
+        selectedAt: logicalTimerDeadline(dueTimer),
+        recordedAt: runtimeServices.now
+      },
+      {
+        _tag: "MessageDelivery",
+        target: command.target,
+        receipt: command.receipt
+      },
+      journal
+    )
+    if (Result.isFailure(resolved)) {
+      return Result.fail(resolved.failure)
+    }
+    recordEvent(journal, {
+      _tag: "CatchIngressFenced",
+      ingressKind: "message",
+      target: command.target,
+      externalId: command.receipt.deliveryId,
+      reason: "wait-closed",
+      observedAt: runtimeServices.now
+    })
+  } else {
+    const resolved = resolveCatchWait(
+      authority,
+      state,
+      target.group,
+      {
+        _tag: "MessageWinner",
+        armId: target.arm.armId,
+        deliveryId: command.receipt.deliveryId,
+        acceptedAt: command.receipt.acceptedAt,
+        selectedAt: command.receipt.acceptedAt,
+        recordedAt: runtimeServices.now
+      },
+      {
+        _tag: "MessageDelivery",
+        target: command.target,
+        receipt: command.receipt
+      },
+      journal
+    )
+    if (Result.isFailure(resolved)) {
+      return Result.fail(resolved.failure)
+    }
+  }
+  const advanced = advanceMutable(
+    authority,
+    runtimeServices,
+    state,
+    journal
+  )
+  if (Result.isFailure(advanced)) {
+    return Result.fail(advanced.failure)
+  }
+  const checked = validateKernelState(authority, state)
+  if (Result.isFailure(checked)) {
+    return Result.fail(checked.failure)
+  }
+  return Result.succeed({
+    state: checked.success,
+    events: immutableEvents(journal)
+  })
+}
+
+/**
+ * Observes one due Timer wake-up and deterministically selects the earliest
+ * eligible timer in the same atomic wait group.
+ *
+ * @category constructors
+ * @since 4.0.0
+ */
+export const observeDueTimer = (
+  kernel: CompiledKernel,
+  stateInput: unknown,
+  commandInput: unknown,
+  services: Services
+): Result.Result<TransitionBatch, Diagnostic.CompilationError> => {
+  const resolvedKernel = resolveKernel(kernel)
+  if (Result.isFailure(resolvedKernel)) {
+    return Result.fail(resolvedKernel.failure)
+  }
+  const authority = resolvedKernel.success
+  const commandSnapshot = Json.snapshot(commandInput)
+  if (Result.isFailure(commandSnapshot)) {
+    return Result.fail(compilationError(error(
+      Codes.InvalidCommand,
+      commandSnapshot.failure.message,
+      ["command", ...commandSnapshot.failure.path]
+    )))
+  }
+  const decoded = decodeObserveDueTimerCommand(commandSnapshot.success)
+  if (Result.isFailure(decoded)) {
+    return Result.fail(compilationError(error(
+      Codes.InvalidCommand,
+      "Invalid due-Timer observation command",
+      ["command"],
+      { issue: String(decoded.failure) }
+    )))
+  }
+  const command = commandSnapshot.success as unknown as BpmnEventV3.ObserveDueTimerCommand
+  const validated = validateKernelState(authority, stateInput)
+  if (Result.isFailure(validated)) {
+    return Result.fail(validated.failure)
+  }
+  const resolvedServices = resolveServices(
+    services,
+    latestStateTimestamp(validated.success)
+  )
+  if (Result.isFailure(resolvedServices)) {
+    return Result.fail(resolvedServices.failure)
+  }
+  const runtimeServices = resolvedServices.success
+  if (command.observedAt > runtimeServices.now) {
+    return Result.fail(compilationError(error(
+      Codes.InvalidCommand,
+      "Timer observation cannot be in the future of the trusted kernel clock",
+      ["command", "observedAt"]
+    )))
+  }
+  const state = directClone(validated.success) as MutableState
+  const target = exactCatchTarget(state, command.target)
+  if (target === undefined) {
+    return Result.succeed(fencedCatchIngress(
+      validated.success,
+      "timer-observation",
+      command.target,
+      command.timerId,
+      "stale-generation",
+      runtimeServices.now
+    ))
+  }
+  if (target.group.status !== "waiting" || target.arm.status !== "waiting") {
+    if (
+      target.group.winner?._tag === "TimerWinner" &&
+      target.group.winner.timerId === command.timerId
+    ) {
+      const journal: Array<TransitionEvent> = []
+      recordEvent(journal, {
+        _tag: "CatchIngressReplayed",
+        ingressKind: "timer-observation",
+        target: command.target,
+        externalId: command.timerId,
+        observedAt: runtimeServices.now
+      })
+      return Result.succeed({
+        state: validated.success,
+        events: immutableEvents(journal)
+      })
+    }
+    return Result.succeed(fencedCatchIngress(
+      validated.success,
+      "timer-observation",
+      command.target,
+      command.timerId,
+      "wait-closed",
+      runtimeServices.now
+    ))
+  }
+  const targetTimer = state.timers.find((timer) =>
+    timer.timerId === command.timerId &&
+    timer.armId === target.arm.armId &&
+    timer.waitGroupId === target.group.waitGroupId
+  )
+  if (
+    target.arm._tag !== "TimerCatchSubscription" ||
+    targetTimer === undefined ||
+    command.observedAt < logicalTimerDeadline(targetTimer)
+  ) {
+    return Result.fail(compilationError(error(
+      Codes.InvalidCommand,
+      `Timer observation does not identify one due active Timer '${command.timerId}'`,
+      ["command"]
+    )))
+  }
+  const winnerTimer = eligibleTimer(
+    state,
+    target.group,
+    command.observedAt
+  )
+  if (winnerTimer === undefined) {
+    return Result.fail(compilationError(error(
+      Codes.InvalidCommand,
+      `No Timer is eligible in wait '${target.group.waitGroupId}'`,
+      ["command", "observedAt"]
+    )))
+  }
+  const journal: Array<TransitionEvent> = []
+  const resolved = resolveCatchWait(
+    authority,
+    state,
+    target.group,
+    {
+      _tag: "TimerWinner",
+      armId: winnerTimer.armId,
+      timerId: winnerTimer.timerId,
+      dueAt: winnerTimer.schedule.dueAt,
+      observedAt: command.observedAt,
+      selectedAt: logicalTimerDeadline(winnerTimer),
+      recordedAt: runtimeServices.now
+    },
+    {
+      _tag: "TimerObservation",
+      target: command.target,
+      timerId: command.timerId,
+      observedAt: command.observedAt
+    },
+    journal
+  )
+  if (Result.isFailure(resolved)) {
+    return Result.fail(resolved.failure)
+  }
+  const advanced = advanceMutable(
+    authority,
+    runtimeServices,
+    state,
+    journal
+  )
+  if (Result.isFailure(advanced)) {
+    return Result.fail(advanced.failure)
+  }
+  const checked = validateKernelState(authority, state)
+  if (Result.isFailure(checked)) {
+    return Result.fail(checked.failure)
+  }
+  return Result.succeed({
+    state: checked.success,
+    events: immutableEvents(journal)
+  })
+}
+
+/**
  * Rebuilds and validates an execution solely from its ordered transition journal.
  *
  * **Details**
@@ -8685,13 +12233,89 @@ export const replay = (
   if (Result.isFailure(resolvedKernel)) {
     return Result.fail(resolvedKernel.failure)
   }
-  const eventsSnapshot = Json.snapshot(eventsInput)
+  const authority = resolvedKernel.success
+  const eventsSnapshot = Json.snapshot(eventsInput, {
+    maxTotalBytes: authority.limits.maxTransitionJournalCanonicalBytes
+  })
   if (Result.isFailure(eventsSnapshot)) {
     return Result.fail(compilationError(error(
       Codes.InvalidTransitionJournal,
       eventsSnapshot.failure.message,
-      ["events", ...eventsSnapshot.failure.path]
+      ["events", ...eventsSnapshot.failure.path],
+      {
+        maximumCanonicalBytes: authority.limits.maxTransitionJournalCanonicalBytes
+      }
     )))
+  }
+  if (
+    !Array.isArray(eventsSnapshot.success) ||
+    eventsSnapshot.success.length >
+      authority.limits.maxTransitionJournalEvents
+  ) {
+    return Result.fail(compilationError(error(
+      Codes.InvalidTransitionJournal,
+      "Transition journal exceeds its compiled event-count limit",
+      ["events"],
+      {
+        actual: Array.isArray(eventsSnapshot.success)
+          ? eventsSnapshot.success.length
+          : 0,
+        maximum: authority.limits.maxTransitionJournalEvents
+      }
+    )))
+  }
+  for (let index = 0; index < eventsSnapshot.success.length; index++) {
+    const event = eventsSnapshot.success[index]
+    if (
+      event === null ||
+      typeof event !== "object" ||
+      Array.isArray(event)
+    ) {
+      continue
+    }
+    if (event._tag === "TimerExpressionEvaluated") {
+      for (const field of ["evaluatedValue", "lexical"] as const) {
+        const value = event[field]
+        if (typeof value !== "string") {
+          continue
+        }
+        const actual = utf8Bytes(value)
+        if (
+          actual === undefined ||
+          actual > authority.limits.maxTimerExpressionUtf8Bytes
+        ) {
+          return Result.fail(compilationError(error(
+            Codes.InvalidTransitionJournal,
+            `Timer expression event exceeds its compiled UTF-8 byte limit`,
+            ["events", index, field],
+            {
+              ...(actual === undefined ? undefined : { actual }),
+              maximum: authority.limits.maxTimerExpressionUtf8Bytes
+            }
+          )))
+        }
+      }
+    }
+    if (event._tag === "CatchWaitOpened") {
+      const timerFailure = oversizedTimerLexical(
+        event.timers,
+        ["events", index, "timers"],
+        authority.limits.maxTimerExpressionUtf8Bytes
+      )
+      if (timerFailure !== undefined) {
+        return Result.fail(compilationError(error(
+          Codes.InvalidTransitionJournal,
+          "Persisted Timer lexical value exceeds its compiled UTF-8 byte limit",
+          timerFailure.path,
+          {
+            ...(timerFailure.actual === undefined
+              ? undefined
+              : { actual: timerFailure.actual }),
+            maximum: authority.limits.maxTimerExpressionUtf8Bytes
+          }
+        )))
+      }
+    }
   }
   const decoded = decodeTransitionJournal(eventsSnapshot.success)
   if (Result.isFailure(decoded)) {
@@ -8703,7 +12327,7 @@ export const replay = (
     )))
   }
   return replayJournal(
-    resolvedKernel.success,
+    authority,
     eventsSnapshot.success as unknown as TransitionJournal
   )
 }

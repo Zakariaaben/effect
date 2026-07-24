@@ -275,8 +275,8 @@ export const replay = Effect.fnUntraced(function*(
   if (
     header?._tag !== "JournalStarted" ||
     Json.canonicalizeSnapshot(
-      header.model as unknown as Schema.Json
-    ) !==
+        header.model as unknown as Schema.Json
+      ) !==
       Json.canonicalizeSnapshot(
         artifact.model as unknown as Schema.Json
       )

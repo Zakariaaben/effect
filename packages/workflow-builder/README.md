@@ -53,12 +53,13 @@ Today the package provides:
 - a durable BPMN execution-state foundation with token positions, scope and
   invocation identity, gateway/loop/multi-instance/call frames, subscriptions,
   timers, work items, compensation registrations, and cancellation regions,
-  whose state version `6` carries a version `4` executable fingerprint
-  reference and exact protocol-v3 task-resolution records;
+  whose state version `7` carries a version `5` executable fingerprint
+  reference, exact protocol-v3 task-resolution records, atomic catch-wait
+  groups, and a global Message-delivery ledger;
 - a normalized BPMN data/IO/interface slice and BPMNDI/DI/DC representation
   with aggregate reference, geometry, and semantic-kind validation;
 - a resource-bounded namespace-aware XML infoset plus strict named profile
-  `bpmn-2.0.2-core-process-di-v5` for fail-closed import, canonical export, and
+  `bpmn-2.0.2-core-process-di-v6` for fail-closed import, canonical export, and
   normalized round-trip of its explicitly bounded process/control-flow and DI
   surface, including source-level `callActivity` references as
   namespace-expanded QNames, Standard Loop characteristics, and represented
@@ -71,7 +72,12 @@ Today the package provides:
   interchange capability is wider than executable admission. The Standard Loop
   condition must be a formal expression with an exact language-version binding,
   `testBefore` selects pre-test or post-test behavior, and a positive
-  `loopMaximum` is mandatory in this named profile;
+  `loopMaximum` is mandatory in this named profile. Version `6` additionally
+  maps normal-flow Intermediate Catch Events with exactly one Message or Timer
+  definition and exclusive, non-instantiating Event-Based Gateways whose direct
+  branches are those catch events. Message `operationRef`, Timer `timeCycle`,
+  conditional/multiple/parallel-multiple catch semantics, and other Event
+  definitions fail closed;
 - a bounded replayable BPMN token kernel for none start/end events, generic
   tasks, bounded Standard Loop Tasks, ordinary subprocesses,
   conditional/default flows, exclusive/parallel gateways, and
@@ -108,6 +114,50 @@ Today the package provides:
   CallActivities, open WCP15 groups, and draining WCP34/WCP36 groups remain
   rejected. Machine-readable coverage gates still declare no formal BPMN
   conformance claim;
+- portable executable profile `CatchEventChoice/1` for a deliberately bounded
+  Message/Timer Intermediate Catch Event slice. A standalone catch or one
+  exclusive, non-instantiating Event-Based Gateway atomically opens exact
+  Message and Timer arms. Message bindings commit an ordered, non-empty exact
+  correlation key expression, payload codec contract, and authorization-policy
+  build. The atomic delivery transition is the `acceptedAt` authority: the
+  receipt value must equal `services.now` while the kernel validates the exact
+  active arm, correlation, policy pin, payload bound, and winner. Sender time
+  is never authoritative. An exact redelivery of an already committed receipt
+  is recognized before this clock check and records only replay audit. Messages are
+  transient-active-only: no pre-wait inbox or early-message buffering is
+  implied. A Message wins only when its accepted instant is before every
+  eligible Timer deadline; a Timer wins equality, and equal Timer deadlines are
+  ordered by immutable branch ordinal. Winner selection, continuation, and
+  loser-arm/Timer cancellation commit in one transition. The execution-global
+  `deliveryId` ledger consumes both Message winners and Messages preempted by a
+  Timer, so an accepted delivery cannot be reused against another activation.
+  Version `6` causal journals replay the selected winner, evaluated correlation,
+  materialized deadline, cancellations, fences, and ledger without rereading a
+  clock, reevaluating an expression, or rerunning the race.
+  Fingerprinted kernel budgets bound the evaluated Timer lexical value, the
+  canonical execution-state snapshot, and both event count and canonical bytes
+  of one replay journal. Fixed parser/kernel ceilings remain 4 KiB per Timer
+  lexical, 8 MiB per state snapshot, and 65,536 events/16 MiB per journal;
+  profiles may only lower them. Longer histories require an explicit segmented
+  history/checkpoint authority rather than unbounded arrays. Signal,
+  Conditional, Multiple, and Parallel Multiple Events; Timer `timeCycle`;
+  Start, Boundary, throwing, Receive Task, and event-subprocess catches; and
+  instantiating or Parallel Event-Based Gateways remain excluded;
+- an optional `EffectWorkflowBpmnEventV3` adapter that creates one typed native
+  deferred per catch wait group, including Message-only waits, and uses
+  absolute idempotent `DurableClock` schedules for Timer arms. Timer-due and
+  post-commit state-change values are typed first-wins wake hints only; recovery
+  reloads portable state and the kernel remains the sole race authority. The
+  adapter delegates to the injected native backend and implements no backend
+  SPI, persistence store, outbox, inbox, correlation service, cancellation
+  authority, transport authentication, or alternate replay engine. Its explicit
+  native `workflowName`/`executionId` address is caller-owned and must be
+  persisted by the host beside its execution binding; the derived Effect token
+  is an address, not a credential. After a crash the host can reconstruct a
+  post-commit notification from closed portable state, but must provide its own
+  transactional outbox or equivalent delivery guarantee. Memory-backed tests
+  are integration evidence, not production durability; persistent/cluster
+  conformance, crash/restart, and failover evidence remain required;
 - an explicitly bounded protocol-v3 Task/Boundary Error execution slice.
   Immutable task bindings and exact failure-identity-to-Error mappings are part
   of the executable fingerprint. `resolveTask` routes exact success normally,
@@ -122,17 +172,22 @@ Today the package provides:
   bindings explicitly as external compile options and commits them to the
   executable fingerprint; they are not inferred from BPMN XML. This does not
   yet cover the complete BPMN Activity lifecycle, parent-scope Error
-  propagation, timers, BPMN Cancel, non-interrupting boundaries, or event
-  subprocesses;
-- a strict BPMN executable facade proving the named XML profile can be imported,
-  compiled directly to that token kernel, executed through conditional/default
-  parallel/subprocess, bounded Standard Loop, and fixed Multi-Instance paths,
-  replayed, canonically exported, re-imported, recompiled, and replayed to the
-  same marking without DAG lowering;
+  propagation, Boundary Timers, BPMN Cancel, non-interrupting boundaries, or
+  event subprocesses;
+- a strict BPMN executable facade that imports the named XML profile and
+  compiles it directly to the token kernel without DAG lowering. Its
+  end-to-end scenarios execute conditional/default parallel/subprocess,
+  bounded Standard Loop, fixed Multi-Instance, and one bounded Message/Timer
+  gateway equality race through journal replay, canonical export, re-import,
+  recompilation, and same-state replay. Standalone Message/Timer catch shapes
+  have compile and canonical round-trip evidence; this does not claim each
+  shape has a separate end-to-end scenario;
 - Effectful BPMN kernel preparation that SHA-256 fingerprints the complete
   normalized semantic model, selected root, kernel semantics, limits, mapping
-  profile, and exact evaluator-build manifest; state and journal replay reject
-  cross-model or cross-profile substitution before interpreting a marking;
+  profile, and exact evaluator-build manifest; kernel semantic version `6`,
+  state version `7`, executable fingerprint version `5`, and transition-journal
+  version `6` reject cross-model or cross-profile substitution before
+  interpreting a marking;
 - strict build-pinned BPMN expression evaluator definitions and an Effect
   registry that permits old and new builds to coexist but performs no
   language-only, semver, or `latest` fallback; an Effect-native driver resolves
@@ -356,7 +411,7 @@ future authenticated distributed queue.
 
 The BPMN model, named XML/DI mapping slice, durable marking, and bounded token
 kernel are likewise not a BPMN conformance claim. Mapping outside
-`bpmn-2.0.2-core-process-di-v5`, normative XSD validation, complete Common
+`bpmn-2.0.2-core-process-di-v6`, normative XSD validation, complete Common
 Executable and Activity lifecycle semantics, a complete atomic normative
 catalogue, persistent storage, authenticated history anchoring, official
 fixtures, and published conformance evidence remain required. The package
@@ -364,7 +419,7 @@ provides no built-in FEEL, XPath, or other expression implementation; an
 application must install an exact build-pinned evaluator, and strong CPU/heap
 isolation requires a worker, process, or sandbox adapter. BPMN 2.0.2 itself
 allows `loopMaximum` to be omitted and `loopCondition` to use the more
-permissive `tExpression` form. Profile `v5` deliberately fails closed unless a
+permissive `tExpression` form. Profile `v6` deliberately fails closed unless a
 generic Task has a positive maximum and a version-bound formal condition; it
 does not claim general Standard Loop support. Its separate
 `FixedMultiInstance/1` execution intersection is deliberately limited to a
@@ -380,6 +435,32 @@ partial joins (WCP34/WCP36), native collective cancellation/audit, normative
 XSD evidence, or any formal BPMN conformance claim. Open creation and draining
 require a distinct `OpenForEachGroup/1` semantic profile rather than a silent
 widening of either frozen group.
+
+The same profile's `CatchEventChoice/1` intersection is intentionally narrower
+than BPMN's complete Event model: it admits only normal-flow Message and
+fixed-duration/absolute-date Timer Intermediate Catch Events, standalone or
+directly following an exclusive non-instantiating Event-Based Gateway. It does
+not provide durable early-message retention, predicate or wildcard
+correlation, `timeCycle`, Signal/Conditional/Multiple Events, Start/Boundary
+Events, Receive Tasks, event subprocesses, or instantiating/Parallel
+Event-Based Gateways. The optional native Effect Workflow adapter delegates
+durable scheduling and wake-up hints to the selected backend; it does not own
+portable race selection, correlation, cancellation, replay, or any broader
+BPMN conformance. BPMN 2.0.2 Table 10.99 requires
+`MessageEventDefinition.operationRef` for executable Processes, whereas this
+slice rejects it and uses a fingerprinted external `MessageBinding`; §13.3.3
+also describes predicate-based correlation that the exact-key profile rejects.
+`CatchEventChoice/1` is therefore an implementation profile and bounded WCP16
+evidence, not BPMN Process Execution Conformance.
+
+`timeDuration` and `timeDate` are BPMN `tExpression` values. XML v6 preserves
+their expression text; it does not claim that the BPMN XSD directly types that
+text as `xsd:duration` or `xsd:dateTime`. Executable admission evaluates the
+expression, requires a string result, and parses that value as a bounded
+ISO-8601/XML Schema duration or date-time subset: non-negative fixed
+day/time durations with exact millisecond representation, or zoned date-times
+normalizable to the protocol timestamp. Calendar-relative units, negative or
+lossy values, and `timeCycle` remain outside this profile.
 
 The closed profiles follow durable-engine lessons shared by Temporal, AWS Step
 Functions, Argo, and similar systems: freeze the logical member set at

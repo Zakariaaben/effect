@@ -9,6 +9,7 @@ import * as BpmnExecutionState from "../src/BpmnExecutionState.ts"
 import type * as BpmnExpression from "../src/BpmnExpression.ts"
 import * as BpmnKernel from "../src/BpmnKernel.ts"
 import * as BpmnModel from "../src/BpmnModel.ts"
+import * as BpmnTime from "../src/BpmnTime.ts"
 import type * as Diagnostic from "../src/Diagnostic.ts"
 import * as ProtocolV2Wire from "../src/ProtocolV2Wire.ts"
 import * as ProtocolV3Wire from "../src/ProtocolV3Wire.ts"
@@ -39,6 +40,15 @@ const services = (
 const limits: BpmnKernel.KernelLimits = {
   maxAutomaticTransitions: 1_000,
   maxExecutionInputCanonicalBytes: 1_048_576,
+  maxExecutionStateCanonicalBytes: 8_388_608,
+  maxTransitionJournalEvents: 10_000,
+  maxTransitionJournalCanonicalBytes: 16_777_216,
+  maxCatchWaitArms: 32,
+  maxTimerDelayMillis: 31_536_000_000,
+  maxTimerExpressionUtf8Bytes: 4_096,
+  maxMessageCorrelationComponents: 16,
+  maxMessageCorrelationCanonicalBytes: 16_384,
+  maxMessagePayloadCanonicalBytes: 1_048_576,
   maxMultiInstanceCardinality: 128,
   maxMultiInstanceCollectionCanonicalBytes: 1_048_576,
   maxMultiInstanceItemCanonicalBytes: 262_144,
@@ -495,6 +505,48 @@ const activeNodeIds = (
     .map((token) => token.position.nodeId)
 
 describe("BpmnKernel", () => {
+  it("rejects profile budgets above the fixed snapshot and lexical hard caps", () => {
+    const definition = model(
+      [
+        startEvent("start", processId, ["flow-start-task"]),
+        task("task", processId, ["flow-start-task"], [])
+      ],
+      [flow("flow-start-task", processId, "start", "task", "normal")]
+    )
+    for (
+      const hostile of [
+        {
+          ...limits,
+          maxExecutionStateCanonicalBytes: BpmnKernel.MaximumExecutionStateCanonicalBytes + 1
+        },
+        {
+          ...limits,
+          maxTransitionJournalEvents: BpmnKernel.MaximumTransitionJournalEvents + 1
+        },
+        {
+          ...limits,
+          maxTransitionJournalCanonicalBytes: BpmnKernel.MaximumTransitionJournalCanonicalBytes + 1
+        },
+        {
+          ...limits,
+          maxTimerExpressionUtf8Bytes: BpmnTime.MaximumTimerLexicalUtf8Bytes + 1
+        }
+      ]
+    ) {
+      const prepared = prepareResult(
+        definition,
+        hostile as BpmnKernel.KernelLimits
+      )
+      assert.isTrue(Result.isFailure(prepared))
+      if (Result.isSuccess(prepared)) {
+        throw new Error("Expected hostile kernel limit rejection")
+      }
+      assert(
+        prepared.failure.diagnostics.some((diagnostic) => diagnostic.code === BpmnKernel.Codes.InvalidKernelProfile)
+      )
+    }
+  })
+
   it("initializes start fan-out directly into stable task waits", () => {
     const compiled = compile(model(
       [
@@ -1947,6 +1999,88 @@ describe("BpmnKernel", () => {
       )
     }
     assert.isFalse(getterRead)
+  })
+
+  it("enforces compiled state and journal budgets before schema decode or replay", () => {
+    const definition = model(
+      [
+        startEvent("start", processId, ["flow-start-task"]),
+        task("task", processId, ["flow-start-task"], [])
+      ],
+      [flow("flow-start-task", processId, "start", "task", "normal")]
+    )
+    const prepared = prepareResult(definition, {
+      ...limits,
+      maxExecutionStateCanonicalBytes: 4_096,
+      maxTransitionJournalEvents: 2,
+      maxTransitionJournalCanonicalBytes: 16_777_216
+    })
+    assert.isTrue(Result.isSuccess(prepared))
+    if (Result.isFailure(prepared)) {
+      throw prepared.failure
+    }
+    const initialized = initializeKernel(prepared.success, services())
+    assert.isTrue(Result.isSuccess(initialized))
+    if (Result.isFailure(initialized)) {
+      throw initialized.failure
+    }
+
+    const oversizedState = structuredClone(initialized.success.state)
+    oversizedState.input = "x".repeat(4_096)
+    const stateResult = BpmnKernel.validateExecutionState(
+      prepared.success,
+      oversizedState
+    )
+    assert.isTrue(Result.isFailure(stateResult))
+    if (Result.isSuccess(stateResult)) {
+      throw new Error("Expected execution-state byte rejection")
+    }
+    assert(
+      stateResult.failure.diagnostics.some((diagnostic) =>
+        diagnostic.code === BpmnKernel.Codes.InvalidKernelState &&
+        diagnostic.message.includes("4096 bytes")
+      )
+    )
+
+    const eventCountResult = BpmnKernel.replay(
+      prepared.success,
+      initialized.success.events
+    )
+    assert.isTrue(Result.isFailure(eventCountResult))
+    if (Result.isSuccess(eventCountResult)) {
+      throw new Error("Expected journal event-count rejection")
+    }
+    assert(
+      eventCountResult.failure.diagnostics.some((diagnostic) =>
+        diagnostic.code ===
+          BpmnKernel.Codes.InvalidTransitionJournal &&
+        diagnostic.message.includes("event-count")
+      )
+    )
+
+    const bytePrepared = prepareResult(definition, {
+      ...limits,
+      maxTransitionJournalCanonicalBytes: 128
+    })
+    assert.isTrue(Result.isSuccess(bytePrepared))
+    if (Result.isFailure(bytePrepared)) {
+      throw bytePrepared.failure
+    }
+    const byteResult = BpmnKernel.replay(
+      bytePrepared.success,
+      initialized.success.events
+    )
+    assert.isTrue(Result.isFailure(byteResult))
+    if (Result.isSuccess(byteResult)) {
+      throw new Error("Expected journal canonical-byte rejection")
+    }
+    assert(
+      byteResult.failure.diagnostics.some((diagnostic) =>
+        diagnostic.code ===
+          BpmnKernel.Codes.InvalidTransitionJournal &&
+        diagnostic.message.includes("128 bytes")
+      )
+    )
   })
 
   it("rejects kernel-state forgery outside the admitted subset", () => {

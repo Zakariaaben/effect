@@ -9,6 +9,7 @@ import * as Option from "effect/Option"
 import * as Result from "effect/Result"
 import * as Schedule from "effect/Schedule"
 import * as Schema from "effect/Schema"
+import { TestClock } from "effect/testing"
 import { WorkflowEngine } from "effect/unstable/workflow"
 import * as NativeDeferred from "effect/unstable/workflow/DurableDeferred"
 import * as NativeWorkflow from "effect/unstable/workflow/Workflow"
@@ -661,6 +662,7 @@ const pollUntilObserved = Effect.fnUntraced(function*(
     const polled = yield* RuntimeRaceWorkflow.poll(executionId)
     if (Option.isSome(polled)) return polled.value
     yield* Effect.yieldNow
+    yield* Effect.sleep("1 millis").pipe(TestClock.withLive)
   }
   return yield* Effect.die(
     "Native workflow did not expose observable state"
@@ -674,6 +676,7 @@ const pollUntilComplete = Effect.fnUntraced(function*(
     const observed = yield* pollUntilObserved(executionId)
     if (observed._tag === "Complete") return observed
     yield* Effect.yieldNow
+    yield* Effect.sleep("1 millis").pipe(TestClock.withLive)
   }
   return yield* Effect.die("Native workflow did not complete")
 })

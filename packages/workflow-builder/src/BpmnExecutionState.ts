@@ -13,7 +13,9 @@
 import * as Result from "effect/Result"
 import * as Schema from "effect/Schema"
 import * as BpmnActivityV3 from "./BpmnActivityV3.ts"
+import * as BpmnEventV3 from "./BpmnEventV3.ts"
 import * as BpmnModel from "./BpmnModel.ts"
+import * as BpmnTime from "./BpmnTime.ts"
 import * as Diagnostic from "./Diagnostic.ts"
 import * as Json from "./internal/json.ts"
 import * as ProtocolV2Wire from "./ProtocolV2Wire.ts"
@@ -34,25 +36,6 @@ const activityLikeTags = new Set<BpmnModel.FlowNode["_tag"]>([
   "AdHocSubProcess",
   "Transaction"
 ])
-
-const catchEventTags = new Set<BpmnModel.FlowNode["_tag"]>([
-  "StartEvent",
-  "BoundaryEvent",
-  "IntermediateCatchEvent"
-])
-
-const eventDefinitionKinds = {
-  MessageEventDefinition: "message",
-  TimerEventDefinition: "timer",
-  SignalEventDefinition: "signal",
-  ConditionalEventDefinition: "conditional",
-  CompensationEventDefinition: "compensation",
-  EscalationEventDefinition: "escalation",
-  ErrorEventDefinition: "error",
-  CancelEventDefinition: "cancel",
-  LinkEventDefinition: "link",
-  TerminateEventDefinition: "terminate"
-} as const
 
 const comparePath = (
   left: ReadonlyArray<Diagnostic.PathSegment>,
@@ -92,6 +75,13 @@ const sortDiagnostics = (diagnostics: Array<Diagnostic.Diagnostic>): Array<Diagn
 const sameJson = (left: Schema.Json, right: Schema.Json): boolean =>
   Json.canonicalizeSnapshot(left) === Json.canonicalizeSnapshot(right)
 
+const sameStrings = (
+  left: ReadonlyArray<string>,
+  right: ReadonlyArray<string>
+): boolean =>
+  left.length === right.length &&
+  left.every((value, index) => value === right[index])
+
 const compilationError = (
   head: Diagnostic.Diagnostic,
   tail: ReadonlyArray<Diagnostic.Diagnostic> = []
@@ -113,7 +103,7 @@ const codeError = (
  * @category constants
  * @since 4.0.0
  */
-export const BpmnExecutionStateVersion = 6 as const
+export const BpmnExecutionStateVersion = 7 as const
 
 /**
  * Version of the executable BPMN fingerprint preimage.
@@ -121,7 +111,7 @@ export const BpmnExecutionStateVersion = 6 as const
  * @category constants
  * @since 4.0.0
  */
-export const BpmnExecutableFingerprintVersion = 4 as const
+export const BpmnExecutableFingerprintVersion = 5 as const
 
 /**
  * Version of the token-kernel semantics committed by an execution.
@@ -129,7 +119,7 @@ export const BpmnExecutableFingerprintVersion = 4 as const
  * @category constants
  * @since 4.0.0
  */
-export const BpmnKernelSemanticVersion = "5" as const
+export const BpmnKernelSemanticVersion = "6" as const
 
 /**
  * Execution snapshot identity pinned to one BPMN semantic model version.
@@ -542,32 +532,137 @@ export const CallFrame = Schema.Struct({
 export type CallFrame = Schema.Schema.Type<typeof CallFrame>
 
 /**
- * Durable catch-event subscription.
+ * Exact winner of one atomic catch-event wait group.
  *
  * @category schemas
  * @since 4.0.0
  */
-export const Subscription = Schema.Struct({
-  subscriptionId: Identifier,
-  ownerNodeId: Identifier,
+export const CatchWaitWinner = Schema.Union([
+  Schema.TaggedStruct("MessageWinner", {
+    armId: Identifier,
+    deliveryId: Identifier,
+    acceptedAt: ProtocolV2Wire.Timestamp,
+    selectedAt: ProtocolV2Wire.Timestamp,
+    recordedAt: ProtocolV2Wire.Timestamp
+  }),
+  Schema.TaggedStruct("TimerWinner", {
+    armId: Identifier,
+    timerId: Identifier,
+    dueAt: ProtocolV2Wire.Timestamp,
+    observedAt: ProtocolV2Wire.Timestamp,
+    selectedAt: ProtocolV2Wire.Timestamp,
+    recordedAt: ProtocolV2Wire.Timestamp
+  })
+]).annotate({
+  identifier: "WorkflowBpmnCatchWaitWinner",
+  parseOptions: strictParseOptions
+})
+
+/**
+ * The decoded type of {@link CatchWaitWinner}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type CatchWaitWinner = Schema.Schema.Type<typeof CatchWaitWinner>
+
+/**
+ * One durable atomic wait opened by a standalone catch event or by an
+ * exclusive event-based gateway.
+ *
+ * **Details**
+ *
+ * All arms are opened in one kernel transition. A terminal group retains
+ * exactly one winner or an explicit cancellation reason; losing arms never
+ * remain live.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const CatchWaitGroup = Schema.Struct({
+  waitGroupId: Identifier,
+  source: Schema.Union([
+    Schema.TaggedStruct("StandaloneCatch", {
+      catchEventNodeId: Identifier
+    }),
+    Schema.TaggedStruct("EventBasedGateway", {
+      gatewayNodeId: Identifier
+    })
+  ]),
+  ownerTokenId: Identifier,
   processId: Identifier,
   scopeInstanceId: Identifier,
-  kind: Schema.Literals([
-    "message",
-    "timer",
-    "signal",
-    "conditional",
-    "compensation",
-    "escalation",
-    "error",
-    "cancel",
-    "link",
-    "multiple",
-    "parallel-multiple"
-  ]),
-  status: Schema.Literals(["waiting", "matched", "cancelled", "expired"]),
-  correlationKey: Schema.optionalKey(Identifier)
+  generation: PositiveInt,
+  armIds: Schema.NonEmptyArray(Identifier),
+  status: Schema.Literals(["waiting", "won", "cancelled"]),
+  winner: Schema.optionalKey(CatchWaitWinner),
+  cancellationReason: Schema.optionalKey(Schema.Literals([
+    "scope-cancelled",
+    "execution-cancelled",
+    "execution-failed",
+    "execution-terminated"
+  ])),
+  openedAt: ProtocolV2Wire.Timestamp,
+  closedAt: Schema.optionalKey(ProtocolV2Wire.Timestamp)
 }).annotate({
+  identifier: "WorkflowBpmnCatchWaitGroup",
+  parseOptions: strictParseOptions
+})
+
+/**
+ * The decoded type of {@link CatchWaitGroup}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type CatchWaitGroup = Schema.Schema.Type<typeof CatchWaitGroup>
+
+const CatchArmFields = {
+  armId: Identifier,
+  waitGroupId: Identifier,
+  ownerNodeId: Identifier,
+  sourceSequenceFlowId: Schema.optionalKey(Identifier),
+  processId: Identifier,
+  scopeInstanceId: Identifier,
+  tokenId: Identifier,
+  generation: PositiveInt,
+  ordinal: NonNegativeInt,
+  status: Schema.Literals(["waiting", "won", "cancelled"]),
+  openedAt: ProtocolV2Wire.Timestamp,
+  closedAt: Schema.optionalKey(ProtocolV2Wire.Timestamp),
+  cancellationReason: Schema.optionalKey(Schema.Literals([
+    "choice-lost",
+    "scope-cancelled",
+    "execution-cancelled",
+    "execution-failed",
+    "execution-terminated"
+  ]))
+} as const
+
+/**
+ * Durable catch-event subscription arm.
+ *
+ * **Details**
+ *
+ * A Message arm freezes its exact ordered correlation key. A Timer arm points
+ * to one separately persisted timer intent. Only a winning Message arm may
+ * retain the trusted receipt which consumed its delivery identity.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const Subscription = Schema.Union([
+  Schema.TaggedStruct("MessageCatchSubscription", {
+    ...CatchArmFields,
+    messageRef: Identifier,
+    correlationKey: BpmnEventV3.CorrelationKey,
+    receipt: Schema.optionalKey(BpmnEventV3.MessageReceipt)
+  }),
+  Schema.TaggedStruct("TimerCatchSubscription", {
+    ...CatchArmFields,
+    timerId: Identifier
+  })
+]).annotate({
   identifier: "WorkflowBpmnSubscription",
   parseOptions: strictParseOptions
 })
@@ -588,12 +683,40 @@ export type Subscription = Schema.Schema.Type<typeof Subscription>
  */
 export const Timer = Schema.Struct({
   timerId: Identifier,
-  ownerType: Schema.Literals(["subscription", "loop-frame", "multi-instance-group", "work-item"]),
-  ownerId: Identifier,
+  armId: Identifier,
+  waitGroupId: Identifier,
   processId: Identifier,
   scopeInstanceId: Identifier,
-  deadline: ProtocolV2Wire.Timestamp,
-  status: Schema.Literals(["pending", "fired", "cancelled"])
+  tokenId: Identifier,
+  generation: PositiveInt,
+  schedule: Schema.Union([
+    Schema.TaggedStruct("TimeDuration", {
+      lexicalVersion: Schema.Literal(BpmnTime.LexicalVersion),
+      lexical: BpmnTime.FixedDurationLexical,
+      delayMillis: ProtocolV2Wire.NonNegativeSafeInt,
+      dueAt: ProtocolV2Wire.Timestamp
+    }),
+    Schema.TaggedStruct("TimeDate", {
+      lexicalVersion: Schema.Literal(BpmnTime.LexicalVersion),
+      lexical: ProtocolV2Wire.Timestamp,
+      delayMillis: ProtocolV2Wire.NonNegativeSafeInt,
+      dueAt: ProtocolV2Wire.Timestamp
+    })
+  ]),
+  scheduledAt: ProtocolV2Wire.Timestamp,
+  status: Schema.Literals(["scheduled", "armed", "fired", "cancelled"]),
+  armReceipt: Schema.optionalKey(BpmnEventV3.TimerArmReceipt),
+  armAcknowledgedAt: Schema.optionalKey(ProtocolV2Wire.Timestamp),
+  observedAt: Schema.optionalKey(ProtocolV2Wire.Timestamp),
+  firedAt: Schema.optionalKey(ProtocolV2Wire.Timestamp),
+  cancelledAt: Schema.optionalKey(ProtocolV2Wire.Timestamp),
+  cancellationReason: Schema.optionalKey(Schema.Literals([
+    "choice-lost",
+    "scope-cancelled",
+    "execution-cancelled",
+    "execution-failed",
+    "execution-terminated"
+  ]))
 }).annotate({
   identifier: "WorkflowBpmnTimer",
   parseOptions: strictParseOptions
@@ -606,6 +729,42 @@ export const Timer = Schema.Struct({
  * @since 4.0.0
  */
 export type Timer = Schema.Schema.Type<typeof Timer>
+
+/**
+ * One Message delivery identity durably consumed by an atomic catch wait.
+ *
+ * **Details**
+ *
+ * The record is retained whether the Message itself wins or an already-due
+ * Timer preempts it. This makes `deliveryId` a global execution-level
+ * idempotency identity even when no Message receipt may remain on a losing
+ * subscription arm.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const MessageDeliveryRecord = Schema.Struct({
+  target: BpmnEventV3.CatchArmTarget,
+  receipt: BpmnEventV3.MessageReceipt,
+  disposition: Schema.Literals([
+    "message-winner",
+    "timer-preempted"
+  ]),
+  recordedAt: ProtocolV2Wire.Timestamp
+}).annotate({
+  identifier: "WorkflowBpmnMessageDeliveryRecord",
+  parseOptions: strictParseOptions
+})
+
+/**
+ * The decoded type of {@link MessageDeliveryRecord}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type MessageDeliveryRecord = Schema.Schema.Type<
+  typeof MessageDeliveryRecord
+>
 
 /**
  * Durable human-work item state.
@@ -717,8 +876,10 @@ export const BpmnExecutionState = Schema.Struct({
   loopFrames: Schema.Array(LoopFrame),
   multiInstanceGroups: Schema.Array(MultiInstanceGroup),
   callFrames: Schema.Array(CallFrame),
+  catchWaitGroups: Schema.Array(CatchWaitGroup),
   subscriptions: Schema.Array(Subscription),
   timers: Schema.Array(Timer),
+  messageDeliveries: Schema.Array(MessageDeliveryRecord),
   workItems: Schema.Array(WorkItem),
   compensationRegistrations: Schema.Array(CompensationRegistration),
   cancellationRegions: Schema.Array(CancellationRegion)
@@ -767,10 +928,13 @@ export const Codes = {
   InvalidMultiInstanceGroup: "InvalidMultiInstanceGroup",
   UnknownCallActivityRef: "UnknownCallActivityRef",
   InvalidCallFrame: "InvalidCallFrame",
+  UnknownCatchWaitGroupRef: "UnknownCatchWaitGroupRef",
+  InvalidCatchWaitGroup: "InvalidCatchWaitGroup",
   UnknownSubscriptionOwnerRef: "UnknownSubscriptionOwnerRef",
   InvalidSubscription: "InvalidSubscription",
   UnknownTimerOwnerRef: "UnknownTimerOwnerRef",
   InvalidTimer: "InvalidTimer",
+  InvalidMessageDelivery: "InvalidMessageDelivery",
   UnknownWorkItemTaskRef: "UnknownWorkItemTaskRef",
   InvalidWorkItem: "InvalidWorkItem",
   UnknownCompensationActivityRef: "UnknownCompensationActivityRef",
@@ -839,21 +1003,6 @@ const resolvedEventDefinitions = (
   })
 ]
 
-const expectedSubscriptionKind = (
-  node: CatchEventNode,
-  definitions: ReadonlyArray<BpmnModel.EventDefinition | BpmnModel.DeclaredEventDefinition>
-): Subscription["kind"] | undefined => {
-  if (definitions.length === 0) {
-    return undefined
-  }
-  if (definitions.length > 1) {
-    return node.parallelMultiple === true ? "parallel-multiple" : "multiple"
-  }
-  const definition = definitions[0]!
-  const kind = eventDefinitionKinds[definition._tag]
-  return kind === "terminate" ? undefined : kind
-}
-
 /**
  * Safely validates one durable BPMN execution-state snapshot against a
  * validated semantic model.
@@ -902,12 +1051,15 @@ export const validate = (
   const seenStateIds = new Map<string, ReadonlyArray<Diagnostic.PathSegment>>()
   const scopeInstances = new Map(state.scopeInstances.map((scope) => [scope.scopeInstanceId, scope] as const))
   const tokens = new Map(state.tokens.map((token) => [token.tokenId, token] as const))
-  const subscriptions = new Map(
-    state.subscriptions.map((subscription) => [subscription.subscriptionId, subscription] as const)
+  const catchWaitGroups = new Map(
+    state.catchWaitGroups.map((group) => [group.waitGroupId, group] as const)
   )
+  const subscriptions = new Map(
+    state.subscriptions.map((subscription) => [subscription.armId, subscription] as const)
+  )
+  const timers = new Map(state.timers.map((timer) => [timer.timerId, timer] as const))
   const loopFrames = new Map(state.loopFrames.map((frame) => [frame.frameId, frame] as const))
   const groups = new Map(state.multiInstanceGroups.map((group) => [group.groupId, group] as const))
-  const workItems = new Map(state.workItems.map((item) => [item.workItemId, item] as const))
 
   if (!processIds.has(state.model.rootProcessId)) {
     diagnostics.push(codeError(
@@ -2599,91 +2751,906 @@ export const validate = (
     }
   }
 
+  const armsByWaitGroup = new Map<string, Array<Subscription>>()
+  for (const subscription of state.subscriptions) {
+    const groupArms = armsByWaitGroup.get(subscription.waitGroupId)
+    if (groupArms === undefined) {
+      armsByWaitGroup.set(subscription.waitGroupId, [subscription])
+    } else {
+      groupArms.push(subscription)
+    }
+  }
+
+  for (let index = 0; index < state.catchWaitGroups.length; index++) {
+    const group = state.catchWaitGroups[index]!
+    const groupPath = ["catchWaitGroups", index] as const
+    registerId(
+      seenStateIds,
+      diagnostics,
+      group.waitGroupId,
+      [...groupPath, "waitGroupId"]
+    )
+    const sourceNodeId = group.source._tag === "StandaloneCatch"
+      ? group.source.catchEventNodeId
+      : group.source.gatewayNodeId
+    const sourceNode = nodeById.get(sourceNodeId)
+    if (
+      sourceNode === undefined ||
+      (group.source._tag === "StandaloneCatch"
+        ? sourceNode._tag !== "IntermediateCatchEvent"
+        : sourceNode._tag !== "Gateway" ||
+          sourceNode.gatewayKind !== "event-based")
+    ) {
+      diagnostics.push(codeError(
+        Codes.InvalidCatchWaitGroup,
+        `Wait group '${group.waitGroupId}' source '${sourceNodeId}' does not match its declared source kind`,
+        [...groupPath, "source"]
+      ))
+    }
+
+    const scope = scopeInstances.get(group.scopeInstanceId)
+    if (scope === undefined) {
+      diagnostics.push(codeError(
+        Codes.UnknownParentScopeInstanceRef,
+        `Wait group '${group.waitGroupId}' references unknown scope instance '${group.scopeInstanceId}'`,
+        [...groupPath, "scopeInstanceId"]
+      ))
+    } else if (
+      scope.processId !== group.processId ||
+      scope.invocation.generation !== group.generation ||
+      (sourceNode !== undefined &&
+        (sourceNode.processId !== group.processId ||
+          sourceNode.parentScopeId !== scope.definitionId))
+    ) {
+      diagnostics.push(codeError(
+        Codes.InvalidCatchWaitGroup,
+        `Wait group '${group.waitGroupId}' process, scope, source, and generation must identify one exact activation`,
+        groupPath
+      ))
+    }
+
+    const ownerToken = tokens.get(group.ownerTokenId)
+    if (ownerToken === undefined) {
+      diagnostics.push(codeError(
+        Codes.InvalidCatchWaitGroup,
+        `Wait group '${group.waitGroupId}' references unknown owner token '${group.ownerTokenId}'`,
+        [...groupPath, "ownerTokenId"]
+      ))
+    } else {
+      const atExpectedSource = ownerToken.position._tag === "AtNode" &&
+        ownerToken.position.nodeId === sourceNodeId
+      if (
+        ownerToken.processId !== group.processId ||
+        ownerToken.scopeInstanceId !== group.scopeInstanceId ||
+        ownerToken.invocation.generation !== group.generation ||
+        !atExpectedSource
+      ) {
+        diagnostics.push(codeError(
+          Codes.InvalidCatchWaitGroup,
+          `Wait group '${group.waitGroupId}' owner token must identify its exact source activation`,
+          [...groupPath, "ownerTokenId"]
+        ))
+      }
+      if (
+        (group.status === "waiting" && ownerToken.status !== "active") ||
+        (group.status !== "waiting" && ownerToken.status === "active")
+      ) {
+        diagnostics.push(codeError(
+          Codes.InvalidCatchWaitGroup,
+          `Wait group '${group.waitGroupId}' owner token lifecycle does not match group status '${group.status}'`,
+          [...groupPath, "status"]
+        ))
+      }
+      if (
+        group.status === "won" &&
+        (
+          ownerToken.status !== "consumed" ||
+          ownerToken.consumedAt !== group.closedAt
+        )
+      ) {
+        diagnostics.push(codeError(
+          Codes.InvalidCatchWaitGroup,
+          `Won group '${group.waitGroupId}' must consume its owner token exactly at closure`,
+          [...groupPath, "ownerTokenId"]
+        ))
+      }
+      if (
+        group.status === "cancelled" &&
+        (
+          ownerToken.status !== "withdrawn" ||
+          ownerToken.consumedAt !== group.closedAt
+        )
+      ) {
+        diagnostics.push(codeError(
+          Codes.InvalidCatchWaitGroup,
+          `Cancelled group '${group.waitGroupId}' must withdraw its owner token exactly at closure`,
+          [...groupPath, "ownerTokenId"]
+        ))
+      }
+      if (ownerToken.createdAt > group.openedAt) {
+        diagnostics.push(codeError(
+          Codes.InvalidCatchWaitGroup,
+          `Wait group '${group.waitGroupId}' opened before its owner token existed`,
+          [...groupPath, "openedAt"]
+        ))
+      }
+    }
+
+    if (group.openedAt < state.startedAt) {
+      diagnostics.push(codeError(
+        Codes.InvalidCatchWaitGroup,
+        `Wait group '${group.waitGroupId}' opened before the execution started`,
+        [...groupPath, "openedAt"]
+      ))
+    }
+    if (
+      group.closedAt !== undefined &&
+      group.closedAt < group.openedAt
+    ) {
+      diagnostics.push(codeError(
+        Codes.InvalidCatchWaitGroup,
+        `Wait group '${group.waitGroupId}' closed before it opened`,
+        [...groupPath, "closedAt"]
+      ))
+    }
+
+    const uniqueArmIds = new Set(group.armIds)
+    const actualArms = armsByWaitGroup.get(group.waitGroupId) ?? []
+    if (
+      uniqueArmIds.size !== group.armIds.length ||
+      actualArms.length !== group.armIds.length ||
+      group.armIds.some((armId) => !subscriptions.has(armId)) ||
+      actualArms.some((arm) => group.armIds[arm.ordinal] !== arm.armId)
+    ) {
+      diagnostics.push(codeError(
+        Codes.InvalidCatchWaitGroup,
+        `Wait group '${group.waitGroupId}' must own one exact, uniquely ordered arm set`,
+        [...groupPath, "armIds"]
+      ))
+    }
+    if (
+      (group.source._tag === "StandaloneCatch" &&
+        group.armIds.length !== 1) ||
+      (group.source._tag === "EventBasedGateway" &&
+        group.armIds.length < 2)
+    ) {
+      diagnostics.push(codeError(
+        Codes.InvalidCatchWaitGroup,
+        `Wait group '${group.waitGroupId}' arm cardinality does not match its source kind`,
+        [...groupPath, "armIds"]
+      ))
+    }
+
+    const wonArms = actualArms.filter((arm) => arm.status === "won")
+    const waitingArms = actualArms.filter((arm) => arm.status === "waiting")
+    const actualTimers = state.timers.filter((timer) => timer.waitGroupId === group.waitGroupId)
+    if (group.status === "waiting") {
+      if (
+        group.winner !== undefined ||
+        group.cancellationReason !== undefined ||
+        group.closedAt !== undefined ||
+        waitingArms.length !== actualArms.length
+      ) {
+        diagnostics.push(codeError(
+          Codes.InvalidCatchWaitGroup,
+          `Waiting group '${group.waitGroupId}' must retain only live arms and no terminal evidence`,
+          groupPath
+        ))
+      }
+    } else if (group.status === "won") {
+      if (
+        group.winner === undefined ||
+        group.cancellationReason !== undefined ||
+        group.closedAt === undefined ||
+        wonArms.length !== 1 ||
+        wonArms[0]?.armId !== group.winner?.armId ||
+        waitingArms.length !== 0
+      ) {
+        diagnostics.push(codeError(
+          Codes.InvalidCatchWaitGroup,
+          `Won group '${group.waitGroupId}' must retain exactly one matching winner and closed loser arms`,
+          groupPath
+        ))
+      }
+      if (
+        group.winner !== undefined &&
+        group.closedAt !== undefined &&
+        (group.winner.recordedAt !== group.closedAt ||
+          group.winner.recordedAt < group.winner.selectedAt)
+      ) {
+        diagnostics.push(codeError(
+          Codes.InvalidCatchWaitGroup,
+          `Wait group '${group.waitGroupId}' winner recordedAt must equal group closedAt and cannot precede semantic selection`,
+          [...groupPath, "winner", "recordedAt"]
+        ))
+      }
+      if (group.winner !== undefined && group.closedAt !== undefined) {
+        for (const arm of actualArms) {
+          const winning = arm.armId === group.winner.armId
+          if (
+            winning
+              ? arm.status !== "won" ||
+                arm.closedAt !== group.closedAt ||
+                arm.cancellationReason !== undefined
+              : arm.status !== "cancelled" ||
+                arm.closedAt !== group.closedAt ||
+                arm.cancellationReason !== "choice-lost"
+          ) {
+            diagnostics.push(codeError(
+              Codes.InvalidCatchWaitGroup,
+              `Won group '${group.waitGroupId}' must retain one exact winner and choice-lost arms at closure`,
+              [...groupPath, "armIds"]
+            ))
+            break
+          }
+        }
+        for (const timer of actualTimers) {
+          const winning = group.winner._tag === "TimerWinner" &&
+            timer.timerId === group.winner.timerId &&
+            timer.armId === group.winner.armId
+          if (
+            winning
+              ? timer.status !== "fired" ||
+                timer.cancelledAt !== undefined ||
+                timer.cancellationReason !== undefined
+              : timer.status !== "cancelled" ||
+                timer.cancelledAt !== group.closedAt ||
+                timer.cancellationReason !== "choice-lost"
+          ) {
+            diagnostics.push(codeError(
+              Codes.InvalidCatchWaitGroup,
+              `Won group '${group.waitGroupId}' must fire only its Timer winner and cancel every losing Timer as choice-lost at closure`,
+              [...groupPath, "winner"]
+            ))
+            break
+          }
+        }
+      }
+    } else if (
+      group.winner !== undefined ||
+      group.cancellationReason === undefined ||
+      group.closedAt === undefined ||
+      waitingArms.length !== 0 ||
+      wonArms.length !== 0
+    ) {
+      diagnostics.push(codeError(
+        Codes.InvalidCatchWaitGroup,
+        `Cancelled group '${group.waitGroupId}' must retain one cancellation reason and only cancelled arms`,
+        groupPath
+      ))
+    } else {
+      for (const arm of actualArms) {
+        if (
+          arm.status !== "cancelled" ||
+          arm.closedAt !== group.closedAt ||
+          arm.cancellationReason !== group.cancellationReason
+        ) {
+          diagnostics.push(codeError(
+            Codes.InvalidCatchWaitGroup,
+            `Cancelled group '${group.waitGroupId}' must close every arm with its exact reason and timestamp`,
+            [...groupPath, "armIds"]
+          ))
+          break
+        }
+      }
+      for (const timer of actualTimers) {
+        if (
+          timer.status !== "cancelled" ||
+          timer.cancelledAt !== group.closedAt ||
+          timer.cancellationReason !== group.cancellationReason
+        ) {
+          diagnostics.push(codeError(
+            Codes.InvalidCatchWaitGroup,
+            `Cancelled group '${group.waitGroupId}' must cancel every Timer with its exact reason and timestamp`,
+            [...groupPath, "closedAt"]
+          ))
+          break
+        }
+      }
+    }
+    if (state.status !== "active" && group.status === "waiting") {
+      diagnostics.push(codeError(
+        Codes.InvalidCatchWaitGroup,
+        `Terminal execution '${state.status}' cannot retain waiting group '${group.waitGroupId}'`,
+        [...groupPath, "status"]
+      ))
+    }
+  }
+
+  const consumedDeliveryIds = new Set<string>()
   for (let index = 0; index < state.subscriptions.length; index++) {
     const subscription = state.subscriptions[index]!
-    registerId(seenStateIds, diagnostics, subscription.subscriptionId, ["subscriptions", index, "subscriptionId"])
+    const subscriptionPath = ["subscriptions", index] as const
+    registerId(
+      seenStateIds,
+      diagnostics,
+      subscription.armId,
+      [...subscriptionPath, "armId"]
+    )
+    const group = catchWaitGroups.get(subscription.waitGroupId)
+    if (group === undefined) {
+      diagnostics.push(codeError(
+        Codes.UnknownCatchWaitGroupRef,
+        `Subscription '${subscription.armId}' references unknown wait group '${subscription.waitGroupId}'`,
+        [...subscriptionPath, "waitGroupId"]
+      ))
+    } else {
+      if (
+        group.ownerTokenId !== subscription.tokenId ||
+        group.processId !== subscription.processId ||
+        group.scopeInstanceId !== subscription.scopeInstanceId ||
+        group.generation !== subscription.generation ||
+        group.openedAt !== subscription.openedAt ||
+        group.armIds[subscription.ordinal] !== subscription.armId
+      ) {
+        diagnostics.push(codeError(
+          Codes.InvalidSubscription,
+          `Subscription '${subscription.armId}' does not identify its exact ordered wait-group activation`,
+          subscriptionPath
+        ))
+      }
+      if (
+        group.status === "waiting" &&
+        subscription.status !== "waiting"
+      ) {
+        diagnostics.push(codeError(
+          Codes.InvalidSubscription,
+          `Waiting group '${group.waitGroupId}' cannot retain terminal arm '${subscription.armId}'`,
+          [...subscriptionPath, "status"]
+        ))
+      }
+      if (
+        group.status === "cancelled" &&
+        subscription.status !== "cancelled"
+      ) {
+        diagnostics.push(codeError(
+          Codes.InvalidSubscription,
+          `Cancelled group '${group.waitGroupId}' must cancel arm '${subscription.armId}'`,
+          [...subscriptionPath, "status"]
+        ))
+      }
+    }
+
     const node = nodeById.get(subscription.ownerNodeId)
     if (node === undefined) {
       diagnostics.push(codeError(
         Codes.UnknownSubscriptionOwnerRef,
-        `Subscription '${subscription.subscriptionId}' references unknown node '${subscription.ownerNodeId}'`,
-        ["subscriptions", index, "ownerNodeId"]
+        `Subscription '${subscription.armId}' references unknown node '${subscription.ownerNodeId}'`,
+        [...subscriptionPath, "ownerNodeId"]
       ))
       continue
     }
-    if (!catchEventTags.has(node._tag)) {
+    if (node._tag !== "IntermediateCatchEvent") {
       diagnostics.push(codeError(
         Codes.InvalidSubscription,
-        `Subscription '${subscription.subscriptionId}' must reference a catching event`,
-        ["subscriptions", index, "ownerNodeId"]
+        `Subscription '${subscription.armId}' must reference an intermediate catch event`,
+        [...subscriptionPath, "ownerNodeId"]
       ))
       continue
     }
-    const catchEvent = node as CatchEventNode
-    const definitions = resolvedEventDefinitions(catchEvent, declaredEventDefinitionById)
-    const expected = expectedSubscriptionKind(catchEvent, definitions)
-    if (expected === undefined) {
+
+    const definitions = resolvedEventDefinitions(
+      node,
+      declaredEventDefinitionById
+    )
+    const expectedDefinitionTag = subscription._tag ===
+        "MessageCatchSubscription"
+      ? "MessageEventDefinition"
+      : "TimerEventDefinition"
+    if (
+      definitions.length !== 1 ||
+      definitions[0]?._tag !== expectedDefinitionTag
+    ) {
       diagnostics.push(codeError(
         Codes.InvalidSubscription,
-        `Subscription '${subscription.subscriptionId}' cannot be attached to catching event '${node.id}' without a subscribable event definition`,
-        ["subscriptions", index, "ownerNodeId"]
-      ))
-      continue
-    }
-    if (subscription.kind !== expected) {
-      diagnostics.push(codeError(
-        Codes.InvalidSubscription,
-        `Subscription '${subscription.subscriptionId}' kind '${subscription.kind}' does not match catching event '${node.id}' kind '${expected}'`,
-        ["subscriptions", index, "kind"]
+        `Subscription '${subscription.armId}' requires exactly one matching ${expectedDefinitionTag}`,
+        [...subscriptionPath, "ownerNodeId"]
       ))
     }
+
     const scope = scopeInstances.get(subscription.scopeInstanceId)
     if (scope === undefined) {
       diagnostics.push(codeError(
         Codes.UnknownParentScopeInstanceRef,
-        `Subscription '${subscription.subscriptionId}' references unknown scope instance '${subscription.scopeInstanceId}'`,
-        ["subscriptions", index, "scopeInstanceId"]
+        `Subscription '${subscription.armId}' references unknown scope instance '${subscription.scopeInstanceId}'`,
+        [...subscriptionPath, "scopeInstanceId"]
       ))
-    } else {
-      if (scope.processId !== subscription.processId || node.processId !== subscription.processId) {
+    } else if (
+      scope.processId !== subscription.processId ||
+      scope.invocation.generation !== subscription.generation ||
+      node.processId !== subscription.processId ||
+      scope.definitionId !== node.parentScopeId
+    ) {
+      diagnostics.push(codeError(
+        Codes.InvalidSubscription,
+        `Subscription '${subscription.armId}' process, scope, node, and generation must identify one exact activation`,
+        subscriptionPath
+      ))
+    }
+
+    if (group?.source._tag === "StandaloneCatch") {
+      if (
+        group.source.catchEventNodeId !== subscription.ownerNodeId ||
+        subscription.sourceSequenceFlowId !== undefined
+      ) {
         diagnostics.push(codeError(
           Codes.InvalidSubscription,
-          `Subscription '${subscription.subscriptionId}' process must match its catching event and scope instance`,
-          ["subscriptions", index, "processId"]
+          `Standalone arm '${subscription.armId}' must be owned directly by its catch event`,
+          [...subscriptionPath, "sourceSequenceFlowId"]
         ))
       }
-      if (scope.definitionId !== node.parentScopeId) {
+    } else if (group?.source._tag === "EventBasedGateway") {
+      const sourceFlow = subscription.sourceSequenceFlowId === undefined
+        ? undefined
+        : flowById.get(subscription.sourceSequenceFlowId)
+      if (
+        sourceFlow === undefined ||
+        sourceFlow.sourceId !== group.source.gatewayNodeId ||
+        sourceFlow.targetId !== subscription.ownerNodeId ||
+        sourceFlow.kind !== "normal"
+      ) {
         diagnostics.push(codeError(
           Codes.InvalidSubscription,
-          `Subscription '${subscription.subscriptionId}' scope definition '${scope.definitionId}' does not own catching event '${node.id}'`,
-          ["subscriptions", index, "scopeInstanceId"]
+          `Event-based arm '${subscription.armId}' must identify its direct normal gateway branch`,
+          [...subscriptionPath, "sourceSequenceFlowId"]
+        ))
+      }
+    }
+
+    if (subscription.openedAt < state.startedAt) {
+      diagnostics.push(codeError(
+        Codes.InvalidSubscription,
+        `Subscription '${subscription.armId}' opened before the execution started`,
+        [...subscriptionPath, "openedAt"]
+      ))
+    }
+    if (subscription.status === "waiting") {
+      if (
+        subscription.closedAt !== undefined ||
+        subscription.cancellationReason !== undefined
+      ) {
+        diagnostics.push(codeError(
+          Codes.InvalidSubscription,
+          `Waiting subscription '${subscription.armId}' cannot retain terminal evidence`,
+          subscriptionPath
+        ))
+      }
+    } else if (subscription.status === "won") {
+      if (
+        subscription.closedAt === undefined ||
+        subscription.cancellationReason !== undefined ||
+        group?.status !== "won" ||
+        group.winner?.armId !== subscription.armId
+      ) {
+        diagnostics.push(codeError(
+          Codes.InvalidSubscription,
+          `Winning subscription '${subscription.armId}' must match its closed wait-group winner`,
+          subscriptionPath
+        ))
+      }
+    } else if (
+      subscription.closedAt === undefined ||
+      subscription.cancellationReason === undefined
+    ) {
+      diagnostics.push(codeError(
+        Codes.InvalidSubscription,
+        `Cancelled subscription '${subscription.armId}' requires closure evidence`,
+        subscriptionPath
+      ))
+    }
+    if (
+      subscription.closedAt !== undefined &&
+      (subscription.closedAt < subscription.openedAt ||
+        (group?.closedAt !== undefined &&
+          subscription.closedAt !== group.closedAt))
+    ) {
+      diagnostics.push(codeError(
+        Codes.InvalidSubscription,
+        `Subscription '${subscription.armId}' closure must equal its wait-group closure and follow opening`,
+        [...subscriptionPath, "closedAt"]
+      ))
+    }
+    if (state.status !== "active" && subscription.status === "waiting") {
+      diagnostics.push(codeError(
+        Codes.InvalidSubscription,
+        `Terminal execution '${state.status}' cannot retain waiting subscription '${subscription.armId}'`,
+        [...subscriptionPath, "status"]
+      ))
+    }
+
+    if (subscription._tag === "MessageCatchSubscription") {
+      const definition = definitions[0]
+      if (
+        definition?._tag === "MessageEventDefinition" &&
+        definition.messageRef !== subscription.messageRef
+      ) {
+        diagnostics.push(codeError(
+          Codes.InvalidSubscription,
+          `Message subscription '${subscription.armId}' messageRef does not match its catch definition`,
+          [...subscriptionPath, "messageRef"]
+        ))
+      }
+      if (subscription.status === "won") {
+        const receipt = subscription.receipt
+        if (
+          receipt === undefined ||
+          receipt.messageRef !== subscription.messageRef ||
+          !sameStrings(receipt.correlationKey, subscription.correlationKey) ||
+          receipt.acceptedAt < subscription.openedAt ||
+          group?.winner?._tag !== "MessageWinner" ||
+          group.winner.deliveryId !== receipt.deliveryId ||
+          group.winner.acceptedAt !== receipt.acceptedAt ||
+          group.winner.selectedAt !== receipt.acceptedAt ||
+          group.winner.recordedAt !== receipt.acceptedAt
+        ) {
+          diagnostics.push(codeError(
+            Codes.InvalidSubscription,
+            `Winning Message arm '${subscription.armId}' must retain its exact active-window receipt and winner evidence`,
+            [...subscriptionPath, "receipt"]
+          ))
+        } else if (consumedDeliveryIds.has(receipt.deliveryId)) {
+          diagnostics.push(codeError(
+            Codes.InvalidSubscription,
+            `Message delivery '${receipt.deliveryId}' cannot win more than one wait group`,
+            [...subscriptionPath, "receipt", "deliveryId"]
+          ))
+        } else {
+          consumedDeliveryIds.add(receipt.deliveryId)
+        }
+      } else if (subscription.receipt !== undefined) {
+        diagnostics.push(codeError(
+          Codes.InvalidSubscription,
+          `Only a winning Message arm may retain a receipt`,
+          [...subscriptionPath, "receipt"]
+        ))
+      }
+    } else {
+      const timer = timers.get(subscription.timerId)
+      if (
+        timer === undefined ||
+        timer.armId !== subscription.armId ||
+        timer.waitGroupId !== subscription.waitGroupId
+      ) {
+        diagnostics.push(codeError(
+          Codes.UnknownTimerOwnerRef,
+          `Timer subscription '${subscription.armId}' must own exact timer '${subscription.timerId}'`,
+          [...subscriptionPath, "timerId"]
+        ))
+      }
+      if (
+        subscription.status === "won" &&
+        group?.winner?._tag !== "TimerWinner"
+      ) {
+        diagnostics.push(codeError(
+          Codes.InvalidSubscription,
+          `Winning Timer arm '${subscription.armId}' must match a Timer winner`,
+          [...subscriptionPath, "status"]
         ))
       }
     }
   }
 
+  const scheduleIds = new Set<string>()
+  const timerReceiptIds = new Set<string>()
   for (let index = 0; index < state.timers.length; index++) {
     const timer = state.timers[index]!
-    registerId(seenStateIds, diagnostics, timer.timerId, ["timers", index, "timerId"])
-    if (!scopeInstances.has(timer.scopeInstanceId)) {
+    const timerPath = ["timers", index] as const
+    registerId(
+      seenStateIds,
+      diagnostics,
+      timer.timerId,
+      [...timerPath, "timerId"]
+    )
+    const arm = subscriptions.get(timer.armId)
+    const group = catchWaitGroups.get(timer.waitGroupId)
+    const scope = scopeInstances.get(timer.scopeInstanceId)
+    const token = tokens.get(timer.tokenId)
+    if (
+      arm?._tag !== "TimerCatchSubscription" ||
+      arm.timerId !== timer.timerId ||
+      arm.waitGroupId !== timer.waitGroupId
+    ) {
+      diagnostics.push(codeError(
+        Codes.UnknownTimerOwnerRef,
+        `Timer '${timer.timerId}' must reference its exact Timer subscription arm`,
+        [...timerPath, "armId"]
+      ))
+    }
+    if (group === undefined) {
+      diagnostics.push(codeError(
+        Codes.UnknownCatchWaitGroupRef,
+        `Timer '${timer.timerId}' references unknown wait group '${timer.waitGroupId}'`,
+        [...timerPath, "waitGroupId"]
+      ))
+    }
+    if (scope === undefined) {
       diagnostics.push(codeError(
         Codes.UnknownParentScopeInstanceRef,
         `Timer '${timer.timerId}' references unknown scope instance '${timer.scopeInstanceId}'`,
-        ["timers", index, "scopeInstanceId"]
+        [...timerPath, "scopeInstanceId"]
       ))
     }
-    const ownerExists = timer.ownerType === "subscription"
-      ? subscriptions.has(timer.ownerId)
-      : timer.ownerType === "loop-frame"
-      ? loopFrames.has(timer.ownerId)
-      : timer.ownerType === "multi-instance-group"
-      ? groups.has(timer.ownerId)
-      : workItems.has(timer.ownerId)
-    if (!ownerExists) {
+    if (
+      group !== undefined &&
+      (timer.processId !== group.processId ||
+        timer.scopeInstanceId !== group.scopeInstanceId ||
+        timer.tokenId !== group.ownerTokenId ||
+        timer.generation !== group.generation ||
+        timer.scheduledAt !== group.openedAt)
+    ) {
       diagnostics.push(codeError(
-        Codes.UnknownTimerOwnerRef,
-        `Timer '${timer.timerId}' references unknown ${timer.ownerType} '${timer.ownerId}'`,
-        ["timers", index, "ownerId"]
+        Codes.InvalidTimer,
+        `Timer '${timer.timerId}' must identify its exact wait-group activation and schedule anchor`,
+        timerPath
+      ))
+    }
+    if (
+      scope !== undefined &&
+      (scope.processId !== timer.processId ||
+        scope.invocation.generation !== timer.generation)
+    ) {
+      diagnostics.push(codeError(
+        Codes.InvalidTimer,
+        `Timer '${timer.timerId}' process and generation must match its scope`,
+        timerPath
+      ))
+    }
+    if (
+      token !== undefined &&
+      (token.processId !== timer.processId ||
+        token.scopeInstanceId !== timer.scopeInstanceId ||
+        token.invocation.generation !== timer.generation)
+    ) {
+      diagnostics.push(codeError(
+        Codes.InvalidTimer,
+        `Timer '${timer.timerId}' token must identify the same activation`,
+        [...timerPath, "tokenId"]
+      ))
+    }
+
+    const scheduledEpoch = Date.parse(timer.scheduledAt)
+    const dueEpoch = Date.parse(timer.schedule.dueAt)
+    const expectedDelay = Math.max(0, dueEpoch - scheduledEpoch)
+    let invalidFixedDuration = false
+    if (timer.schedule._tag === "TimeDuration") {
+      const fixedDuration = BpmnTime.parseFixedDuration(
+        timer.schedule.lexical,
+        timer.schedule.delayMillis
+      )
+      invalidFixedDuration = Result.isFailure(fixedDuration) ||
+        fixedDuration.success.delayMillis !== timer.schedule.delayMillis ||
+        dueEpoch !== scheduledEpoch + timer.schedule.delayMillis
+    }
+    if (
+      !Number.isSafeInteger(scheduledEpoch) ||
+      !Number.isSafeInteger(dueEpoch) ||
+      timer.schedule.delayMillis !== expectedDelay ||
+      invalidFixedDuration ||
+      (timer.schedule._tag === "TimeDate" &&
+        timer.schedule.lexical !== timer.schedule.dueAt)
+    ) {
+      diagnostics.push(codeError(
+        Codes.InvalidTimer,
+        `Timer '${timer.timerId}' lexical value, delay, anchor, and absolute dueAt must agree exactly`,
+        [...timerPath, "schedule"]
+      ))
+    }
+
+    const receipt = timer.armReceipt
+    if (
+      (receipt === undefined) !==
+        (timer.armAcknowledgedAt === undefined)
+    ) {
+      diagnostics.push(codeError(
+        Codes.InvalidTimer,
+        `Timer '${timer.timerId}' arm receipt and acknowledgement time must appear together`,
+        [...timerPath, "armReceipt"]
+      ))
+    }
+    if (receipt !== undefined && timer.armAcknowledgedAt !== undefined) {
+      if (
+        receipt.armedAt < timer.scheduledAt ||
+        timer.armAcknowledgedAt < receipt.armedAt ||
+        scheduleIds.has(receipt.scheduleId) ||
+        timerReceiptIds.has(receipt.receiptId)
+      ) {
+        diagnostics.push(codeError(
+          Codes.InvalidTimer,
+          `Timer '${timer.timerId}' arm receipt must be unique and cannot predate scheduling`,
+          [...timerPath, "armReceipt"]
+        ))
+      } else {
+        scheduleIds.add(receipt.scheduleId)
+        timerReceiptIds.add(receipt.receiptId)
+      }
+    }
+
+    if (timer.status === "scheduled") {
+      if (
+        receipt !== undefined ||
+        timer.armAcknowledgedAt !== undefined ||
+        timer.observedAt !== undefined ||
+        timer.firedAt !== undefined ||
+        timer.cancelledAt !== undefined ||
+        timer.cancellationReason !== undefined
+      ) {
+        diagnostics.push(codeError(
+          Codes.InvalidTimer,
+          `Scheduled timer '${timer.timerId}' cannot retain arm or terminal evidence`,
+          timerPath
+        ))
+      }
+    } else if (timer.status === "armed") {
+      if (
+        receipt === undefined ||
+        timer.armAcknowledgedAt === undefined ||
+        timer.observedAt !== undefined ||
+        timer.firedAt !== undefined ||
+        timer.cancelledAt !== undefined ||
+        timer.cancellationReason !== undefined
+      ) {
+        diagnostics.push(codeError(
+          Codes.InvalidTimer,
+          `Armed timer '${timer.timerId}' requires only its durable arm receipt`,
+          timerPath
+        ))
+      }
+    } else if (timer.status === "fired") {
+      const logicalFireAt = timer.schedule.dueAt < timer.scheduledAt
+        ? timer.scheduledAt
+        : timer.schedule.dueAt
+      if (
+        timer.observedAt === undefined ||
+        timer.firedAt !== logicalFireAt ||
+        timer.observedAt < logicalFireAt ||
+        timer.cancelledAt !== undefined ||
+        timer.cancellationReason !== undefined ||
+        arm?.status !== "won" ||
+        group?.winner?._tag !== "TimerWinner" ||
+        group.winner.timerId !== timer.timerId ||
+        group.winner.dueAt !== timer.schedule.dueAt ||
+        group.winner.observedAt !== timer.observedAt ||
+        group.winner.selectedAt !== logicalFireAt ||
+        group.winner.recordedAt < group.winner.observedAt
+      ) {
+        diagnostics.push(codeError(
+          Codes.InvalidTimer,
+          `Fired timer '${timer.timerId}' must retain exact logical-deadline winner evidence`,
+          timerPath
+        ))
+      }
+    } else if (
+      timer.cancelledAt === undefined ||
+      timer.cancellationReason === undefined ||
+      timer.observedAt !== undefined ||
+      timer.firedAt !== undefined ||
+      arm?.status !== "cancelled" ||
+      (timer.armAcknowledgedAt !== undefined &&
+        timer.armAcknowledgedAt > timer.cancelledAt)
+    ) {
+      diagnostics.push(codeError(
+        Codes.InvalidTimer,
+        `Cancelled timer '${timer.timerId}' must retain only consistent cancellation and optional prior arm evidence`,
+        timerPath
+      ))
+    }
+    if (
+      timer.cancelledAt !== undefined &&
+      timer.cancelledAt < timer.scheduledAt
+    ) {
+      diagnostics.push(codeError(
+        Codes.InvalidTimer,
+        `Timer '${timer.timerId}' cannot be cancelled before scheduling`,
+        [...timerPath, "cancelledAt"]
+      ))
+    }
+    if (
+      state.status !== "active" &&
+      (timer.status === "scheduled" || timer.status === "armed")
+    ) {
+      diagnostics.push(codeError(
+        Codes.InvalidTimer,
+        `Terminal execution '${state.status}' cannot retain live timer '${timer.timerId}'`,
+        [...timerPath, "status"]
+      ))
+    }
+  }
+
+  const recordedDeliveryIds = new Set<string>()
+  const deliveryByWaitGroup = new Map<string, MessageDeliveryRecord>()
+  for (let index = 0; index < state.messageDeliveries.length; index++) {
+    const delivery = state.messageDeliveries[index]!
+    const deliveryPath = ["messageDeliveries", index] as const
+    const group = catchWaitGroups.get(delivery.target.waitGroupId)
+    const arm = subscriptions.get(delivery.target.armId)
+    const token = tokens.get(delivery.target.tokenId)
+    const duplicateDelivery = recordedDeliveryIds.has(
+      delivery.receipt.deliveryId
+    )
+    const duplicateGroup = deliveryByWaitGroup.has(
+      delivery.target.waitGroupId
+    )
+    if (
+      group === undefined ||
+      arm?._tag !== "MessageCatchSubscription" ||
+      token === undefined ||
+      group.ownerTokenId !== delivery.target.tokenId ||
+      group.scopeInstanceId !== delivery.target.scopeInstanceId ||
+      group.generation !== delivery.target.generation ||
+      arm.waitGroupId !== delivery.target.waitGroupId ||
+      arm.ownerNodeId !== delivery.target.catchEventNodeId ||
+      arm.scopeInstanceId !== delivery.target.scopeInstanceId ||
+      arm.tokenId !== delivery.target.tokenId ||
+      arm.generation !== delivery.target.generation ||
+      delivery.receipt.messageRef !== arm.messageRef ||
+      !sameStrings(
+        delivery.receipt.correlationKey,
+        arm.correlationKey
+      ) ||
+      delivery.receipt.acceptedAt < arm.openedAt ||
+      delivery.recordedAt !== delivery.receipt.acceptedAt ||
+      group.closedAt !== delivery.recordedAt ||
+      duplicateDelivery ||
+      duplicateGroup
+    ) {
+      diagnostics.push(codeError(
+        Codes.InvalidMessageDelivery,
+        `Message delivery '${delivery.receipt.deliveryId}' must identify one unique, exact, closed catch activation`,
+        deliveryPath
+      ))
+      continue
+    }
+    if (delivery.disposition === "message-winner") {
+      if (
+        group.status !== "won" ||
+        group.winner?._tag !== "MessageWinner" ||
+        group.winner.armId !== arm.armId ||
+        group.winner.deliveryId !== delivery.receipt.deliveryId ||
+        group.winner.acceptedAt !== delivery.receipt.acceptedAt ||
+        arm.status !== "won" ||
+        arm.receipt === undefined ||
+        !sameJson(
+          arm.receipt as unknown as Schema.Json,
+          delivery.receipt as unknown as Schema.Json
+        )
+      ) {
+        diagnostics.push(codeError(
+          Codes.InvalidMessageDelivery,
+          `Message-winning delivery '${delivery.receipt.deliveryId}' does not match its retained winner receipt`,
+          [...deliveryPath, "disposition"]
+        ))
+        continue
+      }
+    } else if (
+      group.status !== "won" ||
+      group.winner?._tag !== "TimerWinner" ||
+      group.winner.observedAt !== delivery.receipt.acceptedAt ||
+      group.winner.selectedAt > delivery.receipt.acceptedAt ||
+      arm.status !== "cancelled" ||
+      arm.receipt !== undefined
+    ) {
+      diagnostics.push(codeError(
+        Codes.InvalidMessageDelivery,
+        `Timer-preempted delivery '${delivery.receipt.deliveryId}' does not match its due Timer winner`,
+        [...deliveryPath, "disposition"]
+      ))
+      continue
+    }
+    recordedDeliveryIds.add(delivery.receipt.deliveryId)
+    deliveryByWaitGroup.set(delivery.target.waitGroupId, delivery)
+  }
+  for (let index = 0; index < state.subscriptions.length; index++) {
+    const arm = state.subscriptions[index]!
+    if (
+      arm._tag === "MessageCatchSubscription" &&
+      arm.receipt !== undefined &&
+      deliveryByWaitGroup.get(arm.waitGroupId)?.receipt.deliveryId !==
+        arm.receipt.deliveryId
+    ) {
+      diagnostics.push(codeError(
+        Codes.InvalidMessageDelivery,
+        `Winning Message arm '${arm.armId}' requires its exact delivery ledger record`,
+        ["subscriptions", index, "receipt"]
       ))
     }
   }

@@ -21,6 +21,12 @@ const operationDigest = Schema.decodeUnknownSync(
 const occurrenceDigest = Schema.decodeUnknownSync(
   ProtocolV3Wire.OccurrenceDigest
 )(`sha256:${"c".repeat(64)}`)
+const buildDigest = Schema.decodeUnknownSync(
+  ProtocolV3Wire.BuildDigest
+)(`sha256:${"d".repeat(64)}`)
+const schemaDigest = Schema.decodeUnknownSync(
+  ProtocolV3Wire.SchemaDigest
+)(`sha256:${"e".repeat(64)}`)
 
 const expression = (source: string): BpmnModel.Expression => ({
   language: "feel",
@@ -558,37 +564,10 @@ const state = (): BpmnExecutionState.BpmnExecutionState => ({
     status: "active",
     enteredAt: "2026-07-23T10:00:04.000Z"
   }],
-  subscriptions: [{
-    subscriptionId: "subscription-timeout",
-    ownerNodeId: "start-timeout",
-    processId: "process-main",
-    scopeInstanceId: "scope-timeout",
-    kind: "timer",
-    status: "waiting"
-  }, {
-    subscriptionId: "subscription-boundary",
-    ownerNodeId: "boundary-review",
-    processId: "process-main",
-    scopeInstanceId: "scope-root",
-    kind: "timer",
-    status: "waiting"
-  }, {
-    subscriptionId: "subscription-review-outcome",
-    ownerNodeId: "catch-review-outcome",
-    processId: "process-main",
-    scopeInstanceId: "scope-root",
-    kind: "parallel-multiple",
-    status: "waiting"
-  }],
-  timers: [{
-    timerId: "timer-timeout",
-    ownerType: "subscription",
-    ownerId: "subscription-timeout",
-    processId: "process-main",
-    scopeInstanceId: "scope-timeout",
-    deadline: "2026-07-23T10:05:00.000Z",
-    status: "pending"
-  }],
+  catchWaitGroups: [],
+  subscriptions: [],
+  timers: [],
+  messageDeliveries: [],
   workItems: [{
     workItemId: "work-review",
     taskId: "task-review",
@@ -614,6 +593,129 @@ const state = (): BpmnExecutionState.BpmnExecutionState => ({
     memberTokenIds: ["token-main"]
   }]
 })
+
+const messageWaitModel = (): BpmnModel.BpmnModel => {
+  const input = model()
+  const catchEvent = input.flowNodes.find((node) => node.id === "catch-review-outcome")
+  if (catchEvent?._tag !== "IntermediateCatchEvent") {
+    throw new Error("missing intermediate catch event fixture")
+  }
+  catchEvent.eventDefinitions = [{
+    _tag: "MessageEventDefinition",
+    messageRef: "message-review"
+  }]
+  catchEvent.eventDefinitionRefs = []
+  delete catchEvent.parallelMultiple
+  return input
+}
+
+const waitingMessageState = (): BpmnExecutionState.BpmnExecutionState => {
+  const input = state()
+  const token = input.tokens.find((candidate) => candidate.tokenId === "token-main")
+  if (token === undefined) {
+    throw new Error("missing owner token fixture")
+  }
+  token.position = {
+    _tag: "AtNode",
+    nodeId: "catch-review-outcome"
+  }
+  input.catchWaitGroups = [{
+    waitGroupId: "wait-review-outcome",
+    source: {
+      _tag: "StandaloneCatch",
+      catchEventNodeId: "catch-review-outcome"
+    },
+    ownerTokenId: token.tokenId,
+    processId: "process-main",
+    scopeInstanceId: "scope-root",
+    generation: 1,
+    armIds: ["arm-review-message"],
+    status: "waiting",
+    openedAt: "2026-07-23T10:00:03.000Z"
+  }]
+  input.subscriptions = [{
+    _tag: "MessageCatchSubscription",
+    armId: "arm-review-message",
+    waitGroupId: "wait-review-outcome",
+    ownerNodeId: "catch-review-outcome",
+    processId: "process-main",
+    scopeInstanceId: "scope-root",
+    tokenId: token.tokenId,
+    generation: 1,
+    ordinal: 0,
+    status: "waiting",
+    openedAt: "2026-07-23T10:00:03.000Z",
+    messageRef: "message-review",
+    correlationKey: ["tenant-1", "review-42"]
+  }]
+  return input
+}
+
+const wonMessageState = (): BpmnExecutionState.BpmnExecutionState => {
+  const input = waitingMessageState()
+  const token = input.tokens.find((candidate) => candidate.tokenId === "token-main")!
+  token.status = "consumed"
+  token.consumedAt = "2026-07-23T10:00:04.000Z"
+  input.catchWaitGroups[0] = {
+    ...input.catchWaitGroups[0]!,
+    status: "won",
+    winner: {
+      _tag: "MessageWinner",
+      armId: "arm-review-message",
+      deliveryId: "delivery-review-1",
+      acceptedAt: "2026-07-23T10:00:04.000Z",
+      selectedAt: "2026-07-23T10:00:04.000Z",
+      recordedAt: "2026-07-23T10:00:04.000Z"
+    },
+    closedAt: "2026-07-23T10:00:04.000Z"
+  }
+  const arm = input.subscriptions[0]
+  if (arm?._tag !== "MessageCatchSubscription") {
+    throw new Error("missing Message arm fixture")
+  }
+  arm.status = "won"
+  arm.closedAt = "2026-07-23T10:00:04.000Z"
+  arm.receipt = {
+    receiptVersion: 1,
+    deliveryId: "delivery-review-1",
+    messageRef: "message-review",
+    correlationKey: ["tenant-1", "review-42"],
+    payloadContract: {
+      _tag: "ArtifactCodec",
+      contractReferenceVersion: 1,
+      codecKey: "review-message-v1",
+      schemaDigest
+    },
+    payload: {
+      outcome: "approved"
+    },
+    acceptedAt: "2026-07-23T10:00:04.000Z",
+    authorization: {
+      policy: {
+        policyVersion: 1,
+        policyId: "review-message-policy",
+        deploymentId: "policy-deployment-1",
+        buildDigest
+      },
+      decisionId: "decision-review-1",
+      actorId: "reviewer-1"
+    }
+  }
+  input.messageDeliveries = [{
+    target: {
+      waitGroupId: "wait-review-outcome",
+      armId: "arm-review-message",
+      scopeInstanceId: "scope-root",
+      catchEventNodeId: "catch-review-outcome",
+      tokenId: token.tokenId,
+      generation: 1
+    },
+    receipt: structuredClone(arm.receipt),
+    disposition: "message-winner",
+    recordedAt: "2026-07-23T10:00:04.000Z"
+  }]
+  return input
+}
 
 const completedStandardLoopState = (): BpmnExecutionState.BpmnExecutionState => {
   const input = state()
@@ -781,9 +883,9 @@ describe("BpmnExecutionState", () => {
   it("admits a durable BPMN execution-state snapshot against a validated model", () => {
     const result = BpmnExecutionState.validate(model(), state())
 
-    assert.strictEqual(BpmnExecutionState.BpmnExecutionStateVersion, 6)
-    assert.strictEqual(BpmnExecutionState.BpmnExecutableFingerprintVersion, 4)
-    assert.strictEqual(BpmnExecutionState.BpmnKernelSemanticVersion, "5")
+    assert.strictEqual(BpmnExecutionState.BpmnExecutionStateVersion, 7)
+    assert.strictEqual(BpmnExecutionState.BpmnExecutableFingerprintVersion, 5)
+    assert.strictEqual(BpmnExecutionState.BpmnKernelSemanticVersion, "6")
     assert.isTrue(Result.isSuccess(result))
     if (Result.isFailure(result)) {
       throw result.failure
@@ -1517,78 +1619,40 @@ describe("BpmnExecutionState", () => {
     )
   })
 
-  it("resolves reusable event-definition references and admits boundary-event subscriptions", () => {
-    const referencedOnly = state()
-    referencedOnly.subscriptions = referencedOnly.subscriptions.filter((subscription) =>
-      subscription.subscriptionId === "subscription-timeout" ||
-      subscription.subscriptionId === "subscription-boundary"
+  it("admits one exact active-window Message catch subscription", () => {
+    const valid = BpmnExecutionState.validate(
+      messageWaitModel(),
+      waitingMessageState()
     )
-    const valid = BpmnExecutionState.validate(model(), referencedOnly)
-
     assert.isTrue(Result.isSuccess(valid))
 
-    const wrongKind = state()
-    const referencedSubscription = wrongKind.subscriptions.find((subscription) =>
-      subscription.subscriptionId === "subscription-timeout"
-    )
-    if (referencedSubscription === undefined) {
-      throw new Error("missing referenced event-definition subscription fixture")
-    }
-    referencedSubscription.kind = "signal"
-
-    const invalid = BpmnExecutionState.validate(model(), wrongKind)
-    assert.isTrue(Result.isFailure(invalid))
-    if (Result.isSuccess(invalid)) {
-      throw new Error("expected validation failure")
-    }
-    assert.isTrue(
-      invalid.failure.diagnostics.some((diagnostic) =>
-        diagnostic.code === BpmnExecutionState.Codes.InvalidSubscription &&
-        diagnostic.path.join("/") === "subscriptions/0/kind"
-      )
+    const invalid = waitingMessageState()
+    invalid.catchWaitGroups[0]!.armIds = ["missing-arm"]
+    assertDiagnostic(
+      BpmnExecutionState.validate(messageWaitModel(), invalid),
+      BpmnExecutionState.Codes.InvalidCatchWaitGroup,
+      { path: "catchWaitGroups/0/armIds" }
     )
   })
 
-  it("requires explicit multiple and parallel-multiple subscription group semantics", () => {
-    const parallelModel = model()
-    const parallelState = state()
-    const parallelSubscription = parallelState.subscriptions.find((subscription) =>
-      subscription.subscriptionId === "subscription-review-outcome"
+  it("retains the exact trusted receipt only on the winning Message arm", () => {
+    const valid = BpmnExecutionState.validate(
+      messageWaitModel(),
+      wonMessageState()
     )
-    if (parallelSubscription === undefined) {
-      throw new Error("missing multiple-event subscription fixture")
-    }
+    assert.isTrue(Result.isSuccess(valid))
 
-    parallelSubscription.kind = "multiple"
-    const wrongParallelKind = BpmnExecutionState.validate(parallelModel, parallelState)
-
-    assert.isTrue(Result.isFailure(wrongParallelKind))
-    if (Result.isSuccess(wrongParallelKind)) {
-      throw new Error("expected validation failure")
+    const wrongCorrelation = wonMessageState()
+    const arm = wrongCorrelation.subscriptions[0]
+    if (arm?._tag !== "MessageCatchSubscription" || arm.receipt === undefined) {
+      throw new Error("missing winning Message arm fixture")
     }
-    assert.isTrue(
-      wrongParallelKind.failure.diagnostics.some((diagnostic) =>
-        diagnostic.code === BpmnExecutionState.Codes.InvalidSubscription
-      )
+    arm.receipt.correlationKey = ["tenant-1", "different-review"]
+    assertDiagnostic(
+      BpmnExecutionState.validate(messageWaitModel(), wrongCorrelation),
+      BpmnExecutionState.Codes.InvalidSubscription,
+      { path: "subscriptions/0/receipt" }
     )
-
-    const exclusiveModel = model()
-    const multipleEvent = exclusiveModel.flowNodes.find((node) => node.id === "catch-review-outcome")
-    if (multipleEvent?._tag !== "IntermediateCatchEvent") {
-      throw new Error("missing multiple-event fixture")
-    }
-    multipleEvent.parallelMultiple = false
-    const exclusiveState = state()
-    const exclusiveSubscription = exclusiveState.subscriptions.find((subscription) =>
-      subscription.subscriptionId === "subscription-review-outcome"
-    )
-    if (exclusiveSubscription === undefined) {
-      throw new Error("missing multiple-event subscription fixture")
-    }
-    exclusiveSubscription.kind = "multiple"
-
-    const validExclusive = BpmnExecutionState.validate(exclusiveModel, exclusiveState)
-    assert.isTrue(Result.isSuccess(validExclusive))
   })
 
   it("cross-validates exact durable protocol-v3 task resolutions", () => {
@@ -1841,22 +1905,52 @@ describe("BpmnExecutionState", () => {
       status: "active",
       enteredAt: "2026-07-23T10:00:04.000Z"
     })
+    invalidState.catchWaitGroups.push({
+      waitGroupId: "wait-bad",
+      source: {
+        _tag: "StandaloneCatch",
+        catchEventNodeId: "task-review"
+      },
+      ownerTokenId: "token-main",
+      processId: "process-main",
+      scopeInstanceId: "scope-root",
+      generation: 1,
+      armIds: ["subscription-bad"],
+      status: "waiting",
+      openedAt: "2026-07-23T10:00:03.000Z"
+    })
     invalidState.subscriptions.push({
-      subscriptionId: "subscription-bad",
+      _tag: "MessageCatchSubscription",
+      armId: "subscription-bad",
+      waitGroupId: "wait-bad",
       ownerNodeId: "task-review",
       processId: "process-main",
       scopeInstanceId: "scope-root",
-      kind: "message",
-      status: "waiting"
+      tokenId: "token-main",
+      generation: 1,
+      ordinal: 0,
+      status: "waiting",
+      openedAt: "2026-07-23T10:00:03.000Z",
+      messageRef: "message-review",
+      correlationKey: ["case-1"]
     })
     invalidState.timers.push({
       timerId: "timer-bad",
-      ownerType: "work-item",
-      ownerId: "missing-work-item",
+      armId: "missing-timer-arm",
+      waitGroupId: "wait-bad",
       processId: "process-main",
       scopeInstanceId: "missing-scope",
-      deadline: "2026-07-23T10:05:00.000Z",
-      status: "pending"
+      tokenId: "token-main",
+      generation: 1,
+      schedule: {
+        _tag: "TimeDuration",
+        lexicalVersion: 1,
+        lexical: "PT5M",
+        delayMillis: 300_000,
+        dueAt: "2026-07-23T10:05:00.000Z"
+      },
+      scheduledAt: "2026-07-23T10:00:00.000Z",
+      status: "scheduled"
     })
     invalidState.workItems.push({
       workItemId: "work-bad",

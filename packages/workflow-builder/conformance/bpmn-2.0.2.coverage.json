@@ -1,7 +1,7 @@
 {
   "formatVersion": 1,
   "catalogId": "effect-workflow-builder-bpmn-2.0.2",
-  "catalogRevision": 10,
+  "catalogRevision": 11,
   "implementation": "@effect/workflow-builder",
   "implementationVersion": "4.0.0-beta.100",
   "reviewedAt": "2026-07-24",
@@ -77,12 +77,27 @@
     {
       "requirementId": "BPMN-EXECUTION-BASIC-TOKEN-KERNEL",
       "supportLevel": "executable",
-      "summary": "A deliberately bounded executable subset covers root and embedded subprocess scopes, none start/end events, generic tasks, normal/conditional/default sequence flows, exclusive routing, parallel split/join epochs, Standard Loops, FixedMultiInstance/1, and CollectionMultiInstance/1 on generic Tasks. Both Multi-Instance profiles freeze one bounded closed member set, record stable index identity and exact counters, run sequentially or in parallel, fence late completion, and causally replay failure cleanup. The collection profile additionally freezes source order and duplicates, makes item mapping explicit, and gathers only complete codec-validated outputs in source-index order. SubProcess or CallActivity multi-instance execution, progressive behavior events, partial output, and open or draining groups remain unsupported.",
+      "summary": "A deliberately bounded executable subset covers root and embedded subprocess scopes, none start/end events, generic tasks, normal/conditional/default sequence flows, exclusive routing, parallel split/join epochs, Standard Loops, FixedMultiInstance/1 and CollectionMultiInstance/1 on generic Tasks, and CatchEventChoice/1 Message/Timer waits. Multi-Instance profiles freeze one bounded closed member set, while catch waits open exact arms and atomically record one deterministic winner, continuation, loser cancellation, and Message delivery disposition. Causal replay reconstructs both families without rerunning their decisions. Fingerprinted budgets bound Timer lexical bytes, execution-state bytes, and transition-journal count/bytes beneath fixed hard ceilings. SubProcess or CallActivity multi-instance execution, progressive behavior events, partial output, open/draining groups, checkpointed long histories, and the broader BPMN Event lifecycle remain unsupported.",
       "evidence": [
         {
           "kind": "source",
           "path": "src/BpmnKernel.ts",
           "symbol": "TransitionJournal"
+        },
+        {
+          "kind": "source",
+          "path": "src/BpmnKernel.ts",
+          "symbol": "KernelLimits"
+        },
+        {
+          "kind": "profile-test",
+          "path": "test/BpmnKernel.test.ts",
+          "testName": "rejects profile budgets above the fixed snapshot and lexical hard caps"
+        },
+        {
+          "kind": "replay-test",
+          "path": "test/BpmnKernel.test.ts",
+          "testName": "enforces compiled state and journal budgets before schema decode or replay"
         },
         {
           "kind": "transition-test",
@@ -119,7 +134,7 @@
     {
       "requirementId": "BPMN-EXECUTION-FIXED-MULTI-INSTANCE-TASK",
       "supportLevel": "executable",
-      "summary": "FixedMultiInstance/1 executes a bounded cardinality-based generic Task profile. It evaluates loopCardinality exactly once at activation, freezes stable item:index identities, supports sequential and parallel scheduling, records exact active/completed/terminated counters over generated instances, and routes once after an all join or the first true completionCondition. That condition terminates already generated active members while a sequential planned suffix is durably marked not-generated and is not included in runtime instance counters; stale completeTask commands are fenced and idempotent. Boundary Error and terminal business-failure paths cancel the generated group before routing or failing, and the journal replays every transition exactly. XML v5 represents broader collection and behavior metadata, but collection execution belongs to the separately evidenced CollectionMultiInstance/1 profile and behavior remains All.",
+      "summary": "FixedMultiInstance/1 executes a bounded cardinality-based generic Task profile. It evaluates loopCardinality exactly once at activation, freezes stable item:index identities, supports sequential and parallel scheduling, records exact active/completed/terminated counters over generated instances, and routes once after an all join or the first true completionCondition. That condition terminates already generated active members while a sequential planned suffix is durably marked not-generated and is not included in runtime instance counters; stale completeTask commands are fenced and idempotent. Boundary Error and terminal business-failure paths cancel the generated group before routing or failing, and the journal replays every transition exactly. XML v6 represents broader collection and behavior metadata, but collection execution belongs to the separately evidenced CollectionMultiInstance/1 profile and behavior remains All.",
       "evidence": [
         {
           "kind": "source",
@@ -378,9 +393,173 @@
       ]
     },
     {
+      "requirementId": "BPMN-EXECUTION-INTERMEDIATE-CATCH-MESSAGE-TIMER-SLICE",
+      "supportLevel": "executable",
+      "summary": "CatchEventChoice/1 executes normal-flow standalone Message and timeDuration/timeDate Timer Intermediate Catch Events. Exact external Message bindings commit an ordered non-empty key-correlation expression, payload contract, and authorization-policy build. The atomic delivery transition is the acceptedAt authority: it requires every previously unseen receipt value to equal services.now while it validates the exact active arm and selects or fences the delivery; sender time is never authoritative, while exact redelivery of an already committed receipt remains idempotent. Timer expressions evaluate to strings that the profile parses as a bounded ISO-8601/XML Schema duration or dateTime subset; this is a runtime profile check, not an XSD restriction on tExpression text. The execution-global deliveryId ledger consumes both Message winners and Timer-preempted Messages. Journal replay reconstructs the recorded correlation, deadline, consumption, continuation, fences, and ledger without clock or expression reexecution. The profile rejects operationRef even though BPMN Table 10.99 requires it for executable Processes, selects only exact key correlation from the §13.3.3 alternatives, and excludes early-message retention, timeCycle, Signal/Conditional/Multiple Events, Start/Boundary/Receive/event-subprocess catches, and the broader Event lifecycle. This is an executable implementation slice, not Process Execution Conformance.",
+      "evidence": [
+        {
+          "kind": "source",
+          "path": "src/BpmnEventV3.ts",
+          "symbol": "MessageBinding"
+        },
+        {
+          "kind": "source",
+          "path": "src/BpmnEventV3.ts",
+          "symbol": "MessageReceipt"
+        },
+        {
+          "kind": "source",
+          "path": "src/BpmnTime.ts",
+          "symbol": "durationDueAt"
+        },
+        {
+          "kind": "source",
+          "path": "src/BpmnKernel.ts",
+          "symbol": "deliverMessage"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/BpmnCatchEventKernel.test.ts",
+          "testName": "opens, delivers, replays, and idempotently redelivers one standalone Message catch"
+        },
+        {
+          "kind": "replay-test",
+          "path": "test/BpmnCatchEventKernel.test.ts",
+          "testName": "arms, observes, and exactly replays one duration Timer catch"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/BpmnCatchEventKernel.test.ts",
+          "testName": "resolves PT0S immediately and preserves a past timeDate while making it immediately eligible"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/BpmnCatchEventKernel.test.ts",
+          "testName": "rejects wrong correlation, payload bounds, policy pins, and future acceptance"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/BpmnCatchEventKernel.test.ts",
+          "testName": "rejects a backdated acceptance after the Timer deadline and never lets it win"
+        },
+        {
+          "kind": "replay-test",
+          "path": "test/BpmnCatchEventKernel.test.ts",
+          "testName": "bounds Timer expression UTF-8 bytes before persistence and replay"
+        },
+        {
+          "kind": "roundtrip-test",
+          "path": "test/BpmnXml.test.ts",
+          "testName": "round-trips the strict message/timer catch-event choice slice in XSD order"
+        },
+        {
+          "kind": "profile-test",
+          "path": "test/BpmnCatchEventExecutable.test.ts",
+          "testName": "compiles Message, duration/date Timer, and Message/Timer event choice through XML profile v6"
+        }
+      ]
+    },
+    {
+      "requirementId": "BPMN-EXECUTION-EVENT-BASED-GATEWAY-CHOICE-SLICE",
+      "supportLevel": "executable",
+      "summary": "CatchEventChoice/1 executes an exclusive non-instantiating Event-Based Gateway with bounded unique unconditional direct Message/Timer catch branches. Every arm opens in one atomic wait group. The atomic delivery transition requires every previously unseen receipt.acceptedAt to equal services.now and compares that authoritative instant with every materialized Timer deadline; exact redelivery of a committed receipt is idempotent. Timer wins equality, the earliest eligible Timer wins regardless of which Timer woke the run, and equal deadlines use immutable branch ordinal. Winner routing, continuation, and cancellation of all losing arms and Timers commit together. Current-time late/stale ingress is fenced, backdated ingress is rejected, Timer-preempted deliveryId values remain globally consumed, and causal replay verifies rather than reexecutes the race. The optional native adapter delegates one deferred per wait group, absolute DurableClock scheduling, and post-commit wake/recovery; its typed first-wins wake is not the BPMN winner. The host must persist its caller-owned workflowName/executionId address, the token is not a credential, and reliable post-crash notification requires a host outbox or equivalent because the adapter implements no persistence, transport authentication, correlation, or outbox authority. Memory evidence is not persistent/cluster conformance. Receive Task branches, conditions/defaults, other events, and instantiating/Parallel gateways remain unsupported, so this is not the complete Event-Based Gateway surface or Process Execution Conformance.",
+      "evidence": [
+        {
+          "kind": "source",
+          "path": "src/BpmnKernel.ts",
+          "symbol": "observeDueTimer"
+        },
+        {
+          "kind": "source",
+          "path": "src/BpmnExecutionState.ts",
+          "symbol": "CatchWaitGroup"
+        },
+        {
+          "kind": "source",
+          "path": "src/EffectWorkflowBpmnEventV3.ts",
+          "symbol": "prepareWaitGroup"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/EffectWorkflowBpmnEventV3.test.ts",
+          "testName": "re-arms one absolute schedule id without moving its deadline or replacing its value"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/EffectWorkflowBpmnEventV3.test.ts",
+          "testName": "keeps the first post-commit StateChanged hint"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/EffectWorkflowBpmnEventV3.test.ts",
+          "testName": "accepts a Timer wake across distinct opaque capabilities for the same exact multi-Timer wait group"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/BpmnCatchEventKernel.test.ts",
+          "testName": "opens one atomic Event-Based Gateway group containing Message and Timer arms"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/BpmnCatchEventKernel.test.ts",
+          "testName": "selects the earliest eligible Timer even when a later Timer was observed"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/BpmnCatchEventKernel.test.ts",
+          "testName": "breaks equal Timer deadlines by immutable branch ordinal"
+        },
+        {
+          "kind": "replay-test",
+          "path": "test/BpmnCatchEventKernel.test.ts",
+          "testName": "fences a late Timer loser after Message victory and replays the no-state-change audit"
+        },
+        {
+          "kind": "replay-test",
+          "path": "test/BpmnCatchEventKernel.test.ts",
+          "testName": "fences a late Message loser and idempotently replays the winning Timer observation"
+        },
+        {
+          "kind": "replay-test",
+          "path": "test/BpmnCatchEventKernel.test.ts",
+          "testName": "consumes a Timer-preempted delivery globally across catch activations and replays its exact ledger"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/BpmnCatchEventKernel.test.ts",
+          "testName": "causally cancels an open catch choice when parallel protocol-v3 work fails terminally"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/BpmnCatchEventKernel.test.ts",
+          "testName": "rejects forged winner, loser, Timer, and owner closure evidence through both validators"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/EffectWorkflowBpmnEventV3.test.ts",
+          "testName": "wakes after a causally committed terminal failure cancels the catch group"
+        },
+        {
+          "kind": "profile-test",
+          "path": "test/BpmnCatchEventExecutable.test.ts",
+          "testName": "rejects unsupported event definitions and event-gateway modes before executable admission"
+        },
+        {
+          "kind": "roundtrip-test",
+          "path": "test/BpmnCatchEventExecutable.test.ts",
+          "testName": "imports XML, executes an equal-deadline Message/Timer choice, and replays it after canonical recompilation"
+        },
+        {
+          "kind": "replay-test",
+          "path": "test/BpmnCatchEventExecutable.test.ts",
+          "testName": "imports XML, executes an equal-deadline Message/Timer choice, and replays it after canonical recompilation"
+        }
+      ]
+    },
+    {
       "requirementId": "BPMN-EXECUTION-CORE-PROCESS-XML-SLICE",
       "supportLevel": "executable",
-      "summary": "A strict facade composes named profile bpmn-2.0.2-core-process-di-v5 with the bounded token kernel without projection or inference. The intersection includes conditional/default routing, parallel split/join, ordinary subprocesses, bounded generic-Task Standard Loops, FixedMultiInstance/1, and CollectionMultiInstance/1 with sequential/parallel behavior All. Exact external taskBindings, dataDocument, and collectionBindings are passed through CompileXmlOptions and committed to the executable fingerprint; they are not inferred from BPMN XML. Collection output is complete-success-only and cannot be combined with completionCondition. Exact journal replay, canonical export, re-import, recompilation, and replay equivalence remain part of the boundary; this still is not Process Execution Conformance.",
+      "summary": "A strict facade composes named profile bpmn-2.0.2-core-process-di-v6 with the bounded token kernel without projection or inference. The intersection includes conditional/default routing, parallel split/join, ordinary subprocesses, bounded generic-Task Standard Loops, FixedMultiInstance/1 and CollectionMultiInstance/1, and CatchEventChoice/1 standalone Message/Timer catches and exclusive non-instantiating Message/Timer event choice. Exact external taskBindings, dataDocument, collectionBindings, and messageBindings are passed through CompileXmlOptions and committed to the executable fingerprint; they are not inferred from BPMN XML. Exact journal replay, canonical export, re-import, recompilation, and replay equivalence remain part of the boundary; this still is not Process Execution Conformance.",
       "evidence": [
         {
           "kind": "source",
@@ -451,6 +630,16 @@
           "kind": "replay-test",
           "path": "test/BpmnExecutable.test.ts",
           "testName": "executes CollectionMultiInstance/1 from XML through ordered output aggregation and exact replay"
+        },
+        {
+          "kind": "roundtrip-test",
+          "path": "test/BpmnCatchEventExecutable.test.ts",
+          "testName": "imports XML, executes an equal-deadline Message/Timer choice, and replays it after canonical recompilation"
+        },
+        {
+          "kind": "replay-test",
+          "path": "test/BpmnCatchEventExecutable.test.ts",
+          "testName": "imports XML, executes an equal-deadline Message/Timer choice, and replays it after canonical recompilation"
         }
       ]
     },
@@ -479,7 +668,7 @@
     {
       "requirementId": "BPMN-INTERCHANGE-CORE-PROCESS-XML-SLICE",
       "supportLevel": "modeled",
-      "summary": "Named profile bpmn-2.0.2-core-process-di-v5 performs fail-closed namespace-expanded import, validation, canonical-prefix export, and normalized round-trip for its explicitly bounded process/control-flow slice, including Standard Loop and represented Multi-Instance characteristics on generic Tasks. Multi-Instance cardinality, collection references, scalar inputDataItem/outputDataItem declarations with namespace-expanded itemSubjectRef QNames and xsd:string names including the empty string, mode, completionCondition, behavior, and One/None event references round-trip in BPMN XSD order. Data-item IDs are globally checked, absent isCollection materializes false, and unrepresented child content fails closed; complex behavior definitions remain outside the slice. Executable collection semantics additionally require exact fingerprinted external bindings. Modeled records implementation maturity because normative XSD validation, complete semantic mapping, and an OMG conformance subclass are not claimed.",
+      "summary": "Named profile bpmn-2.0.2-core-process-di-v6 performs fail-closed namespace-expanded import, validation, canonical-prefix export, and normalized round-trip for its explicitly bounded process/control-flow slice, including Standard Loop and represented Multi-Instance characteristics on generic Tasks, normal-flow Message/Timer Intermediate Catch Events, and exclusive non-instantiating Event-Based Gateways. Catch XML admits exactly one local Message definition without operationRef or one timeDuration/timeDate Timer definition and direct unconditional event-gateway branches; timeCycle, other Event definitions, multiple/parallel-multiple catches, Receive Tasks, and instantiating/Parallel gateways fail closed. Multi-Instance fields continue to round-trip in BPMN XSD order. Executable collection and Message semantics additionally require exact fingerprinted external bindings. Modeled records implementation maturity because normative XSD validation, complete semantic mapping, and an OMG conformance subclass are not claimed.",
       "evidence": [
         {
           "kind": "source",
@@ -520,6 +709,16 @@
           "kind": "schema-test",
           "path": "test/BpmnXml.test.ts",
           "testName": "preserves empty data-item names and fails closed on malformed or unrepresented content"
+        },
+        {
+          "kind": "roundtrip-test",
+          "path": "test/BpmnXml.test.ts",
+          "testName": "round-trips the strict message/timer catch-event choice slice in XSD order"
+        },
+        {
+          "kind": "schema-test",
+          "path": "test/BpmnXml.test.ts",
+          "testName": "fails closed for unsupported catch triggers, multiplicity, references, and event-gateway modes"
         }
       ]
     },
@@ -627,7 +826,7 @@
     {
       "requirementId": "WFP-CONTROL-FLOW-CATALOG",
       "supportLevel": "unsupported",
-      "summary": "The control-flow family is analyzed in prose, while only eight separately listed atomic patterns have executable evidence.",
+      "summary": "The control-flow family is analyzed in prose, while only nine separately listed atomic patterns have executable evidence.",
       "evidence": [
         {
           "kind": "specification",
@@ -721,6 +920,48 @@
           "kind": "replay-test",
           "path": "test/BpmnKernel.test.ts",
           "testName": "replays an ordered transition journal into the exact durable marking"
+        }
+      ]
+    },
+    {
+      "requirementId": "WFP-WCP16-DEFERRED-CHOICE-TRANSIENT",
+      "supportLevel": "executable",
+      "summary": "CatchEventChoice/1 supplies the bounded transient Message/Timer form of WCP16 Deferred Choice. All exact arms become enabled together only after the Event-Based Gateway is reached. One atomically timestamped Message delivery or eligible Timer wins deterministically; the delivery transition requires acceptedAt to equal services.now, and its continuation and withdrawal of every loser commit atomically. Timer wins equality, equal Timers use immutable branch order, late and duplicate delivery is fenced, and replay consumes the recorded race facts. Persistent or early trigger retention, human work, Receive Tasks, Signal/Conditional/Multiple Events, and broader Event-Based Gateway modes are not claimed.",
+      "evidence": [
+        {
+          "kind": "source",
+          "path": "src/BpmnKernel.ts",
+          "symbol": "deliverMessage"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/BpmnCatchEventKernel.test.ts",
+          "testName": "opens one atomic Event-Based Gateway group containing Message and Timer arms"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/BpmnCatchEventKernel.test.ts",
+          "testName": "breaks equal Timer deadlines by immutable branch ordinal"
+        },
+        {
+          "kind": "replay-test",
+          "path": "test/BpmnCatchEventKernel.test.ts",
+          "testName": "fences a late Timer loser after Message victory and replays the no-state-change audit"
+        },
+        {
+          "kind": "replay-test",
+          "path": "test/BpmnCatchEventKernel.test.ts",
+          "testName": "fences a late Message loser and idempotently replays the winning Timer observation"
+        },
+        {
+          "kind": "replay-test",
+          "path": "test/BpmnCatchEventKernel.test.ts",
+          "testName": "consumes a Timer-preempted delivery globally across catch activations and replays its exact ledger"
+        },
+        {
+          "kind": "profile-test",
+          "path": "test/BpmnCatchEventExecutable.test.ts",
+          "testName": "rejects an event-based gateway branch that is not a direct Message or Timer catch"
         }
       ]
     },
@@ -1003,7 +1244,7 @@
     {
       "requirementId": "WFP-ATOMIC-CATALOG-COMPLETE",
       "supportLevel": "unsupported",
-      "summary": "Family-level traceability and eight executable atomic control patterns exist; the complete per-pattern requirement catalogue remains intentionally incomplete.",
+      "summary": "Family-level traceability and nine executable atomic control patterns exist; the complete per-pattern requirement catalogue remains intentionally incomplete.",
       "evidence": [
         {
           "kind": "specification",

@@ -72,6 +72,15 @@ const options: BpmnExecutable.CompileXmlOptions = {
   limits: {
     maxAutomaticTransitions: 1_000,
     maxExecutionInputCanonicalBytes: 1_048_576,
+    maxExecutionStateCanonicalBytes: 8_388_608,
+    maxTransitionJournalEvents: 10_000,
+    maxTransitionJournalCanonicalBytes: 16_777_216,
+    maxCatchWaitArms: 32,
+    maxTimerDelayMillis: 31_536_000_000,
+    maxTimerExpressionUtf8Bytes: 4_096,
+    maxMessageCorrelationComponents: 16,
+    maxMessageCorrelationCanonicalBytes: 16_384,
+    maxMessagePayloadCanonicalBytes: 1_048_576,
     maxMultiInstanceCardinality: 128,
     maxMultiInstanceCollectionCanonicalBytes: 1_048_576,
     maxMultiInstanceItemCanonicalBytes: 262_144,
@@ -531,7 +540,7 @@ const assertMultiInstanceCanonicalReplay = (
 
   assert.strictEqual(
     recompiled.interchange.profileId,
-    "bpmn-2.0.2-core-process-di-v5"
+    "bpmn-2.0.2-core-process-di-v6"
   )
   assert.deepStrictEqual(
     recompiled.interchange.model,
@@ -833,11 +842,11 @@ describe("BpmnExecutable", () => {
     ))
     assert.strictEqual(
       BpmnXml.CoreProcessDiProfileId,
-      "bpmn-2.0.2-core-process-di-v5"
+      "bpmn-2.0.2-core-process-di-v6"
     )
     assert.strictEqual(
       compiled.interchange.profileId,
-      "bpmn-2.0.2-core-process-di-v5"
+      "bpmn-2.0.2-core-process-di-v6"
     )
     assert.deepStrictEqual(
       compiled.interchange.mappingReport.semanticLosses,
@@ -986,7 +995,7 @@ describe("BpmnExecutable", () => {
     ))
     assert.strictEqual(
       compiled.interchange.profileId,
-      "bpmn-2.0.2-core-process-di-v5"
+      "bpmn-2.0.2-core-process-di-v6"
     )
     const observations: Array<MultiInstanceEvaluationObservation> = []
     const runtime = multiInstanceServices(3, observations)
@@ -1341,7 +1350,7 @@ describe("BpmnExecutable", () => {
     ))
     assert.strictEqual(
       imported.profileId,
-      "bpmn-2.0.2-core-process-di-v5"
+      "bpmn-2.0.2-core-process-di-v6"
     )
     const task = imported.model.flowNodes.find((node) => node.id === "mi_task")
     if (

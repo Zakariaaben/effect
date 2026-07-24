@@ -2365,10 +2365,10 @@ export const validate = (
             [...nodePath, "instantiate"]
           ))
         }
-        if (node.instantiate === true && node.eventGatewayType === "parallel") {
+        if (node.eventGatewayType === "parallel" && node.instantiate !== true) {
           diagnostics.push(error(
             Codes.InvalidGateway,
-            `Instantiate event-based gateway '${node.id}' cannot be parallel`,
+            `Parallel event-based gateway '${node.id}' must set instantiate=true`,
             [...nodePath, "eventGatewayType"]
           ))
         }

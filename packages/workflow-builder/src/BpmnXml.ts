@@ -8,7 +8,8 @@
  * representations. The profile fails closed for every XML construct it cannot
  * represent. It applies selected structural and lexical rules from the BPMN
  * 2.0.2 XSDs, but is not a general XSD validator and makes no BPMN conformance
- * claim.
+ * claim. XML admission is intentionally independent of, and can be wider than,
+ * the package's executable kernel.
  *
  * @since 4.0.0
  */
@@ -51,7 +52,7 @@ const Path = Schema.Array(Diagnostic.PathSegment)
  * @category constants
  * @since 4.0.0
  */
-export const CoreProcessDiProfileId = "bpmn-2.0.2-core-process-di-v5" as const
+export const CoreProcessDiProfileId = "bpmn-2.0.2-core-process-di-v6" as const
 
 /**
  * Normalized metadata carried by one BPMN `definitions` element.
@@ -769,6 +770,7 @@ interface ParserState {
   readonly metadata: DefinitionsMetadata
   readonly bindings: BindingTable
   readonly report: MutableReport
+  readonly messages: Array<BpmnModel.Message>
   readonly nodes: Array<BpmnModel.FlowNode>
   readonly flows: Array<BpmnModel.SequenceFlow>
   readonly parsedNodes: Array<ParsedNode>
@@ -789,6 +791,8 @@ type FormalExpressionElementName =
   | "loopCondition"
   | "loopCardinality"
   | "completionCondition"
+  | "timeDate"
+  | "timeDuration"
 
 const formalExpression = (
   element: BpmnXmlAst.XmlElement,
@@ -879,6 +883,80 @@ const formalExpression = (
     )
   }
   return { language, version: version!, source }
+}
+
+const parseMessageEventDefinition = (
+  element: BpmnXmlAst.XmlElement,
+  context: NamespaceContext,
+  state: ParserState
+): BpmnModel.EventDefinition => {
+  const attributes = readAttributes(element, new Set(["messageRef"]))
+  const messageRefLexical = unqualifiedAttribute(attributes, "messageRef")
+  if (messageRefLexical === undefined) {
+    abort(
+      Codes.InvalidStructure,
+      "messageEventDefinition requires messageRef in this profile",
+      xmlPath(element, ["attributes", "messageRef"])
+    )
+  }
+  const children = structuralChildren(element)
+  if (children.length > 0) {
+    abort(
+      Codes.UnsupportedElement,
+      "messageEventDefinition content is outside this profile",
+      xmlPath(children[0]!)
+    )
+  }
+  return {
+    _tag: "MessageEventDefinition",
+    messageRef: readModelQNameRef(
+      messageRefLexical!,
+      context,
+      state.metadata.targetNamespace,
+      state.report,
+      xmlPath(element, ["attributes", "messageRef"]),
+      "messageEventDefinition messageRef"
+    )
+  }
+}
+
+const parseTimerEventDefinition = (
+  element: BpmnXmlAst.XmlElement,
+  context: NamespaceContext,
+  state: ParserState
+): BpmnModel.EventDefinition => {
+  readAttributes(element, new Set())
+  const children = structuralChildren(element)
+  if (children.length !== 1) {
+    abort(
+      Codes.InvalidStructure,
+      "timerEventDefinition requires exactly one timeDate or timeDuration in this profile",
+      xmlPath(element, ["children"])
+    )
+  }
+  const child = children[0]!
+  if (
+    !isElementNamed(child, ModelNamespace, "timeDate") &&
+    !isElementNamed(child, ModelNamespace, "timeDuration")
+  ) {
+    abort(
+      child.name.namespaceUri === ModelNamespace
+        ? Codes.UnsupportedElement
+        : Codes.UnsupportedNamespace,
+      `Timer child '${child.name.localName}' is outside the timeDate/timeDuration profile`,
+      xmlPath(child)
+    )
+  }
+  const elementName = child.name.localName as "timeDate" | "timeDuration"
+  const expression = formalExpression(
+    child,
+    namespaceContext(context, child),
+    state,
+    elementName
+  )
+  return elementName === "timeDate"
+    ? { _tag: "TimerEventDefinition", timeDate: expression }
+    : { _tag: "TimerEventDefinition", timeDuration: expression }
 }
 
 const parseReferenceChild = (
@@ -1301,6 +1379,7 @@ interface NodeChildren {
   readonly incoming: ReadonlyArray<string>
   readonly outgoing: ReadonlyArray<string>
   readonly loopCharacteristics: BpmnModel.LoopCharacteristics | undefined
+  readonly eventDefinitions: ReadonlyArray<BpmnModel.EventDefinition>
   readonly contained: ReadonlyArray<BpmnXmlAst.XmlElement>
 }
 
@@ -1309,10 +1388,12 @@ const parseNodeChildren = (
   context: NamespaceContext,
   state: ParserState,
   allowContained: boolean,
-  allowLoopCharacteristics: boolean
+  allowLoopCharacteristics: boolean,
+  allowCatchEventDefinition: boolean
 ): NodeChildren => {
   const incoming: Array<string> = []
   const outgoing: Array<string> = []
+  const eventDefinitions: Array<BpmnModel.EventDefinition> = []
   const contained: Array<BpmnXmlAst.XmlElement> = []
   let loopCharacteristics: BpmnModel.LoopCharacteristics | undefined
   let stage = 0
@@ -1399,6 +1480,33 @@ const parseNodeChildren = (
       )
       continue
     }
+    if (
+      isElementNamed(child, ModelNamespace, "messageEventDefinition") ||
+      isElementNamed(child, ModelNamespace, "timerEventDefinition")
+    ) {
+      if (!allowCatchEventDefinition) {
+        abort(
+          Codes.UnsupportedElement,
+          `${child.name.localName} is only represented on BPMN intermediateCatchEvent elements`,
+          xmlPath(child)
+        )
+      }
+      if (stage > 1 || eventDefinitions.length > 0) {
+        abort(
+          Codes.InvalidStructure,
+          "BPMN intermediateCatchEvent requires exactly one inline event definition after incoming and outgoing",
+          xmlPath(child)
+        )
+      }
+      stage = 2
+      const childContext = namespaceContext(context, child)
+      eventDefinitions.push(
+        child.name.localName === "messageEventDefinition"
+          ? parseMessageEventDefinition(child, childContext, state)
+          : parseTimerEventDefinition(child, childContext, state)
+      )
+      continue
+    }
     if (!allowContained) {
       abort(
         child.name.namespaceUri === ModelNamespace
@@ -1416,6 +1524,7 @@ const parseNodeChildren = (
     incoming,
     outgoing,
     loopCharacteristics,
+    eventDefinitions,
     contained
   }
 }
@@ -1487,10 +1596,19 @@ const parseNode = (
     ? new Set([...commonNodeAttributes, "parallelMultiple", "isInterrupting"])
     : localName === "endEvent"
     ? commonNodeAttributes
+    : localName === "intermediateCatchEvent"
+    ? new Set([...commonNodeAttributes, "parallelMultiple"])
     : localName === "exclusiveGateway"
     ? new Set([...commonNodeAttributes, "gatewayDirection", "default"])
     : localName === "parallelGateway"
     ? new Set([...commonNodeAttributes, "gatewayDirection"])
+    : localName === "eventBasedGateway"
+    ? new Set([
+      ...commonNodeAttributes,
+      "gatewayDirection",
+      "instantiate",
+      "eventGatewayType"
+    ])
     : isActivity
     ? new Set([
       ...activityAttributes,
@@ -1521,7 +1639,8 @@ const parseNode = (
     context,
     state,
     localName === "subProcess",
-    localName === "task"
+    localName === "task",
+    localName === "intermediateCatchEvent"
   )
   const base = {
     id,
@@ -1774,8 +1893,50 @@ const parseNode = (
         eventDefinitionRefs: []
       }
       break
+    case "intermediateCatchEvent": {
+      const parallelMultipleLexical = unqualifiedAttribute(attributes, "parallelMultiple")
+      const parallelMultiple = parallelMultipleLexical === undefined
+        ? false
+        : readBoolean(
+          parallelMultipleLexical,
+          state.report,
+          xmlPath(element, ["attributes", "parallelMultiple"]),
+          "intermediateCatchEvent parallelMultiple"
+        )
+      if (parallelMultipleLexical === undefined) {
+        notice(
+          state.report.defaultsApplied,
+          "CatchEventParallelMultipleDefault",
+          "Absent intermediateCatchEvent parallelMultiple defaults to false",
+          xmlPath(element, ["attributes", "parallelMultiple"])
+        )
+      }
+      if (parallelMultiple) {
+        abort(
+          Codes.UnsupportedModel,
+          "Parallel-multiple intermediate catch events are outside this profile",
+          xmlPath(element, ["attributes", "parallelMultiple"])
+        )
+      }
+      if (children.eventDefinitions.length !== 1) {
+        abort(
+          Codes.InvalidStructure,
+          "intermediateCatchEvent requires exactly one inline message or timer event definition",
+          xmlPath(element, ["children"])
+        )
+      }
+      node = {
+        _tag: "IntermediateCatchEvent",
+        ...base,
+        eventDefinitions: [...children.eventDefinitions],
+        eventDefinitionRefs: [],
+        parallelMultiple: false
+      }
+      break
+    }
     case "exclusiveGateway":
-    case "parallelGateway": {
+    case "parallelGateway":
+    case "eventBasedGateway": {
       const directionLexical = unqualifiedAttribute(attributes, "gatewayDirection")
       const directions = {
         Unspecified: "unspecified",
@@ -1801,7 +1962,65 @@ const parseNode = (
         }
         gatewayDirection = directions[directionLexical as keyof typeof directions]
       }
-      defaultRef = unqualifiedAttribute(attributes, "default")
+      defaultRef = localName === "exclusiveGateway"
+        ? unqualifiedAttribute(attributes, "default")
+        : undefined
+      if (localName === "eventBasedGateway") {
+        const instantiateLexical = unqualifiedAttribute(attributes, "instantiate")
+        const instantiate = instantiateLexical === undefined
+          ? false
+          : readBoolean(
+            instantiateLexical,
+            state.report,
+            xmlPath(element, ["attributes", "instantiate"]),
+            "eventBasedGateway instantiate"
+          )
+        if (instantiateLexical === undefined) {
+          notice(
+            state.report.defaultsApplied,
+            "EventBasedGatewayInstantiateDefault",
+            "Absent eventBasedGateway instantiate defaults to false",
+            xmlPath(element, ["attributes", "instantiate"])
+          )
+        }
+        if (instantiate) {
+          abort(
+            Codes.UnsupportedModel,
+            "Instantiating event-based gateways are outside this profile",
+            xmlPath(element, ["attributes", "instantiate"])
+          )
+        }
+        const gatewayTypeLexical = unqualifiedAttribute(attributes, "eventGatewayType")
+        if (gatewayTypeLexical === undefined) {
+          notice(
+            state.report.defaultsApplied,
+            "EventGatewayTypeDefault",
+            "Absent eventGatewayType defaults to Exclusive",
+            xmlPath(element, ["attributes", "eventGatewayType"])
+          )
+        } else if (gatewayTypeLexical === "Parallel") {
+          abort(
+            Codes.UnsupportedModel,
+            "Parallel event-based gateways are outside this profile",
+            xmlPath(element, ["attributes", "eventGatewayType"])
+          )
+        } else if (gatewayTypeLexical !== "Exclusive") {
+          abort(
+            Codes.InvalidLexicalValue,
+            `Unsupported BPMN eventGatewayType '${gatewayTypeLexical}'`,
+            xmlPath(element, ["attributes", "eventGatewayType"])
+          )
+        }
+        node = {
+          _tag: "Gateway",
+          ...base,
+          gatewayKind: "event-based",
+          gatewayDirection,
+          instantiate: false,
+          eventGatewayType: "exclusive"
+        }
+        break
+      }
       node = {
         _tag: "Gateway",
         ...base,
@@ -1933,6 +2152,47 @@ function parseScope(
     }
     parseNode(element, context, processId, scopeId, state)
   }
+}
+
+const parseMessage = (
+  element: BpmnXmlAst.XmlElement,
+  state: ParserState
+): void => {
+  const attributes = readAttributes(element, new Set(["id", "name", "itemRef"]))
+  const id = readId(
+    unqualifiedAttribute(attributes, "id"),
+    true,
+    state.report,
+    xmlPath(element, ["attributes", "id"]),
+    "message"
+  )!
+  const name = unqualifiedAttribute(attributes, "name")
+  if (name !== undefined && name.length === 0) {
+    abort(
+      Codes.UnsupportedModel,
+      "Empty message names cannot be represented by the semantic IR",
+      xmlPath(element, ["attributes", "name"])
+    )
+  }
+  if (unqualifiedAttribute(attributes, "itemRef") !== undefined) {
+    abort(
+      Codes.UnsupportedModel,
+      "message itemRef is outside this XML profile",
+      xmlPath(element, ["attributes", "itemRef"])
+    )
+  }
+  const children = structuralChildren(element)
+  if (children.length > 0) {
+    abort(
+      Codes.UnsupportedElement,
+      "message content is outside this XML profile",
+      xmlPath(children[0]!)
+    )
+  }
+  state.messages.push({
+    id,
+    ...(name === undefined ? undefined : { name })
+  })
 }
 
 const parseProcess = (
@@ -2870,7 +3130,6 @@ const assertModelProfile = (
     )
   }
   if (
-    model.messages !== undefined ||
     model.signals !== undefined ||
     model.errors !== undefined ||
     model.escalations !== undefined ||
@@ -2878,9 +3137,28 @@ const assertModelProfile = (
   ) {
     abort(
       Codes.UnsupportedModel,
-      "Reusable BPMN root elements are outside this XML profile",
+      "Reusable BPMN root elements other than messages are outside this XML profile",
       ["model"]
     )
+  }
+  if (model.messages !== undefined && model.messages.length === 0) {
+    abort(
+      Codes.UnsupportedModel,
+      "Normalized messages must be omitted rather than represented by an empty array",
+      ["model", "messages"]
+    )
+  }
+  for (let index = 0; index < (model.messages ?? []).length; index++) {
+    const message = model.messages![index]!
+    const path = ["model", "messages", index] as const
+    assertNcName(message.id, [...path, "id"], "Message id")
+    if (message.itemRef !== undefined) {
+      abort(
+        Codes.UnsupportedModel,
+        `Message '${message.id}' itemRef is outside this XML profile`,
+        [...path, "itemRef"]
+      )
+    }
   }
   if (model.collaborations.length !== 0) {
     abort(
@@ -3091,15 +3369,33 @@ const assertModelProfile = (
         }
         break
       case "Gateway":
-        if (
+        if (node.activationCondition !== undefined) {
+          abort(
+            Codes.UnsupportedModel,
+            `Gateway '${node.id}' activationCondition is outside this profile`,
+            [...path, "activationCondition"]
+          )
+        }
+        if (node.gatewayKind === "event-based") {
+          if (
+            node.defaultFlowId !== undefined ||
+            node.instantiate !== false ||
+            node.eventGatewayType !== "exclusive"
+          ) {
+            abort(
+              Codes.UnsupportedModel,
+              `Event-based gateway '${node.id}' must be non-instantiating and exclusive`,
+              path
+            )
+          }
+        } else if (
           node.gatewayKind !== "exclusive" && node.gatewayKind !== "parallel" ||
           node.instantiate !== undefined ||
-          node.eventGatewayType !== undefined ||
-          node.activationCondition !== undefined
+          node.eventGatewayType !== undefined
         ) {
           abort(
             Codes.UnsupportedModel,
-            `Gateway '${node.id}' is outside the exclusive/parallel profile`,
+            `Gateway '${node.id}' is outside the exclusive/parallel/event-based profile`,
             path
           )
         }
@@ -3111,6 +3407,66 @@ const assertModelProfile = (
           )
         }
         break
+      case "IntermediateCatchEvent": {
+        if (
+          node.eventDefinitions.length !== 1 ||
+          node.eventDefinitionRefs.length !== 0 ||
+          node.parallelMultiple !== false
+        ) {
+          abort(
+            Codes.UnsupportedModel,
+            `IntermediateCatchEvent '${node.id}' requires exactly one inline non-multiple definition`,
+            path
+          )
+        }
+        const definition = node.eventDefinitions[0]!
+        if (definition._tag === "MessageEventDefinition") {
+          if (
+            definition.messageRef === undefined ||
+            definition.operationRef !== undefined
+          ) {
+            abort(
+              Codes.UnsupportedModel,
+              `IntermediateCatchEvent '${node.id}' message definition requires only messageRef`,
+              [...path, "eventDefinitions", 0]
+            )
+          }
+          assertNcName(
+            definition.messageRef!,
+            [...path, "eventDefinitions", 0, "messageRef"],
+            "Message event definition reference"
+          )
+        } else if (definition._tag === "TimerEventDefinition") {
+          const allowed = [
+            definition.timeDate,
+            definition.timeDuration
+          ].filter((value) => value !== undefined)
+          if (allowed.length !== 1 || definition.timeCycle !== undefined) {
+            abort(
+              Codes.UnsupportedModel,
+              `IntermediateCatchEvent '${node.id}' timer definition requires exactly one timeDate or timeDuration`,
+              [...path, "eventDefinitions", 0]
+            )
+          }
+          assertExpression(
+            allowed[0]!,
+            bindings,
+            [
+              ...path,
+              "eventDefinitions",
+              0,
+              definition.timeDate === undefined ? "timeDuration" : "timeDate"
+            ]
+          )
+        } else {
+          abort(
+            Codes.UnsupportedModel,
+            `IntermediateCatchEvent '${node.id}' definition '${definition._tag}' is outside this profile`,
+            [...path, "eventDefinitions", 0]
+          )
+        }
+        break
+      }
       case "StartEvent":
         if (
           node.eventDefinitions.length !== 0 ||
@@ -3377,6 +3733,9 @@ const assertGlobalIds = (document: InterchangeDocument): void => {
   }
   if (document.definitions.id !== undefined) {
     register(document.definitions.id, ["definitions", "id"])
+  }
+  for (let index = 0; index < (document.model.messages ?? []).length; index++) {
+    register(document.model.messages![index]!.id, ["model", "messages", index, "id"])
   }
   for (let index = 0; index < document.model.processes.length; index++) {
     register(document.model.processes[index]!.id, ["model", "processes", index, "id"])
@@ -3708,6 +4067,7 @@ const importedDocument = (
     metadata,
     bindings,
     report,
+    messages: [],
     nodes: [],
     flows: [],
     parsedNodes: [],
@@ -3717,6 +4077,17 @@ const importedDocument = (
   const diagrams: Array<BpmnDi.Diagram> = []
   let seenDiagram = false
   for (const child of structuralChildren(root)) {
+    if (isElementNamed(child, ModelNamespace, "message")) {
+      if (seenDiagram) {
+        abort(
+          Codes.InvalidStructure,
+          "BPMN root elements must precede BPMNDiagram elements",
+          xmlPath(child)
+        )
+      }
+      parseMessage(child, state)
+      continue
+    }
     if (isElementNamed(child, ModelNamespace, "process")) {
       if (seenDiagram) {
         abort(
@@ -3769,6 +4140,7 @@ const importedDocument = (
       sourceVersion: "2.0.2"
     }],
     extensionElements: [],
+    ...(state.messages.length === 0 ? undefined : { messages: state.messages }),
     collaborations: [],
     processes: state.processes,
     flowNodes: state.nodes,
@@ -3804,9 +4176,9 @@ const importedDocument = (
  * lexical, ID/IDREF, QName, and default rules are then enforced before the
  * semantic and DI component validators run.
  *
- * Every expression language used by a condition must have one caller-supplied
- * exact version binding. This function never guesses an implementation
- * version and never reads a clock.
+ * Every expression language used by a represented formal expression must have
+ * one caller-supplied exact version binding. This function never guesses an
+ * implementation version and never reads a clock.
  *
  * @category parsing
  * @since 4.0.0
@@ -3923,6 +4295,39 @@ const exportFormalExpression = (
     attributes.push(xmlAttribute("language", value.language))
   }
   return bpmnElement(elementName, attributes, [xmlText(value.source)])
+}
+
+const exportCatchEventDefinition = (
+  value: BpmnModel.EventDefinition,
+  definitions: DefinitionsMetadata
+): BpmnXmlAst.XmlElement => {
+  switch (value._tag) {
+    case "MessageEventDefinition":
+      return bpmnElement(
+        "messageEventDefinition",
+        [xmlAttribute("messageRef", `tns:${value.messageRef!}`)],
+        []
+      )
+    case "TimerEventDefinition": {
+      const timeDate = value.timeDate
+      const timeDuration = value.timeDuration
+      return bpmnElement(
+        "timerEventDefinition",
+        [],
+        [
+          timeDate === undefined
+            ? exportFormalExpression("timeDuration", timeDuration!, definitions)
+            : exportFormalExpression("timeDate", timeDate, definitions)
+        ]
+      )
+    }
+    default:
+      return abort(
+        Codes.UnsupportedModel,
+        `Cannot export event definition '${value._tag}'`,
+        ["model", "flowNodes", "eventDefinitions"]
+      )
+  }
 }
 
 const exportStandardLoopCharacteristics = (
@@ -4267,6 +4672,19 @@ const exportNode = (
       return bpmnElement("startEvent", attributes, referenceChildren)
     case "EndEvent":
       return bpmnElement("endEvent", attributes, referenceChildren)
+    case "IntermediateCatchEvent":
+      attributes.push(xmlAttribute("parallelMultiple", boolLexical(node.parallelMultiple!)))
+      return bpmnElement(
+        "intermediateCatchEvent",
+        attributes,
+        [
+          ...referenceChildren,
+          exportCatchEventDefinition(
+            node.eventDefinitions[0]!,
+            context.document.definitions
+          )
+        ]
+      )
     case "Gateway": {
       const directions = {
         unspecified: "Unspecified",
@@ -4275,6 +4693,14 @@ const exportNode = (
         mixed: "Mixed"
       } as const
       attributes.push(xmlAttribute("gatewayDirection", directions[node.gatewayDirection]))
+      if (node.gatewayKind === "event-based") {
+        attributes.push(xmlAttribute("instantiate", boolLexical(node.instantiate!)))
+        attributes.push(xmlAttribute(
+          "eventGatewayType",
+          node.eventGatewayType === "parallel" ? "Parallel" : "Exclusive"
+        ))
+        return bpmnElement("eventBasedGateway", attributes, referenceChildren)
+      }
       addOptionalAttribute(attributes, "default", node.defaultFlowId)
       return bpmnElement(
         node.gatewayKind === "exclusive" ? "exclusiveGateway" : "parallelGateway",
@@ -4314,6 +4740,14 @@ const exportProcess = (
       .map((flow) => exportSequenceFlow(flow, context.document.definitions))
   ]
   return bpmnElement("process", attributes, children)
+}
+
+const exportMessage = (
+  message: BpmnModel.Message
+): BpmnXmlAst.XmlElement => {
+  const attributes = [xmlAttribute("id", message.id)]
+  addOptionalAttribute(attributes, "name", message.name)
+  return bpmnElement("message", attributes, [])
 }
 
 const exportBounds = (bounds: BpmnDi.Bounds): BpmnXmlAst.XmlElement =>
@@ -4480,6 +4914,7 @@ const exportAst = (document: InterchangeDocument): BpmnXmlAst.XmlDocument => {
     "bpmn",
     attributes,
     [
+      ...(document.model.messages ?? []).map(exportMessage),
       ...document.model.processes.map((process) => exportProcess(process, context)),
       ...(document.di?.diagrams.map(exportDiagram) ?? [])
     ],

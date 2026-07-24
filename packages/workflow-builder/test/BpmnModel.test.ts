@@ -324,6 +324,81 @@ const validModel = (): BpmnModel.BpmnModel => ({
 })
 
 describe("BpmnModel", () => {
+  it("accepts an instantiating Parallel Event-Based Gateway without incoming flows", () => {
+    const model = validModel()
+    const start = model.flowNodes.find((node) => node.id === "start-main")
+    const gateway = model.flowNodes.find((node) => node.id === "gateway-race")
+    if (
+      start === undefined || start._tag !== "StartEvent" ||
+      gateway === undefined || gateway._tag !== "Gateway"
+    ) {
+      throw new Error("expected seeded BPMN fixtures")
+    }
+
+    start.outgoingSequenceFlowIds = ["flow-start-end-instantiating"]
+    gateway.incomingSequenceFlowIds = []
+    gateway.instantiate = true
+    gateway.eventGatewayType = "parallel"
+    model.sequenceFlows = model.sequenceFlows.filter((flow) => flow.id !== "flow-start-gateway")
+    model.flowNodes.push({
+      _tag: "EndEvent",
+      id: "end-start-instantiating",
+      processId: "process-orders",
+      parentScopeId: "process-orders",
+      incomingSequenceFlowIds: ["flow-start-end-instantiating"],
+      outgoingSequenceFlowIds: [],
+      eventDefinitions: [],
+      eventDefinitionRefs: [],
+      extensionElements: emptyExtensions()
+    })
+    model.sequenceFlows.push({
+      id: "flow-start-end-instantiating",
+      processId: "process-orders",
+      parentScopeId: "process-orders",
+      sourceId: "start-main",
+      targetId: "end-start-instantiating",
+      kind: "normal",
+      extensionElements: emptyExtensions()
+    })
+
+    const result = BpmnModel.validate(model)
+
+    if (Result.isFailure(result)) {
+      throw new Error(JSON.stringify(result.failure.diagnostics, null, 2))
+    }
+    assert.isTrue(Result.isSuccess(result))
+  })
+
+  it("rejects a non-instantiating Parallel Event-Based Gateway", () => {
+    const model = validModel()
+    const gateway = model.flowNodes.find((node) => node.id === "gateway-race")
+    if (gateway === undefined || gateway._tag !== "Gateway") {
+      throw new Error("expected seeded BPMN fixture")
+    }
+
+    gateway.instantiate = false
+    gateway.eventGatewayType = "parallel"
+
+    const result = BpmnModel.validate(model)
+
+    assert.isTrue(Result.isFailure(result))
+    if (Result.isSuccess(result)) {
+      throw new Error("expected validation failure")
+    }
+    assert.deepStrictEqual(
+      result.failure.diagnostics.map(({ code, message, path }) => ({
+        code,
+        message,
+        path
+      })),
+      [{
+        code: BpmnModel.Codes.InvalidGateway,
+        message: "Parallel event-based gateway 'gateway-race' must set instantiate=true",
+        path: ["flowNodes", 1, "eventGatewayType"]
+      }]
+    )
+  })
+
   it("admits a strict BPMN semantic document with collaborations, reusable event definitions, boundary events, and event subprocesses", () => {
     const model = validModel()
     const decode = Schema.decodeUnknownSync(BpmnModel.BpmnModel)

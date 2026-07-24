@@ -77,6 +77,11 @@ export * as BpmnDi from "./BpmnDi.ts"
 /**
  * @since 4.0.0
  */
+export * as BpmnEventV3 from "./BpmnEventV3.ts"
+
+/**
+ * @since 4.0.0
+ */
 export * as BpmnExecutable from "./BpmnExecutable.ts"
 
 /**
@@ -113,6 +118,11 @@ export * as BpmnKernel from "./BpmnKernel.ts"
  * @since 4.0.0
  */
 export * as BpmnModel from "./BpmnModel.ts"
+
+/**
+ * @since 4.0.0
+ */
+export * as BpmnTime from "./BpmnTime.ts"
 
 /**
  * @since 4.0.0
@@ -243,6 +253,11 @@ export * as DurableStartV2 from "./DurableStartV2.ts"
  * @since 4.0.0
  */
 export * as EffectWorkflowBackendV3 from "./EffectWorkflowBackendV3.ts"
+
+/**
+ * @since 4.0.0
+ */
+export * as EffectWorkflowBpmnEventV3 from "./EffectWorkflowBpmnEventV3.ts"
 
 /**
  * @since 4.0.0

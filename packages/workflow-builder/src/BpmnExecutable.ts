@@ -18,6 +18,7 @@ import * as Result from "effect/Result"
 import * as Schema from "effect/Schema"
 import * as BpmnActivityV3 from "./BpmnActivityV3.ts"
 import * as BpmnData from "./BpmnData.ts"
+import * as BpmnEventV3 from "./BpmnEventV3.ts"
 import * as BpmnExpression from "./BpmnExpression.ts"
 import * as BpmnKernel from "./BpmnKernel.ts"
 import * as BpmnXml from "./BpmnXml.ts"
@@ -60,6 +61,9 @@ export const CompileXmlOptions = Schema.Struct({
   evaluatorBindings: Schema.Array(BpmnExpression.EvaluatorBinding),
   taskBindings: Schema.optionalKey(
     Schema.Array(BpmnActivityV3.TaskBinding)
+  ),
+  messageBindings: Schema.optionalKey(
+    Schema.Array(BpmnEventV3.MessageBinding)
   ),
   dataDocument: Schema.optionalKey(BpmnData.BpmnDataDocument),
   collectionBindings: Schema.optionalKey(
@@ -160,6 +164,9 @@ export const compileXml = Effect.fnUntraced(function*(
       ...(options.success.taskBindings === undefined
         ? undefined
         : { taskBindings: options.success.taskBindings }),
+      ...(options.success.messageBindings === undefined
+        ? undefined
+        : { messageBindings: options.success.messageBindings }),
       ...(options.success.dataDocument === undefined
         ? undefined
         : { dataDocument: options.success.dataDocument }),

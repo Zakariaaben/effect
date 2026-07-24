@@ -439,6 +439,15 @@ const prepare = (
     limits: {
       maxAutomaticTransitions: 1_000,
       maxExecutionInputCanonicalBytes: 1_048_576,
+      maxExecutionStateCanonicalBytes: 8_388_608,
+      maxTransitionJournalEvents: 10_000,
+      maxTransitionJournalCanonicalBytes: 16_777_216,
+      maxCatchWaitArms: 32,
+      maxTimerDelayMillis: 31_536_000_000,
+      maxTimerExpressionUtf8Bytes: 4_096,
+      maxMessageCorrelationComponents: 16,
+      maxMessageCorrelationCanonicalBytes: 16_384,
+      maxMessagePayloadCanonicalBytes: 1_048_576,
       maxMultiInstanceCardinality: 100,
       maxMultiInstanceCollectionCanonicalBytes: 1_048_576,
       maxMultiInstanceItemCanonicalBytes: 262_144,
@@ -538,6 +547,26 @@ describe("BpmnExpressionRuntime", () => {
       multiInstanceNumberOfCompletedInstances: 1,
       multiInstanceNumberOfTerminatedInstances: 0
     })))
+    assert.isTrue(Result.isSuccess(decode({
+      ...base,
+      operation: "deliverMessage",
+      catchEventNodeId: "message-catch",
+      catchWaitGroupId: "catch-wait:1",
+      catchArmId: "catch-arm:1",
+      catchGeneration: 1,
+      catchMessageRef: "message-one"
+    })))
+    assert.isTrue(Result.isSuccess(decode({
+      ...base,
+      operation: "observeDueTimer",
+      catchEventNodeId: "timer-catch",
+      catchWaitGroupId: "catch-wait:1",
+      catchArmId: "catch-arm:2",
+      catchGeneration: 1,
+      catchTimerId: "timer:1",
+      catchTimerKind: "timeDuration",
+      catchTimerScheduledAt: now
+    })))
     assert.isTrue(Result.isFailure(decode({
       ...base,
       sequenceFlowId: "flow-one",
@@ -588,6 +617,42 @@ describe("BpmnExpressionRuntime", () => {
       multiInstanceNumberOfActiveInstances: 2,
       multiInstanceNumberOfCompletedInstances: 1,
       multiInstanceNumberOfTerminatedInstances: 0
+    })))
+    assert.isTrue(Result.isFailure(decode({
+      ...base,
+      catchEventNodeId: "message-catch",
+      catchWaitGroupId: "catch-wait:1",
+      catchArmId: "catch-arm:1",
+      catchGeneration: 1
+    })))
+    assert.isTrue(Result.isFailure(decode({
+      ...base,
+      catchEventNodeId: "timer-catch",
+      catchWaitGroupId: "catch-wait:1",
+      catchArmId: "catch-arm:2",
+      catchGeneration: 1,
+      catchTimerId: "timer:1",
+      catchTimerKind: "timeDuration"
+    })))
+    assert.isTrue(Result.isFailure(decode({
+      ...base,
+      catchEventNodeId: "timer-catch",
+      catchWaitGroupId: "catch-wait:1",
+      catchArmId: "catch-arm:2",
+      catchGeneration: 1,
+      catchMessageRef: "message-one",
+      catchTimerId: "timer:1",
+      catchTimerKind: "timeDuration",
+      catchTimerScheduledAt: now
+    })))
+    assert.isTrue(Result.isFailure(decode({
+      ...base,
+      sequenceFlowId: "flow-one",
+      catchEventNodeId: "message-catch",
+      catchWaitGroupId: "catch-wait:1",
+      catchArmId: "catch-arm:1",
+      catchGeneration: 1,
+      catchMessageRef: "message-one"
     })))
   })
 
