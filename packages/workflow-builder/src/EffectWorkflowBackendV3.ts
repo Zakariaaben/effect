@@ -24,6 +24,7 @@ import * as Schema from "effect/Schema"
 import type * as Scope from "effect/Scope"
 import * as NativeWorkflow from "effect/unstable/workflow/Workflow"
 import type * as NativeWorkflowEngine from "effect/unstable/workflow/WorkflowEngine"
+import * as ChildWorkflowV3 from "./ChildWorkflowV3.ts"
 import * as Json from "./internal/json.ts"
 import * as PlanStoreV3 from "./PlanStoreV3.ts"
 import * as Wire from "./ProtocolV3Wire.ts"
@@ -89,6 +90,29 @@ export const RunInvocation = Schema.Struct({
  * @since 4.0.0
  */
 export type RunInvocation = Schema.Schema.Type<typeof RunInvocation>
+
+/**
+ * Stable tenant/run coordinates used to recover a deterministic native
+ * execution address without retaining the original input envelope.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const RunCoordinates = Schema.Struct({
+  tenantId: Wire.AtomicIdentifier,
+  runId: Wire.LineageIdentifier
+}).annotate({
+  identifier: "WorkflowEffectBackendV3RunCoordinates",
+  parseOptions: strictParseOptions
+})
+
+/**
+ * The decoded type of {@link RunCoordinates}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type RunCoordinates = Schema.Schema.Type<typeof RunCoordinates>
 
 /**
  * Exact native workflow payload after the prepared binding supplies its
@@ -233,6 +257,8 @@ export const ErrorCodes = {
   InvalidInvocation: "InvalidInvocation",
   InvalidRequest: "InvalidRequest",
   ArtifactMismatch: "ArtifactMismatch",
+  InvalidChildTarget: "InvalidChildTarget",
+  ChildTargetMismatch: "ChildTargetMismatch",
   InvalidExecutionId: "InvalidExecutionId"
 } as const
 
@@ -250,6 +276,8 @@ const ErrorCode = Schema.Literals([
   ErrorCodes.InvalidInvocation,
   ErrorCodes.InvalidRequest,
   ErrorCodes.ArtifactMismatch,
+  ErrorCodes.InvalidChildTarget,
+  ErrorCodes.ChildTargetMismatch,
   ErrorCodes.InvalidExecutionId
 ])
 
@@ -402,6 +430,72 @@ export const prepare = (
   preparedBindings.set(binding, workflow)
   preparedArtifacts.set(binding, verified)
   return Result.succeed(binding)
+}
+
+/**
+ * Validates that one child target names the exact verified artifact retained
+ * by a prepared native binding.
+ *
+ * **Details**
+ *
+ * A target repeats artifact-owned coordinates so histories remain
+ * self-contained. Comparing only `artifactDigest` would allow those redundant
+ * fields to disagree. This function re-derives the complete target from the
+ * privately retained verified artifact while preserving only the
+ * relation-owned close and lineage policies.
+ *
+ * The returned target is the detached immutable value produced by
+ * {@link ChildWorkflowV3.validateChildTargetPin}. Structural copies of the
+ * binding remain unauthorized.
+ *
+ * @category validation
+ * @since 4.0.0
+ */
+export const validateChildTargetBinding = (
+  binding: PreparedBinding,
+  targetInput: unknown
+): Result.Result<
+  ChildWorkflowV3.ChildTargetPin,
+  EffectWorkflowBackendError
+> => {
+  if (!isPrepared(binding)) {
+    return Result.fail(error(
+      ErrorCodes.UnpreparedBinding,
+      "Child target validation requires the exact PreparedBinding returned by prepare"
+    ))
+  }
+  const target = ChildWorkflowV3.validateChildTargetPin(targetInput)
+  if (Result.isFailure(target)) {
+    return Result.fail(error(
+      ErrorCodes.InvalidChildTarget,
+      `Invalid protocol version 3 child target: ${target.failure.message}`
+    ))
+  }
+  const verified = preparedArtifacts.get(binding)!
+  const expected = PlanStoreV3.deriveChildTarget(verified, {
+    closePolicy: target.success.closePolicy,
+    maxLineageDepth: target.success.maxLineageDepth
+  })
+  if (Result.isFailure(expected)) {
+    return Result.fail(error(
+      ErrorCodes.ChildTargetMismatch,
+      `The prepared artifact could not reproduce the child target: ${expected.failure.message}`
+    ))
+  }
+  if (
+    Json.canonicalizeSnapshot(
+      target.success as unknown as Schema.Json
+    ) !==
+      Json.canonicalizeSnapshot(
+        expected.success as unknown as Schema.Json
+      )
+  ) {
+    return Result.fail(error(
+      ErrorCodes.ChildTargetMismatch,
+      "The child target does not exactly match the verified artifact retained by the prepared binding"
+    ))
+  }
+  return Result.succeed(target.success)
 }
 
 /**
@@ -664,6 +758,50 @@ export const executionId = (
   return Result.isFailure(resolved)
     ? Effect.fail(resolved.failure)
     : resolved.success[0].executionId(resolved.success[1])
+}
+
+/**
+ * Recovers the deterministic native execution identifier from tenant/run
+ * coordinates only.
+ *
+ * **Details**
+ *
+ * Adapter version `1` deliberately defines native idempotency solely as
+ * `tenantId + runId`. The request identity and encoded input remain conflict
+ * evidence for the caller-owned admission authority and do not participate in
+ * the native address. This operation is therefore suitable for a later
+ * cancellation command which no longer repeats the original child input.
+ *
+ * @category execution
+ * @since 4.0.0
+ */
+export const executionIdForRun = (
+  binding: PreparedBinding,
+  coordinatesInput: unknown
+): Effect.Effect<string, EffectWorkflowBackendError> => {
+  const resolved = nativeWorkflow(binding)
+  if (Result.isFailure(resolved)) return Effect.fail(resolved.failure)
+  const coordinates = decodeSnapshot(
+    RunCoordinates,
+    coordinatesInput,
+    ErrorCodes.InvalidInvocation,
+    "native run coordinates"
+  )
+  if (Result.isFailure(coordinates)) {
+    return Effect.fail(coordinates.failure)
+  }
+  return resolved.success.executionId({
+    adapterVersion: AdapterVersion,
+    executionProtocolVersion: ExecutionProtocolVersion,
+    tenantId: coordinates.success.tenantId,
+    runId: coordinates.success.runId,
+    requestId: "address-recovery",
+    artifactDigest: binding.artifactDigest,
+    input: {
+      _tag: "Inline",
+      value: null
+    }
+  })
 }
 
 /**

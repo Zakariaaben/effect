@@ -454,6 +454,69 @@ describe("EffectWorkflowBackendV3", () => {
       })
       assert.strictEqual(duplicateRunId, initialId)
       assert.notStrictEqual(differentRunId, initialId)
+      assert.strictEqual(
+        yield* Backend.executionIdForRun(binding, {
+          tenantId: "tenant-1",
+          runId: "run-1"
+        }),
+        initialId
+      )
+    }).pipe(provideCrypto))
+
+  it.effect("binds child targets to every verified artifact coordinate", () =>
+    Effect.gen(function*() {
+      const verified = yield* makeVerified()
+      const binding = success(Backend.prepare(verified))
+      const target = success(PlanStoreV3.deriveChildTarget(verified, {
+        closePolicy: {
+          closePolicyVersion: 3,
+          onParentFailure: "CancelAndWait",
+          onParentCancellation: "RequestCancel"
+        },
+        maxLineageDepth: 8
+      }))
+
+      const checked = success(
+        Backend.validateChildTargetBinding(binding, target)
+      )
+      assert.deepStrictEqual(checked, target)
+      assert.isTrue(Object.isFrozen(checked))
+
+      const substitutedPlan = Backend.validateChildTargetBinding(
+        binding,
+        {
+          ...target,
+          plan: {
+            ...target.plan,
+            revision: target.plan.revision + 1
+          }
+        }
+      )
+      assert(Result.isFailure(substitutedPlan))
+      assert.strictEqual(
+        substitutedPlan.failure.code,
+        Backend.ErrorCodes.ChildTargetMismatch
+      )
+
+      const copiedBinding = Backend.validateChildTargetBinding(
+        { ...binding },
+        target
+      )
+      assert(Result.isFailure(copiedBinding))
+      assert.strictEqual(
+        copiedBinding.failure.code,
+        Backend.ErrorCodes.UnpreparedBinding
+      )
+
+      const invalidTarget = Backend.validateChildTargetBinding(binding, {
+        ...target,
+        unexpected: true
+      })
+      assert(Result.isFailure(invalidTarget))
+      assert.strictEqual(
+        invalidTarget.failure.code,
+        Backend.ErrorCodes.InvalidChildTarget
+      )
     }).pipe(provideCrypto))
 
   it.effect("delegates execution, polling, interruption, and resumption to the native engine", () =>

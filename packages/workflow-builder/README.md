@@ -159,6 +159,21 @@ Today the package provides:
   transactional outbox or equivalent delivery guarantee. Memory-backed tests
   are integration evidence, not production durability; persistent/cluster
   conformance, crash/restart, and failover evidence remain required;
+- an optional `EffectWorkflowBpmnCallActivityV3` post-commit adapter for
+  protocol-v3 child commands. It validates every command against its complete
+  pinned relation, resolves only an exact prepared native artifact binding,
+  and uses a caller-provided durable relation authority to fence the
+  schedule-versus-close race before submitting native work. A two-stage
+  schedule claim prevents target lookup from starting work after a close has
+  already won; native start is addressed by the canonical tenant/child-run
+  identity, so redelivery after a crash before locator recording is
+  idempotent. Cancellation interrupts only the exact durably selected locator,
+  while `Abandon` performs no binding lookup or native operation. All returned
+  receipts explicitly state that no semantic child event was produced:
+  `start` and `interrupt` acknowledgements are never relabelled as accepted
+  start, cancellation, or termination. The host still supplies the
+  transactional relation authority, outbox relay, cooperating child lifecycle
+  reporter, authenticated ingress, and persistent/cluster conformance evidence;
 - an explicitly bounded protocol-v3 Task/Boundary Error execution slice.
   Immutable task bindings and exact failure-identity-to-Error mappings are part
   of the executable fingerprint. `resolveTask` routes exact success normally,
@@ -543,12 +558,15 @@ waiting token and follows normal outgoing flow exactly once. Other terminal
 outcomes remain durable close/failure facts rather than being relabelled as
 BPMN Error, Cancel, or success.
 
-This is portable parent/child semantics, not a backend implementation. The
-package still supplies no persistent store, scheduler, outbox relay, child-run
-starter, inbox/transport, or cluster/failover authority. A host must atomically
-coordinate the committed parent transition and egress command, then deliver
-authoritative child events. The optional native Effect Workflow adapter remains
-pending for this CallActivity lifecycle, and the package makes no full BPMN
+This is portable parent/child semantics plus an optional native dispatch
+adapter, not a complete backend implementation. The package still supplies no
+persistent relation store, scheduler, outbox relay, inbox/transport,
+authoritative child lifecycle reporter, or cluster/failover authority. A host
+must atomically coordinate the committed parent transition and egress command,
+then deliver authoritative child events. The native adapter delegates
+deterministic start and safe interruption to Effect Workflow without deriving
+semantic facts from operational acknowledgements. Persistent crash/restart and
+multi-worker evidence remains pending, and the package makes no full BPMN
 Process Execution Conformance claim.
 
 See the runnable [typed DAG example](./examples/basic.ts),

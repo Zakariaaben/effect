@@ -267,6 +267,18 @@ Implemented foundations:
   host-owned transactional outbox or equivalent. Memory-backed integration
   evidence is not production durability; persistent/cluster crash, restart,
   and failover conformance remains pending;
+- an optional native `EffectWorkflowBpmnCallActivityV3` post-commit dispatcher.
+  It validates complete relation-bound commands and exact prepared child
+  targets, fences schedule-versus-close through a caller-owned durable
+  authority, submits a deterministic native child start, interrupts only an
+  exact committed locator, and leaves `Abandon` entirely local. Redelivery
+  across the start/address-recording crash window reuses the native
+  tenant/child-run identity. Native acknowledgements remain operational
+  receipts and explicitly produce no semantic child event; accepted start,
+  cancellation, and terminal facts still require a cooperating child host and
+  authoritative source identity/sequence allocation. Persistent relation
+  storage, transactional relay, authenticated ingress, and cross-process
+  conformance remain host obligations;
 - an Effectful executable-preparation boundary whose domain-separated
   SHA-256 fingerprint commits to the normalized semantic model, root process,
   kernel semantic version, limits, named profile, exact evaluator-build
@@ -384,10 +396,10 @@ Not yet implemented and therefore not claimed:
   `OpenForEachGroup/1` profile instead of widening the closed
   `FixedMultiInstance/1` or `CollectionMultiInstance/1` journals;
 - a persistent transactional parent/child execution authority and the backend
-  mechanisms that it requires: store, scheduler, outbox relay, child-run
-  starter, authenticated ingress/transport, and cluster crash/restart/failover
-  proof. The portable kernel implements neither those services nor a native
-  Effect Workflow CallActivity lifecycle adapter;
+  mechanisms that it requires: store, scheduler, outbox relay, cooperating
+  child lifecycle reporter, authenticated ingress/transport, and cluster
+  crash/restart/failover proof. Native deterministic start and interruption
+  delegation do not by themselves supply those guarantees;
 - a production native Effect Workflow adapter, rebuildable BPMN semantic
   timeline/export, externally authenticated history anchors, migration tooling
   for pre-fingerprint states/journals, and isolated evaluator adapters or any
