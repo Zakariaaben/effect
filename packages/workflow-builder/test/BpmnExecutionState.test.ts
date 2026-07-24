@@ -554,16 +554,7 @@ const state = (): BpmnExecutionState.BpmnExecutionState => ({
     completedInstanceCount: 1,
     openedAt: "2026-07-23T10:00:03.000Z"
   }],
-  callFrames: [{
-    callFrameId: "callframe-child",
-    callActivityId: "call-child",
-    processId: "process-main",
-    parentScopeInstanceId: "scope-root",
-    childExecutionId: "exec-child-1",
-    childProcessId: "process-child",
-    status: "active",
-    enteredAt: "2026-07-23T10:00:04.000Z"
-  }],
+  callFrames: [],
   catchWaitGroups: [],
   subscriptions: [],
   timers: [],
@@ -883,9 +874,9 @@ describe("BpmnExecutionState", () => {
   it("admits a durable BPMN execution-state snapshot against a validated model", () => {
     const result = BpmnExecutionState.validate(model(), state())
 
-    assert.strictEqual(BpmnExecutionState.BpmnExecutionStateVersion, 8)
-    assert.strictEqual(BpmnExecutionState.BpmnExecutableFingerprintVersion, 6)
-    assert.strictEqual(BpmnExecutionState.BpmnKernelSemanticVersion, "7")
+    assert.strictEqual(BpmnExecutionState.BpmnExecutionStateVersion, 9)
+    assert.strictEqual(BpmnExecutionState.BpmnExecutableFingerprintVersion, 7)
+    assert.strictEqual(BpmnExecutionState.BpmnKernelSemanticVersion, "8")
     assert.isTrue(Result.isSuccess(result))
     if (Result.isFailure(result)) {
       throw result.failure
@@ -1895,16 +1886,6 @@ describe("BpmnExecutionState", () => {
       openedAt: "2026-07-23T10:00:03.000Z",
       closedAt: "2026-07-23T10:00:03.000Z"
     })
-    invalidState.callFrames.push({
-      callFrameId: "callframe-bad",
-      callActivityId: "task-review",
-      processId: "process-main",
-      parentScopeInstanceId: "missing-parent",
-      childExecutionId: "child-2",
-      childProcessId: "missing-child",
-      status: "active",
-      enteredAt: "2026-07-23T10:00:04.000Z"
-    })
     invalidState.catchWaitGroups.push({
       waitGroupId: "wait-bad",
       source: {
@@ -1998,7 +1979,6 @@ describe("BpmnExecutionState", () => {
         BpmnExecutionState.Codes.InvalidGatewayFrame,
         BpmnExecutionState.Codes.InvalidLoopFrame,
         BpmnExecutionState.Codes.InvalidMultiInstanceGroup,
-        BpmnExecutionState.Codes.InvalidCallFrame,
         BpmnExecutionState.Codes.InvalidSubscription,
         BpmnExecutionState.Codes.UnknownTimerOwnerRef,
         BpmnExecutionState.Codes.InvalidWorkItem,

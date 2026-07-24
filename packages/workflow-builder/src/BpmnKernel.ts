@@ -25,6 +25,7 @@ import type * as PlatformError from "effect/PlatformError"
 import * as Result from "effect/Result"
 import * as Schema from "effect/Schema"
 import * as BpmnActivityV3 from "./BpmnActivityV3.ts"
+import * as BpmnCallActivityV3 from "./BpmnCallActivityV3.ts"
 import * as BpmnData from "./BpmnData.ts"
 import * as BpmnEventV3 from "./BpmnEventV3.ts"
 import * as BpmnExecutionState from "./BpmnExecutionState.ts"
@@ -33,6 +34,8 @@ import * as BpmnExpressionEvaluator from "./BpmnExpressionEvaluator.ts"
 import * as BpmnModel from "./BpmnModel.ts"
 import * as BpmnOperationalV3 from "./BpmnOperationalV3.ts"
 import * as BpmnTime from "./BpmnTime.ts"
+import * as ChildWorkflowProtocolV3 from "./ChildWorkflowProtocolV3.ts"
+import type * as ChildWorkflowV3 from "./ChildWorkflowV3.ts"
 import * as Diagnostic from "./Diagnostic.ts"
 import * as DigestV2 from "./DigestV2.ts"
 import * as Json from "./internal/json.ts"
@@ -158,7 +161,7 @@ export const KernelSemanticVersion = BpmnExecutionState.BpmnKernelSemanticVersio
  * @category constants
  * @since 4.0.0
  */
-export const TransitionJournalVersion = 7 as const
+export const TransitionJournalVersion = 8 as const
 
 /**
  * Hard ceiling for one execution-state snapshot presented to a compiled
@@ -192,7 +195,7 @@ export const MaximumTransitionJournalCanonicalBytes = 16 * 1_024 * 1_024
  * @category constants
  * @since 4.0.0
  */
-export const InitializeCommandVersion = 1 as const
+export const InitializeCommandVersion = 2 as const
 
 /**
  * Version of the external value binding used by the fixed collection
@@ -245,7 +248,10 @@ export type MultiInstanceCollectionBinding = Schema.Schema.Type<
  */
 export const InitializeCommand = Schema.Struct({
   commandVersion: Schema.Literal(InitializeCommandVersion),
-  input: Schema.Json
+  input: Schema.Json,
+  executionContext: Schema.optionalKey(
+    BpmnCallActivityV3.ExecutionContext
+  )
 }).annotate({
   identifier: "WorkflowBpmnInitializeCommand",
   parseOptions: strictParseOptions
@@ -316,6 +322,9 @@ export const TransitionEvent = Schema.Union([
     model: BpmnExecutionState.ModelReference,
     input: Schema.Json,
     inputCanonicalBytes: ProtocolV2Wire.NonNegativeSafeInt,
+    executionContext: Schema.optionalKey(
+      BpmnCallActivityV3.ExecutionContext
+    ),
     startedAt: ProtocolV2Wire.Timestamp
   }),
   Schema.TaggedStruct("ScopeEntered", {
@@ -332,6 +341,7 @@ export const TransitionEvent = Schema.Union([
       "flow-advanced",
       "task-completed",
       "task-succeeded",
+      "call-activity-succeeded",
       "catch-event-completed",
       "parallel-join-arrival",
       "end-reached",
@@ -363,6 +373,40 @@ export const TransitionEvent = Schema.Union([
     taskNodeId: Identifier,
     scopeInstanceId: Identifier,
     enteredAt: ProtocolV2Wire.Timestamp
+  }),
+  Schema.TaggedStruct("CallActivityInputEvaluated", {
+    callFrameId: Identifier,
+    ownerTokenId: Identifier,
+    callActivityNodeId: Identifier,
+    scopeInstanceId: Identifier,
+    expression: BpmnModel.Expression,
+    evaluatorBinding: BpmnExpression.EvaluatorBinding,
+    usage: Schema.Struct({
+      sourceUtf8Bytes: ProtocolV2Wire.NonNegativeSafeInt,
+      contextCanonicalBytes: ProtocolV2Wire.NonNegativeSafeInt,
+      steps: ProtocolV2Wire.NonNegativeSafeInt
+    }),
+    encodedInput: ProtocolV3Wire.EncodedPayload,
+    encodedInputCanonicalBytes: ProtocolV2Wire.NonNegativeSafeInt,
+    evaluatedAt: ProtocolV2Wire.Timestamp
+  }),
+  Schema.TaggedStruct("CallActivityChildCommandCommitted", {
+    callFrameId: Identifier,
+    command: ChildWorkflowProtocolV3.Command,
+    committedAt: ProtocolV2Wire.Timestamp
+  }),
+  Schema.TaggedStruct("CallActivityChildEventCommitted", {
+    callFrameId: Identifier,
+    event: ChildWorkflowProtocolV3.Event,
+    backendLocator: Schema.optionalKey(
+      BpmnCallActivityV3.BackendLocator
+    ),
+    committedAt: ProtocolV2Wire.Timestamp
+  }),
+  Schema.TaggedStruct("CallActivityChildEventReplayed", {
+    callFrameId: Identifier,
+    eventId: Identifier,
+    observedAt: ProtocolV2Wire.Timestamp
   }),
   Schema.TaggedStruct("MessageCorrelationEvaluated", {
     waitGroupId: Identifier,
@@ -749,6 +793,9 @@ export const TransitionEvent = Schema.Union([
     rootScopeInstanceId: Identifier,
     completedAt: ProtocolV2Wire.Timestamp
   }),
+  Schema.TaggedStruct("ParentCloseIntentCommitted", {
+    intent: BpmnExecutionState.ParentCloseIntent
+  }),
   Schema.TaggedStruct("ExecutionFailed", {
     rootScopeInstanceId: Identifier,
     sourceTokenId: Identifier,
@@ -859,7 +906,11 @@ interface EvaluationContextBase {
 export interface SequenceFlowEvaluationContext extends EvaluationContextBase {
   readonly _tag: "SequenceFlowCondition"
   readonly sequenceFlow: BpmnModel.SequenceFlow
-  readonly sourceNode: BpmnModel.Task | BpmnModel.SubProcess | BpmnModel.Gateway
+  readonly sourceNode:
+    | BpmnModel.Task
+    | BpmnModel.CallActivity
+    | BpmnModel.SubProcess
+    | BpmnModel.Gateway
 }
 
 /**
@@ -935,6 +986,25 @@ export interface MultiInstanceCompletionEvaluationContext extends EvaluationCont
 }
 
 /**
+ * Evaluation of the exact codec-encoded input passed to one CallActivity.
+ *
+ * **Details**
+ *
+ * The result must itself be a protocol-v3 `EncodedPayload`; the kernel never
+ * guesses a codec or treats arbitrary JSON as already encoded.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export interface CallActivityInputEvaluationContext extends EvaluationContextBase {
+  readonly _tag: "CallActivityInput"
+  readonly callActivity: BpmnModel.CallActivity
+  readonly binding: BpmnCallActivityV3.CallActivityBinding
+  readonly ownerTokenId: string
+  readonly callFrameId: string
+}
+
+/**
  * Evaluation of one exact external Message correlation key when its catch arm
  * opens.
  *
@@ -980,6 +1050,7 @@ export type EvaluationContext =
   | MultiInstanceCardinalityEvaluationContext
   | MultiInstanceCollectionEvaluationContext
   | MultiInstanceCompletionEvaluationContext
+  | CallActivityInputEvaluationContext
   | MessageCorrelationEvaluationContext
   | TimerExpressionEvaluationContext
 
@@ -1055,6 +1126,9 @@ export const CompileOptions = Schema.Struct({
   limits: KernelLimits,
   evaluatorBindings: Schema.Array(BpmnExpression.EvaluatorBinding),
   taskBindings: Schema.optionalKey(Schema.Array(BpmnActivityV3.TaskBinding)),
+  callActivityBindings: Schema.optionalKey(
+    Schema.Array(BpmnCallActivityV3.CallActivityBinding)
+  ),
   messageBindings: Schema.optionalKey(Schema.Array(BpmnEventV3.MessageBinding)),
   dataDocument: Schema.optionalKey(BpmnData.BpmnDataDocument),
   collectionBindings: Schema.optionalKey(
@@ -1090,6 +1164,9 @@ export const ExecutableFingerprintDocument = Schema.Struct({
   limits: KernelLimits,
   evaluatorBindings: Schema.Array(BpmnExpression.EvaluatorBinding),
   taskBindings: Schema.Array(BpmnActivityV3.TaskBinding),
+  callActivityBindings: Schema.Array(
+    BpmnCallActivityV3.CallActivityBinding
+  ),
   messageBindings: Schema.Array(BpmnEventV3.MessageBinding),
   dataDocument: Schema.NullOr(BpmnData.BpmnDataDocument),
   collectionBindings: Schema.Array(MultiInstanceCollectionBinding),
@@ -1121,6 +1198,9 @@ export interface CompiledKernel {
   readonly profileId: string
   readonly evaluatorBindings: ReadonlyArray<BpmnExpression.EvaluatorBinding>
   readonly taskBindings: ReadonlyArray<BpmnActivityV3.TaskBinding>
+  readonly callActivityBindings: ReadonlyArray<
+    BpmnCallActivityV3.CallActivityBinding
+  >
   readonly messageBindings: ReadonlyArray<BpmnEventV3.MessageBinding>
   readonly dataDocument: BpmnData.BpmnDataDocument | null
   readonly collectionBindings: ReadonlyArray<MultiInstanceCollectionBinding>
@@ -1132,6 +1212,10 @@ export interface CompiledKernel {
   readonly flowById: ReadonlyMap<string, BpmnModel.SequenceFlow>
   readonly orderedOutgoingByNodeId: ReadonlyMap<string, ReadonlyArray<string>>
   readonly taskBindingByTaskNodeId: ReadonlyMap<string, BpmnActivityV3.TaskBinding>
+  readonly callActivityBindingByNodeId: ReadonlyMap<
+    string,
+    BpmnCallActivityV3.CallActivityBinding
+  >
   readonly messageBindingByCatchEventNodeId: ReadonlyMap<
     string,
     BpmnEventV3.MessageBinding
@@ -1148,6 +1232,9 @@ interface CompiledStructure {
   readonly profileId: string
   readonly evaluatorBindings: ReadonlyArray<BpmnExpression.EvaluatorBinding>
   readonly taskBindings: ReadonlyArray<BpmnActivityV3.TaskBinding>
+  readonly callActivityBindings: ReadonlyArray<
+    BpmnCallActivityV3.CallActivityBinding
+  >
   readonly messageBindings: ReadonlyArray<BpmnEventV3.MessageBinding>
   readonly dataDocument: BpmnData.BpmnDataDocument | null
   readonly collectionBindings: ReadonlyArray<MultiInstanceCollectionBinding>
@@ -1162,6 +1249,10 @@ interface CompiledStructure {
     ReadonlyArray<string>
   >
   readonly taskBindingByTaskNodeId: ReadonlyMap<string, BpmnActivityV3.TaskBinding>
+  readonly callActivityBindingByNodeId: ReadonlyMap<
+    string,
+    BpmnCallActivityV3.CallActivityBinding
+  >
   readonly messageBindingByCatchEventNodeId: ReadonlyMap<
     string,
     BpmnEventV3.MessageBinding
@@ -1306,12 +1397,23 @@ type MutableGatewayFrame = Mutable<BpmnExecutionState.GatewayFrame>
 type MutableLoopFrame = Mutable<BpmnExecutionState.LoopFrame>
 type MutableMultiInstanceGroup = Mutable<BpmnExecutionState.MultiInstanceGroup>
 type MutableMultiInstanceMember = Mutable<BpmnExecutionState.MultiInstanceMember>
+type MutableCallFrame = Mutable<BpmnExecutionState.CallFrame>
 type MutableCatchWaitGroup = Mutable<BpmnExecutionState.CatchWaitGroup>
 type MutableSubscription = Mutable<BpmnExecutionState.Subscription>
 type MutableTimer = Mutable<BpmnExecutionState.Timer>
 type MutableMessageDeliveryRecord = Mutable<
   BpmnExecutionState.MessageDeliveryRecord
 >
+
+const childEventTerminatesRelation = (
+  event: ChildWorkflowProtocolV3.Event
+): boolean =>
+  event.payload._tag === "ChildStartFailed" ||
+  event.payload._tag === "ChildCancelledBeforeStart" ||
+  event.payload._tag === "ChildSucceeded" ||
+  event.payload._tag === "ChildFailed" ||
+  event.payload._tag === "ChildCancelled" ||
+  event.payload._tag === "ChildAbandoned"
 
 const directClone = <A>(value: A): Mutable<A> => structuredClone(value) as Mutable<A>
 
@@ -1322,6 +1424,10 @@ const decodeCompileOptions = Schema.decodeUnknownResult(
 )
 const decodeInitializeCommand = Schema.decodeUnknownResult(
   InitializeCommand,
+  strictParseOptions
+)
+const decodeEncodedPayload = Schema.decodeUnknownResult(
+  ProtocolV3Wire.EncodedPayload,
   strictParseOptions
 )
 const decodeCompleteTaskCommand = Schema.decodeUnknownResult(CompleteTaskCommand, strictParseOptions)
@@ -1367,6 +1473,9 @@ const latestStateTimestamp = (
   if (state.operationalWithdrawal !== undefined) {
     timestamps.push(state.operationalWithdrawal.requestedAt)
   }
+  if (state.parentCloseIntent !== undefined) {
+    timestamps.push(state.parentCloseIntent.requestedAt)
+  }
   for (const scope of state.scopeInstances) {
     timestamps.push(scope.enteredAt)
     if (scope.exitedAt !== undefined) {
@@ -1400,6 +1509,13 @@ const latestStateTimestamp = (
       if (member.endedAt !== undefined) {
         timestamps.push(member.endedAt)
       }
+    }
+  }
+  for (const frame of state.callFrames) {
+    timestamps.push(frame.enteredAt)
+    timestamps.push(frame.updatedAt)
+    if (frame.exitedAt !== undefined) {
+      timestamps.push(frame.exitedAt)
     }
   }
   for (const group of state.catchWaitGroups) {
@@ -1593,6 +1709,50 @@ export const taskBinding = (
     )))
   }
   return Result.succeed(binding)
+}
+
+/**
+ * Resolves the immutable protocol-v3 child target for one BPMN CallActivity.
+ *
+ * **Details**
+ *
+ * Structural copies of a compiled kernel are rejected. The returned binding
+ * is portable data only; it is not a backend capability and does not start a
+ * child workflow.
+ *
+ * @category accessors
+ * @since 4.0.0
+ */
+export const callActivityBinding = (
+  kernel: CompiledKernel,
+  callActivityNodeId: unknown
+): Result.Result<
+  BpmnCallActivityV3.CallActivityBinding,
+  Diagnostic.CompilationError
+> => {
+  const resolvedKernel = resolveKernel(kernel)
+  if (Result.isFailure(resolvedKernel)) {
+    return Result.fail(resolvedKernel.failure)
+  }
+  if (
+    typeof callActivityNodeId !== "string" ||
+    callActivityNodeId.length === 0
+  ) {
+    return Result.fail(compilationError(error(
+      Codes.InvalidCommand,
+      "CallActivity-binding lookup requires a non-empty node identifier",
+      ["callActivityNodeId"]
+    )))
+  }
+  const binding = resolvedKernel.success
+    .callActivityBindingByNodeId.get(callActivityNodeId)
+  return binding === undefined
+    ? Result.fail(compilationError(error(
+      Codes.InvalidCommand,
+      `CallActivity '${callActivityNodeId}' has no compiled child target`,
+      ["callActivityNodeId"]
+    )))
+    : Result.succeed(binding)
 }
 
 /**
@@ -2123,6 +2283,8 @@ const validateKernelState = (
   }
   if (
     state.status !== "active" &&
+    state.status !== "failing" &&
+    state.status !== "cancelling" &&
     state.status !== "completed" &&
     state.status !== "failed" &&
     state.status !== "cancelled"
@@ -2135,8 +2297,18 @@ const validateKernelState = (
 
   const scopeById = new Map(state.scopeInstances.map((scope) => [scope.scopeInstanceId, scope] as const))
   const rootScope = state.scopeInstances.find((scope) => scope.parentScopeInstanceId === undefined)
-  if (state.status === "active" && rootScope?.status !== "active") {
-    stateError("An active execution requires an active root scope", ["scopeInstances"])
+  if (
+    (
+      state.status === "active" ||
+      state.status === "failing" ||
+      state.status === "cancelling"
+    ) &&
+    rootScope?.status !== "active"
+  ) {
+    stateError(
+      `A non-terminal execution '${state.status}' requires an active root scope`,
+      ["scopeInstances"]
+    )
   }
   if (state.status === "completed" && rootScope?.status !== "completed") {
     stateError("A completed execution requires a completed root scope", ["scopeInstances"])
@@ -2298,6 +2470,7 @@ const validateKernelState = (
     if (token.position._tag === "AtNode") {
       const node = kernel.nodeById.get(token.position.nodeId)
       const catchWait = state.catchWaitGroups.find((group) => group.ownerTokenId === token.tokenId)
+      const callFrame = state.callFrames.find((frame) => frame.ownerTokenId === token.tokenId)
       const isCatchWaitNode = catchWait !== undefined &&
         (
           catchWait.source._tag === "StandaloneCatch" &&
@@ -2308,9 +2481,18 @@ const validateKernelState = (
             node.gatewayKind === "event-based" &&
             catchWait.source.gatewayNodeId === node.id
         )
-      if (node?._tag !== "Task" && !isCatchWaitNode) {
+      const isCallActivityWait = callFrame !== undefined &&
+        node?._tag === "CallActivity" &&
+        callFrame.callActivityNodeId === node.id &&
+        callFrame.processId === token.processId &&
+        callFrame.scopeInstanceId === token.scopeInstanceId
+      if (
+        node?._tag !== "Task" &&
+        !isCatchWaitNode &&
+        !isCallActivityWait
+      ) {
         stateError(
-          `Stable node token '${token.tokenId}' must identify a Task or one exact active/closed catch wait`,
+          `Stable node token '${token.tokenId}' must identify a Task, one exact CallActivity frame, or one exact active/closed catch wait`,
           ["tokens", index, "position", "nodeId"]
         )
       }
@@ -2378,10 +2560,13 @@ const validateKernelState = (
           ) === undefined
     }
   )
-  if (state.status === "failed") {
+  if (
+    state.status === "failing" ||
+    state.status === "failed"
+  ) {
     if (uncaughtBusinessFailures.length !== 1) {
       stateError(
-        "A failed token-kernel execution requires exactly one uncaught durable business-failure resolution",
+        `A ${state.status} token-kernel execution requires exactly one uncaught durable business-failure resolution`,
         ["activityResolutions"]
       )
     }
@@ -2781,8 +2966,56 @@ const validateKernelState = (
     }
   }
 
+  if (
+    kernel.callActivityBindings.length > 0 &&
+    state.executionContext === undefined
+  ) {
+    stateError(
+      "A kernel containing CallActivity bindings requires a durable execution context",
+      ["executionContext"]
+    )
+  }
+  for (let index = 0; index < state.callFrames.length; index++) {
+    const frame = state.callFrames[index]!
+    const binding = kernel.callActivityBindingByNodeId.get(
+      frame.callActivityNodeId
+    )
+    const folded = BpmnCallActivityV3.foldFrame(frame)
+    if (
+      binding === undefined ||
+      Result.isFailure(folded) ||
+      (
+        Result.isSuccess(folded) &&
+        !sameJson(folded.success.relation.target, binding.target)
+      )
+    ) {
+      stateError(
+        `CallActivity frame '${frame.callFrameId}' does not match its exact compiled target`,
+        ["callFrames", index]
+      )
+      continue
+    }
+    const inputBytes = canonicalUtf8Bytes(
+      folded.success.encodedInput as Schema.Json
+    )
+    if (
+      Result.isFailure(inputBytes) ||
+      inputBytes.success > binding.maxEncodedInputCanonicalBytes
+    ) {
+      stateError(
+        `CallActivity frame '${frame.callFrameId}' input exceeds its compiled bound`,
+        ["callFrames", index, "childEvents", 0, "payload", "encodedInput"],
+        {
+          maximum: binding.maxEncodedInputCanonicalBytes,
+          ...(Result.isFailure(inputBytes)
+            ? undefined
+            : { actual: inputBytes.success })
+        }
+      )
+    }
+  }
+
   const unsupportedStructures = [
-    ["callFrames", state.callFrames],
     ["workItems", state.workItems],
     ["compensationRegistrations", state.compensationRegistrations],
     ["cancellationRegions", state.cancellationRegions]
@@ -2829,12 +3062,17 @@ const validateKernelState = (
 
   if (state.status === "cancelled") {
     const withdrawal = state.operationalWithdrawal
+    const intent = state.parentCloseIntent
     if (
       withdrawal === undefined ||
+      intent?._tag !== "OperationalWithdrawal" ||
       rootScope === undefined ||
       withdrawal.command.rootScopeInstanceId !== rootScope.scopeInstanceId ||
-      withdrawal.requestedAt !== state.completedAt ||
-      rootScope.exitedAt !== withdrawal.requestedAt
+      withdrawal.command.requestId !== intent.requestId ||
+      withdrawal.requestedAt !== intent.requestedAt ||
+      state.completedAt === undefined ||
+      state.completedAt < withdrawal.requestedAt ||
+      rootScope.exitedAt !== state.completedAt
     ) {
       stateError(
         "Cancelled execution state does not retain the exact committed operational withdrawal",
@@ -2988,7 +3226,11 @@ type EvaluationTarget =
   | {
     readonly _tag: "SequenceFlowCondition"
     readonly sequenceFlow: BpmnModel.SequenceFlow
-    readonly sourceNode: BpmnModel.Task | BpmnModel.SubProcess | BpmnModel.Gateway
+    readonly sourceNode:
+      | BpmnModel.Task
+      | BpmnModel.CallActivity
+      | BpmnModel.SubProcess
+      | BpmnModel.Gateway
   }
   | {
     readonly _tag: "StandardLoopCondition"
@@ -3016,6 +3258,14 @@ type EvaluationTarget =
     readonly activity: BpmnModel.Task
     readonly group: MutableMultiInstanceGroup
     readonly completedMember: MutableMultiInstanceMember
+  }
+  | {
+    readonly _tag: "CallActivityInput"
+    readonly callActivity: BpmnModel.CallActivity
+    readonly binding: BpmnCallActivityV3.CallActivityBinding
+    readonly ownerTokenId: string
+    readonly callFrameId: string
+    readonly evaluatedAt: ProtocolV2Wire.Timestamp
   }
   | {
     readonly _tag: "MessageCorrelation"
@@ -3063,6 +3313,8 @@ const evaluateExpression = (
 ): Result.Result<Schema.Json, Diagnostic.CompilationError> => {
   const targetId = target._tag === "SequenceFlowCondition"
     ? target.sequenceFlow.id
+    : target._tag === "CallActivityInput"
+    ? target.callActivity.id
     : target._tag === "MessageCorrelation" ||
         target._tag === "TimerExpression"
     ? target.catchEvent.id
@@ -3077,6 +3329,8 @@ const evaluateExpression = (
     ? `multi-instance collection on activity '${targetId}'`
     : target._tag === "MultiInstanceCompletionCondition"
     ? `multi-instance completion condition on activity '${targetId}'`
+    : target._tag === "CallActivityInput"
+    ? `encoded input for CallActivity '${targetId}'`
     : target._tag === "MessageCorrelation"
     ? `Message correlation on catch event '${targetId}'`
     : `Timer expression on catch event '${targetId}'`
@@ -3112,6 +3366,12 @@ const evaluateExpression = (
       activation: target.group.activation,
       itemIndex: target.completedMember.index,
       itemKey: target.completedMember.itemKey
+    }
+    : target._tag === "CallActivityInput"
+    ? {
+      callActivityNodeId: target.callActivity.id,
+      callFrameId: target.callFrameId,
+      ownerTokenId: target.ownerTokenId
     }
     : target._tag === "MessageCorrelation"
     ? {
@@ -3263,6 +3523,17 @@ const evaluateExpression = (
       scopeInstance: frozenScope,
       state: frozenState
     }
+    : target._tag === "CallActivityInput"
+    ? {
+      _tag: "CallActivityInput" as const,
+      expression,
+      callActivity: target.callActivity,
+      binding: target.binding,
+      ownerTokenId: target.ownerTokenId,
+      callFrameId: target.callFrameId,
+      scopeInstance: frozenScope,
+      state: frozenState
+    }
     : target._tag === "MessageCorrelation"
     ? {
       _tag: "MessageCorrelation" as const,
@@ -3349,6 +3620,8 @@ const evaluateExpression = (
       ? "json-array"
       : target._tag === "TimerExpression"
       ? "string"
+      : target._tag === "CallActivityInput"
+      ? "json"
       : "boolean"
   }
 
@@ -3428,6 +3701,8 @@ const evaluateExpression = (
       ? !Array.isArray(outcome.result)
       : target._tag === "TimerExpression"
       ? typeof outcome.result !== "string"
+      : target._tag === "CallActivityInput"
+      ? false
       : typeof outcome.result !== "boolean"
   ) {
     return Result.fail(compilationError(error(
@@ -3443,9 +3718,39 @@ const evaluateExpression = (
           ? "json-array"
           : target._tag === "TimerExpression"
           ? "string"
+          : target._tag === "CallActivityInput"
+          ? "json"
           : "boolean"
       }
     )))
+  }
+  let callEncodedInput:
+    | ProtocolV3Wire.EncodedPayload
+    | undefined
+  let callEncodedInputCanonicalBytes: number | undefined
+  if (target._tag === "CallActivityInput") {
+    const decodedInput = decodeEncodedPayload(outcome.result)
+    const measuredInput = canonicalUtf8Bytes(outcome.result)
+    if (
+      Result.isFailure(decodedInput) ||
+      Result.isFailure(measuredInput) ||
+      measuredInput.success >
+        target.binding.maxEncodedInputCanonicalBytes
+    ) {
+      return Result.fail(compilationError(error(
+        Codes.EvaluationFailed,
+        `CallActivity '${target.callActivity.id}' input expression must return one bounded protocol-v3 EncodedPayload`,
+        ["flowNodes"],
+        {
+          maximumCanonicalBytes: target.binding.maxEncodedInputCanonicalBytes,
+          ...(Result.isFailure(measuredInput)
+            ? undefined
+            : { actualCanonicalBytes: measuredInput.success })
+        }
+      )))
+    }
+    callEncodedInput = outcome.result as unknown as ProtocolV3Wire.EncodedPayload
+    callEncodedInputCanonicalBytes = measuredInput.success
   }
   let collectionCanonicalBytes: number | undefined
   let itemCanonicalBytes: Array<number> | undefined
@@ -3671,6 +3976,22 @@ const evaluateExpression = (
       })
       break
     }
+    case "CallActivityInput": {
+      recordEvent(journal, {
+        _tag: "CallActivityInputEvaluated",
+        callFrameId: target.callFrameId,
+        ownerTokenId: target.ownerTokenId,
+        callActivityNodeId: target.callActivity.id,
+        scopeInstanceId: scopeInstance.scopeInstanceId,
+        expression,
+        evaluatorBinding,
+        usage,
+        encodedInput: callEncodedInput!,
+        encodedInputCanonicalBytes: callEncodedInputCanonicalBytes!,
+        evaluatedAt: target.evaluatedAt
+      })
+      break
+    }
     case "MessageCorrelation": {
       recordEvent(journal, {
         _tag: "MessageCorrelationEvaluated",
@@ -3753,7 +4074,11 @@ const routeConditional = (
   services: Services,
   expression: BpmnModel.Expression,
   sequenceFlow: BpmnModel.SequenceFlow,
-  sourceNode: BpmnModel.Task | BpmnModel.SubProcess | BpmnModel.Gateway,
+  sourceNode:
+    | BpmnModel.Task
+    | BpmnModel.CallActivity
+    | BpmnModel.SubProcess
+    | BpmnModel.Gateway,
   scopeInstance: MutableScopeInstance,
   state: MutableState,
   journal: Array<TransitionEvent>
@@ -3807,7 +4132,8 @@ const consumeToken = (
     | "catch-event-completed"
     | "parallel-join-arrival"
     | "end-reached"
-    | "subprocess-entered",
+    | "subprocess-entered"
+    | "call-activity-succeeded",
   now: ProtocolV2Wire.Timestamp
 ): void => {
   token.status = "consumed"
@@ -3862,7 +4188,10 @@ const routeActivityOutgoing = (
   kernel: CompiledKernel,
   services: Services,
   state: MutableState,
-  sourceNode: BpmnModel.Task | BpmnModel.SubProcess,
+  sourceNode:
+    | BpmnModel.Task
+    | BpmnModel.CallActivity
+    | BpmnModel.SubProcess,
   scopeInstance: MutableScopeInstance,
   journal: Array<TransitionEvent>
 ): Result.Result<void, Diagnostic.CompilationError> => {
@@ -5551,7 +5880,118 @@ type RootFailureKind =
   | "UnmappedBusinessFailure"
   | "UncaughtBpmnError"
 
-const failExecutionFromTask = (
+const propagateParentCloseToCallFrames = (
+  state: MutableState,
+  parentCause: ChildWorkflowProtocolV3.ParentCloseCause,
+  journal: Array<TransitionEvent>,
+  now: ProtocolV2Wire.Timestamp
+): Result.Result<boolean, Diagnostic.CompilationError> => {
+  for (
+    const frame of [...state.callFrames].sort((left, right) =>
+      left.callFrameId < right.callFrameId
+        ? -1
+        : left.callFrameId > right.callFrameId
+        ? 1
+        : 0
+    )
+  ) {
+    const child = BpmnCallActivityV3.foldFrame(frame)
+    if (Result.isFailure(child)) {
+      return Result.fail(compilationError(error(
+        Codes.InvalidKernelState,
+        `CallActivity frame '${frame.callFrameId}' cannot propagate parent close`,
+        ["callFrames"],
+        { issue: child.failure.message }
+      )))
+    }
+    if (
+      !childEventTerminatesRelation(
+        frame.childEvents[frame.childEvents.length - 1]!
+      ) &&
+      frame.parentCloseCommand === undefined
+    ) {
+      const command = BpmnCallActivityV3.makeParentCloseCommand(
+        child.success.relation,
+        parentCause
+      )
+      if (Result.isFailure(command)) {
+        return Result.fail(compilationError(error(
+          Codes.InvalidKernelState,
+          `CallActivity frame '${frame.callFrameId}' could not derive its parent-close command`,
+          ["callFrames"],
+          { issue: command.failure.message }
+        )))
+      }
+      frame.parentCloseCommand = directClone(command.success)
+      frame.updatedAt = now
+      recordEvent(journal, {
+        _tag: "CallActivityChildCommandCommitted",
+        callFrameId: frame.callFrameId,
+        command: command.success,
+        committedAt: now
+      })
+      const localEvent = BpmnCallActivityV3.makeParentCloseEvent(
+        frame,
+        command.success,
+        now
+      )
+      if (Result.isFailure(localEvent)) {
+        return Result.fail(compilationError(error(
+          Codes.InvalidKernelState,
+          `CallActivity frame '${frame.callFrameId}' could not project its parent-close fact`,
+          ["callFrames"],
+          { issue: localEvent.failure.message }
+        )))
+      }
+      if (localEvent.success !== undefined) {
+        frame.childEvents.push(directClone(localEvent.success))
+        frame.updatedAt = now
+        if (childEventTerminatesRelation(localEvent.success)) {
+          frame.exitedAt = now
+        }
+        recordEvent(journal, {
+          _tag: "CallActivityChildEventCommitted",
+          callFrameId: frame.callFrameId,
+          event: localEvent.success,
+          committedAt: now
+        })
+      }
+    }
+    const validated = BpmnCallActivityV3.validateFrame(frame)
+    const barrier = BpmnCallActivityV3.parentCloseBarrier(frame)
+    if (
+      Result.isFailure(validated) ||
+      Result.isFailure(barrier) ||
+      Result.isSuccess(barrier) &&
+        barrier.success === "NotRequested"
+    ) {
+      return Result.fail(compilationError(error(
+        Codes.InvalidKernelState,
+        `CallActivity frame '${frame.callFrameId}' did not retain an exact parent-close barrier`,
+        ["callFrames"],
+        {
+          issue: Result.isFailure(validated)
+            ? validated.failure.message
+            : Result.isFailure(barrier)
+            ? barrier.failure.message
+            : "parent-close-not-requested"
+        }
+      )))
+    }
+  }
+  for (const frame of state.callFrames) {
+    const barrier = BpmnCallActivityV3.parentCloseBarrier(frame)
+    if (
+      Result.isFailure(barrier) ||
+      barrier.success !== "Discharged"
+    ) {
+      return Result.succeed(false)
+    }
+  }
+  return Result.succeed(true)
+}
+
+const finalizeExecutionFailure = (
   state: MutableState,
   sourceToken: MutableToken,
   taskNodeId: string,
@@ -5678,6 +6118,80 @@ const failExecutionFromTask = (
     failedAt: now
   })
   return Result.succeed(undefined)
+}
+
+const beginExecutionFailureFromTask = (
+  state: MutableState,
+  sourceToken: MutableToken,
+  taskNodeId: string,
+  failureKind: RootFailureKind,
+  errorRef: string | undefined,
+  journal: Array<TransitionEvent>,
+  now: ProtocolV2Wire.Timestamp
+): Result.Result<void, Diagnostic.CompilationError> => {
+  const resolution = state.activityResolutions.find((candidate) =>
+    candidate.tokenId === sourceToken.tokenId &&
+    candidate.taskNodeId === taskNodeId
+  )
+  if (
+    resolution?.outcome._tag !== "BusinessFailed" ||
+    resolution.resolvedAt !== now
+  ) {
+    return Result.fail(compilationError(error(
+      Codes.InvalidKernelState,
+      `Task failure '${sourceToken.tokenId}' has no exact durable resolution`,
+      ["activityResolutions"]
+    )))
+  }
+  const intent: BpmnExecutionState.ParentCloseIntent = {
+    _tag: "Failure",
+    intentVersion: BpmnExecutionState.ParentCloseIntentVersion,
+    cause: {
+      _tag: "ParentFailure",
+      parentCauseEventId: resolution.outcome.failedActivityDigest
+    },
+    sourceTokenId: sourceToken.tokenId,
+    taskNodeId,
+    failureKind,
+    ...(errorRef === undefined ? undefined : { errorRef }),
+    requestedAt: now
+  }
+  state.status = "failing"
+  state.parentCloseIntent = directClone(intent)
+  recordEvent(journal, {
+    _tag: "ParentCloseIntentCommitted",
+    intent
+  })
+  if (sourceToken.status === "active") {
+    withdrawToken(
+      sourceToken,
+      journal,
+      failureKind === "UncaughtBpmnError"
+        ? "uncaught-bpmn-error"
+        : "unmapped-business-failure",
+      now
+    )
+  }
+  const propagated = propagateParentCloseToCallFrames(
+    state,
+    intent.cause,
+    journal,
+    now
+  )
+  if (Result.isFailure(propagated)) {
+    return Result.fail(propagated.failure)
+  }
+  return propagated.success
+    ? finalizeExecutionFailure(
+      state,
+      sourceToken,
+      taskNodeId,
+      failureKind,
+      errorRef,
+      journal,
+      now
+    )
+    : Result.succeed(undefined)
 }
 
 const enterScope = (
@@ -5844,6 +6358,138 @@ const tryCompleteScopes = (
   return Result.succeed(false)
 }
 
+const openCallActivity = (
+  kernel: CompiledKernel,
+  services: Services,
+  state: MutableState,
+  callActivity: BpmnModel.CallActivity,
+  scope: MutableScopeInstance,
+  journal: Array<TransitionEvent>
+): Result.Result<void, Diagnostic.CompilationError> => {
+  const binding = kernel.callActivityBindingByNodeId.get(callActivity.id)
+  const executionContext = state.executionContext
+  if (binding === undefined || executionContext === undefined) {
+    return Result.fail(compilationError(error(
+      Codes.InvalidExecutableStructure,
+      `CallActivity '${callActivity.id}' has no exact child binding or execution context`,
+      ["flowNodes"]
+    )))
+  }
+  const waiting = createToken(
+    state as unknown as BpmnExecutionState.BpmnExecutionState,
+    scope,
+    {
+      _tag: "AtNode",
+      nodeId: callActivity.id
+    },
+    services.now
+  )
+  const relation = BpmnCallActivityV3.deriveRelation(
+    executionContext,
+    binding,
+    waiting.tokenId
+  )
+  if (Result.isFailure(relation)) {
+    return Result.fail(compilationError(error(
+      Codes.InvalidExecutableStructure,
+      `CallActivity '${callActivity.id}' could not derive its exact child relation`,
+      ["flowNodes"],
+      { issue: relation.failure.message }
+    )))
+  }
+  state.tokens.push(waiting)
+  recordEvent(journal, {
+    _tag: "TokenEmitted",
+    tokenId: waiting.tokenId,
+    processId: waiting.processId,
+    scopeInstanceId: waiting.scopeInstanceId,
+    invocation: waiting.invocation,
+    position: waiting.position,
+    createdAt: waiting.createdAt
+  })
+  const evaluated = evaluateExpression(
+    kernel,
+    services,
+    binding.encodedInputExpression,
+    {
+      _tag: "CallActivityInput",
+      callActivity,
+      binding,
+      ownerTokenId: waiting.tokenId,
+      callFrameId: relation.success.parent.callId,
+      evaluatedAt: services.now
+    },
+    scope,
+    state,
+    journal
+  )
+  if (Result.isFailure(evaluated)) {
+    return Result.fail(evaluated.failure)
+  }
+  const scheduled = BpmnCallActivityV3.makeScheduledEvent(
+    relation.success,
+    evaluated.success,
+    services.now,
+    waiting.tokenId
+  )
+  if (Result.isFailure(scheduled)) {
+    return Result.fail(compilationError(error(
+      Codes.InvalidExecutableStructure,
+      `CallActivity '${callActivity.id}' produced an invalid scheduled child fact`,
+      ["flowNodes"],
+      { issue: scheduled.failure.message }
+    )))
+  }
+  const scheduleCommand = BpmnCallActivityV3.makeScheduleCommand(
+    relation.success,
+    evaluated.success,
+    waiting.tokenId
+  )
+  if (Result.isFailure(scheduleCommand)) {
+    return Result.fail(compilationError(error(
+      Codes.InvalidExecutableStructure,
+      `CallActivity '${callActivity.id}' produced an invalid child schedule command`,
+      ["callFrames"],
+      { issue: scheduleCommand.failure.message }
+    )))
+  }
+  const frame: MutableCallFrame = {
+    frameVersion: 1,
+    executionProtocolVersion: 3,
+    callFrameId: relation.success.parent.callId,
+    callActivityNodeId: callActivity.id,
+    processId: callActivity.processId,
+    scopeInstanceId: scope.scopeInstanceId,
+    ownerTokenId: waiting.tokenId,
+    childEvents: [directClone(scheduled.success)],
+    enteredAt: services.now,
+    updatedAt: services.now
+  }
+  const checked = BpmnCallActivityV3.validateFrame(frame)
+  if (Result.isFailure(checked)) {
+    return Result.fail(compilationError(error(
+      Codes.InvalidExecutableStructure,
+      `CallActivity '${callActivity.id}' produced an invalid durable frame`,
+      ["callFrames"],
+      { issue: checked.failure.message }
+    )))
+  }
+  state.callFrames.push(directClone(checked.success))
+  recordEvent(journal, {
+    _tag: "CallActivityChildCommandCommitted",
+    callFrameId: frame.callFrameId,
+    command: scheduleCommand.success,
+    committedAt: services.now
+  })
+  recordEvent(journal, {
+    _tag: "CallActivityChildEventCommitted",
+    callFrameId: frame.callFrameId,
+    event: scheduled.success,
+    committedAt: services.now
+  })
+  return Result.succeed(undefined)
+}
+
 const routeNodeArrival = (
   kernel: CompiledKernel,
   services: Services,
@@ -5964,6 +6610,16 @@ const routeNodeArrival = (
         waiting,
         scope,
         [{ catchEvent: target }],
+        journal
+      )
+    }
+    if (target._tag === "CallActivity") {
+      return openCallActivity(
+        kernel,
+        services,
+        state,
+        target,
+        scope,
         journal
       )
     }
@@ -6203,7 +6859,11 @@ interface ExpectedEmission {
 }
 
 interface PendingRoute {
-  readonly sourceNode: BpmnModel.Task | BpmnModel.SubProcess | BpmnModel.Gateway
+  readonly sourceNode:
+    | BpmnModel.Task
+    | BpmnModel.CallActivity
+    | BpmnModel.SubProcess
+    | BpmnModel.Gateway
   readonly scopeInstanceId: string
   readonly routingKind: "activity" | "exclusive-gateway"
   readonly routedAt: ProtocolV2Wire.Timestamp
@@ -6233,6 +6893,26 @@ interface PendingTaskWait {
   readonly taskNodeId: string
   readonly scopeInstanceId: string
   readonly enteredAt: ProtocolV2Wire.Timestamp
+}
+
+interface PendingCallOpen {
+  readonly callActivity: BpmnModel.CallActivity
+  readonly binding: BpmnCallActivityV3.CallActivityBinding
+  readonly ownerTokenId: string
+  readonly scopeInstanceId: string
+  readonly callFrameId: string
+  readonly relation: ChildWorkflowV3.ChildRelation
+  readonly openedAt: ProtocolV2Wire.Timestamp
+  encodedInput?: ProtocolV3Wire.EncodedPayload | undefined
+  scheduleCommand?: ChildWorkflowProtocolV3.Command | undefined
+}
+
+interface PendingCallCompletion {
+  readonly callFrameId: string
+  readonly ownerTokenId: string
+  readonly callActivity: BpmnModel.CallActivity
+  readonly scopeInstanceId: string
+  readonly completedAt: ProtocolV2Wire.Timestamp
 }
 
 interface PendingCatchOpen {
@@ -6410,6 +7090,13 @@ interface PendingFailureCleanup {
   readonly resolution: BpmnActivityV3.ActivityResolution
   readonly failureKind: RootFailureKind
   readonly errorRef?: string | undefined
+  stage:
+    | "intent"
+    | "source-token"
+    | "propagating"
+    | "waiting"
+    | "cleanup"
+  finalizedAt?: ProtocolV2Wire.Timestamp | undefined
   readonly tokenIds: Array<string>
   readonly frameIds: Array<string>
   readonly loopFrameIds: Array<string>
@@ -6425,6 +7112,13 @@ interface PendingFailureCleanup {
 
 interface PendingOperationalWithdrawal {
   readonly record: BpmnOperationalV3.OperationalInstanceWithdrawalRecord
+  stage:
+    | "fence"
+    | "intent"
+    | "propagating"
+    | "waiting"
+    | "cleanup"
+  finalizedAt?: ProtocolV2Wire.Timestamp | undefined
   readonly tokenIds: Array<string>
   readonly frameIds: Array<string>
   readonly loopFrameIds: Array<string>
@@ -6436,6 +7130,17 @@ interface PendingOperationalWithdrawal {
   readonly scopeInstanceIds: Array<string>
   readonly rootScopeInstanceId: string
   schedulingFenced: boolean
+}
+
+interface PendingParentClosePropagation {
+  readonly intent: BpmnExecutionState.ParentCloseIntent
+  readonly frameIds: Array<string>
+  readonly terminalAudit?: true | undefined
+  expectedEvent?: {
+    readonly callFrameId: string
+    readonly event: ChildWorkflowProtocolV3.Event
+    readonly committedAt: ProtocolV2Wire.Timestamp
+  } | undefined
 }
 
 const samePosition = (
@@ -6477,6 +7182,7 @@ const journalFailure = (
 const emptyReplayState = (
   kernel: CompiledKernel,
   input: Schema.Json,
+  executionContext: BpmnCallActivityV3.ExecutionContext | undefined,
   startedAt: ProtocolV2Wire.Timestamp
 ): MutableState => ({
   stateKind: "BpmnExecutionState",
@@ -6484,6 +7190,9 @@ const emptyReplayState = (
   model: directClone(kernel.modelReference),
   status: "active",
   input: directClone(input),
+  ...(executionContext === undefined
+    ? undefined
+    : { executionContext: directClone(executionContext) }),
   startedAt,
   extensionElements: [],
   scopeInstances: [],
@@ -6602,6 +7311,15 @@ const replayJournal = (
       }
     )))
   }
+  if (
+    kernel.callActivityBindings.length > 0 &&
+    header.executionContext === undefined
+  ) {
+    return journalFailure(
+      0,
+      "A CallActivity execution journal requires its exact protocol-v3 execution context"
+    )
+  }
   const first = events[1]
   if (
     first === undefined ||
@@ -6632,6 +7350,7 @@ const replayJournal = (
   const state = emptyReplayState(
     kernel,
     header.input,
+    header.executionContext,
     header.startedAt
   )
   let pendingEmissions: Array<ExpectedEmission> = []
@@ -6639,6 +7358,8 @@ const replayJournal = (
   let pendingScopeEntry: PendingScopeEntry | undefined
   let pendingGatewayArrival: PendingGatewayArrival | undefined
   let pendingTaskWait: PendingTaskWait | undefined
+  let pendingCallOpen: PendingCallOpen | undefined
+  let pendingCallCompletion: PendingCallCompletion | undefined
   let pendingCatchOpen: PendingCatchOpen | undefined
   let pendingCatchResolution: PendingCatchResolution | undefined
   let pendingCatchFence: PendingCatchFence | undefined
@@ -6649,6 +7370,9 @@ const replayJournal = (
   let pendingMultiInstanceTransition: PendingMultiInstanceTransition | undefined
   let pendingFailureCleanup: PendingFailureCleanup | undefined
   let pendingOperationalWithdrawal: PendingOperationalWithdrawal | undefined
+  let pendingParentClosePropagation:
+    | PendingParentClosePropagation
+    | undefined
   let pendingExecutionCompletion: string | undefined
   let lastTimestamp = header.startedAt
 
@@ -6678,6 +7402,121 @@ const replayJournal = (
       ? "MultiInstanceItemNotGenerated"
       : "MultiInstanceItemTerminated"
   }
+  const startParentClosePropagation = (
+    intent: BpmnExecutionState.ParentCloseIntent,
+    index: number
+  ): Result.Result<void, Diagnostic.CompilationError> => {
+    const frameIds: Array<string> = []
+    for (
+      const frame of [...state.callFrames].sort((left, right) =>
+        stableIdentifierOrder(left.callFrameId, right.callFrameId)
+      )
+    ) {
+      const child = BpmnCallActivityV3.foldFrame(frame)
+      if (Result.isFailure(child)) {
+        return journalFailure(
+          index,
+          `CallActivity frame '${frame.callFrameId}' is invalid before parent-close propagation`
+        )
+      }
+      const last = frame.childEvents[frame.childEvents.length - 1]!
+      if (!childEventTerminatesRelation(last)) {
+        if (frame.parentCloseCommand !== undefined) {
+          return journalFailure(
+            index,
+            `CallActivity frame '${frame.callFrameId}' already has a parent-close command before its execution intent`
+          )
+        }
+        frameIds.push(frame.callFrameId)
+      }
+    }
+    pendingParentClosePropagation = {
+      intent: directClone(intent),
+      frameIds
+    }
+    return Result.succeed(undefined)
+  }
+  const finishParentClosePropagation = (
+    index: number,
+    finalizedAt: ProtocolV2Wire.Timestamp
+  ): Result.Result<void, Diagnostic.CompilationError> => {
+    const propagation = pendingParentClosePropagation
+    if (
+      propagation === undefined ||
+      propagation.frameIds.length > 0 ||
+      propagation.expectedEvent !== undefined
+    ) {
+      return Result.succeed(undefined)
+    }
+    if (propagation.terminalAudit === true) {
+      pendingParentClosePropagation = undefined
+      return Result.succeed(undefined)
+    }
+    let allDischarged = true
+    for (const frame of state.callFrames) {
+      const barrier = BpmnCallActivityV3.parentCloseBarrier(frame)
+      if (
+        Result.isFailure(barrier) ||
+        barrier.success === "NotRequested"
+      ) {
+        return journalFailure(
+          index,
+          `CallActivity frame '${frame.callFrameId}' has no valid parent-close barrier`
+        )
+      }
+      if (barrier.success !== "Discharged") {
+        allDischarged = false
+      }
+    }
+    if (propagation.intent._tag === "Failure") {
+      const intent = propagation.intent
+      const pending = pendingFailureCleanup
+      if (
+        pending === undefined ||
+        !sameJson(
+          pending.resolution,
+          state.activityResolutions.find(
+            (candidate) => candidate.tokenId === intent.sourceTokenId
+          )
+        ) ||
+        (
+          pending.stage !== "propagating" &&
+          pending.stage !== "waiting"
+        )
+      ) {
+        return journalFailure(
+          index,
+          "Failure parent-close propagation lost its durable task cause"
+        )
+      }
+      pending.stage = allDischarged ? "cleanup" : "waiting"
+      if (allDischarged) {
+        pending.finalizedAt = finalizedAt
+      }
+    } else {
+      const pending = pendingOperationalWithdrawal
+      if (
+        pending === undefined ||
+        pending.record.command.requestId !==
+          propagation.intent.requestId ||
+        (
+          pending.stage !== "propagating" &&
+          pending.stage !== "waiting"
+        )
+      ) {
+        return journalFailure(
+          index,
+          "Operational parent-close propagation lost its withdrawal cause"
+        )
+      }
+      pending.stage = allDischarged ? "cleanup" : "waiting"
+      if (allDischarged) {
+        pending.finalizedAt = finalizedAt
+      }
+    }
+    pendingParentClosePropagation = undefined
+    return Result.succeed(undefined)
+  }
 
   for (let index = 1; index < events.length; index++) {
     const event = events[index]!
@@ -6691,6 +7530,14 @@ const replayJournal = (
       ? event.createdAt
       : event._tag === "TaskWaiting"
       ? event.enteredAt
+      : event._tag === "CallActivityInputEvaluated"
+      ? event.evaluatedAt
+      : event._tag === "CallActivityChildCommandCommitted"
+      ? event.committedAt
+      : event._tag === "CallActivityChildEventCommitted"
+      ? event.committedAt
+      : event._tag === "CallActivityChildEventReplayed"
+      ? event.observedAt
       : event._tag === "TimerExpressionEvaluated"
       ? event.scheduledAt
       : event._tag === "CatchWaitOpened"
@@ -6751,6 +7598,8 @@ const replayJournal = (
       ? event.exitedAt
       : event._tag === "ExecutionCompleted"
       ? event.completedAt
+      : event._tag === "ParentCloseIntentCommitted"
+      ? event.intent.requestedAt
       : event._tag === "ExecutionFailed"
       ? event.failedAt
       : event._tag === "OperationalWithdrawalRequested"
@@ -6779,6 +7628,30 @@ const replayJournal = (
     }
     if (pendingTaskWait !== undefined && event._tag !== "TaskWaiting") {
       return journalFailure(index, "The journal omitted or reordered a causally required task wait")
+    }
+    if (
+      pendingCallOpen !== undefined &&
+      (
+        pendingCallOpen.encodedInput === undefined
+          ? event._tag !== "CallActivityInputEvaluated"
+          : pendingCallOpen.scheduleCommand === undefined
+          ? event._tag !== "CallActivityChildCommandCommitted"
+          : event._tag !== "CallActivityChildEventCommitted"
+      )
+    ) {
+      return journalFailure(
+        index,
+        "The journal omitted or reordered a causally required CallActivity opening fact"
+      )
+    }
+    if (
+      pendingCallCompletion !== undefined &&
+      event._tag !== "TokenConsumed"
+    ) {
+      return journalFailure(
+        index,
+        "The journal omitted or reordered a successful CallActivity token completion"
+      )
     }
     if (pendingCatchOpen !== undefined) {
       const branch = pendingCatchOpen.branches[
@@ -6923,29 +7796,54 @@ const replayJournal = (
       return journalFailure(index, "An interrupted failed task must be followed by its Boundary Error catch")
     }
     if (pendingFailureCleanup !== undefined) {
-      const expectedTag = pendingFailureCleanup.tokenIds.length > 0
+      const pending = pendingFailureCleanup
+      const expectedTag = pending.stage === "intent"
+        ? "ParentCloseIntentCommitted"
+        : pending.stage === "source-token"
         ? "TokenWithdrawn"
-        : pendingFailureCleanup.frameIds.length > 0
+        : pending.stage === "waiting"
+        ? undefined
+        : pending.stage === "propagating"
+        ? undefined
+        : pending.tokenIds.length > 0
+        ? "TokenWithdrawn"
+        : pending.frameIds.length > 0
         ? "GatewayFrameCancelled"
-        : pendingFailureCleanup.loopFrameIds.length > 0
+        : pending.loopFrameIds.length > 0
         ? "LoopFrameCancelled"
-        : pendingFailureCleanup.multiInstanceGroups.length > 0 &&
-            pendingFailureCleanup.multiInstanceGroups[0]!.itemIndexes.length > 0
+        : pending.multiInstanceGroups.length > 0 &&
+            pending.multiInstanceGroups[0]!.itemIndexes.length > 0
         ? expectedMemberClosureTag(
-          pendingFailureCleanup.multiInstanceGroups[0]!.groupId,
-          pendingFailureCleanup.multiInstanceGroups[0]!.itemIndexes[0]
+          pending.multiInstanceGroups[0]!.groupId,
+          pending.multiInstanceGroups[0]!.itemIndexes[0]
         )
-        : pendingFailureCleanup.multiInstanceGroups.length > 0
+        : pending.multiInstanceGroups.length > 0
         ? "MultiInstanceGroupCancelled"
-        : pendingFailureCleanup.catchWaitGroupIds.length > 0
+        : pending.catchWaitGroupIds.length > 0
         ? "CatchWaitCancelled"
-        : pendingFailureCleanup.interruptedScopeIds.length > 0
+        : pending.interruptedScopeIds.length > 0
         ? "ScopeInterruptedByError"
-        : pendingFailureCleanup.failedScopeIds.length > 0
+        : pending.failedScopeIds.length > 0
         ? "ScopeFailed"
         : "ExecutionFailed"
-      if (event._tag !== expectedTag) {
-        return journalFailure(index, "Unmatched business failure cleanup was omitted or reordered")
+      if (
+        expectedTag !== undefined &&
+        event._tag !== expectedTag
+      ) {
+        return journalFailure(
+          index,
+          "Unmatched business failure close transition was omitted or reordered"
+        )
+      }
+      if (
+        pending.stage === "waiting" &&
+        event._tag !== "CallActivityChildEventCommitted" &&
+        event._tag !== "CallActivityChildEventReplayed"
+      ) {
+        return journalFailure(
+          index,
+          "A failing execution waiting on child termination accepts only child facts"
+        )
       }
     }
     if (pendingOperationalWithdrawal !== undefined) {
@@ -6958,8 +7856,14 @@ const replayJournal = (
       const pendingMember = pendingMemberIndex === undefined
         ? undefined
         : pendingGroupState?.members[pendingMemberIndex]
-      const expectedTag = !pending.schedulingFenced
+      const expectedTag = pending.stage === "fence"
         ? "OperationalWithdrawalSchedulingFenced"
+        : pending.stage === "intent"
+        ? "ParentCloseIntentCommitted"
+        : pending.stage === "waiting"
+        ? undefined
+        : pending.stage === "propagating"
+        ? undefined
         : pending.tokenIds.length > 0
         ? "TokenWithdrawn"
         : pending.frameIds.length > 0
@@ -6978,10 +7882,44 @@ const replayJournal = (
         : pending.scopeInstanceIds.length > 0
         ? "OperationalWithdrawalScopeClosed"
         : "OperationalWithdrawalCompleted"
+      if (
+        expectedTag !== undefined &&
+        event._tag !== expectedTag
+      ) {
+        return journalFailure(
+          index,
+          "Operational withdrawal close transition was omitted or reordered"
+        )
+      }
+      if (
+        pending.stage === "waiting" &&
+        event._tag !== "CallActivityChildEventCommitted" &&
+        event._tag !== "CallActivityChildEventReplayed" &&
+        event._tag !== "OperationalWithdrawalReplayed"
+      ) {
+        return journalFailure(
+          index,
+          "A cancelling execution waiting on child termination accepts only child facts or an exact withdrawal replay"
+        )
+      }
+    }
+    if (
+      pendingParentClosePropagation !== undefined &&
+      (
+        pendingParentClosePropagation.terminalAudit === true ||
+        pendingFailureCleanup?.stage === "propagating" ||
+        pendingFailureCleanup?.stage === "waiting" ||
+        pendingOperationalWithdrawal?.stage === "propagating" ||
+        pendingOperationalWithdrawal?.stage === "waiting"
+      )
+    ) {
+      const expectedTag = pendingParentClosePropagation.expectedEvent === undefined
+        ? "CallActivityChildCommandCommitted"
+        : "CallActivityChildEventCommitted"
       if (event._tag !== expectedTag) {
         return journalFailure(
           index,
-          "Operational withdrawal cascade was omitted or reordered"
+          "CallActivity parent-close propagation was omitted or reordered"
         )
       }
     }
@@ -6997,6 +7935,8 @@ const replayJournal = (
       event._tag !== "TaskOutcomeFenced" &&
       event._tag !== "CatchIngressReplayed" &&
       event._tag !== "CatchIngressFenced" &&
+      event._tag !== "CallActivityChildEventCommitted" &&
+      event._tag !== "CallActivityChildEventReplayed" &&
       event._tag !== "OperationalWithdrawalReplayed"
     ) {
       return journalFailure(index, "A terminal execution cannot accept further state-changing events")
@@ -7025,6 +7965,8 @@ const replayJournal = (
           pendingScopeEntry !== undefined ||
           pendingGatewayArrival !== undefined ||
           pendingTaskWait !== undefined ||
+          pendingCallOpen !== undefined ||
+          pendingCallCompletion !== undefined ||
           pendingCatchOpen !== undefined ||
           pendingCatchResolution !== undefined ||
           pendingCatchFence !== undefined ||
@@ -7046,6 +7988,7 @@ const replayJournal = (
         )
         pendingOperationalWithdrawal = {
           record: directClone(event.record),
+          stage: "fence",
           tokenIds: state.tokens
             .filter((token) => token.status === "active")
             .map((token) => token.tokenId)
@@ -7112,6 +8055,105 @@ const replayJournal = (
           )
         }
         pending.schedulingFenced = true
+        pending.stage = "intent"
+        break
+      }
+
+      case "ParentCloseIntentCommitted": {
+        if (event.intent._tag === "Failure") {
+          const pending = pendingFailureCleanup
+          const outcome = pending?.resolution.outcome
+          const expectedIntent:
+            | BpmnExecutionState.ParentCloseIntent
+            | undefined = pending !== undefined &&
+                pending.stage === "intent" &&
+                outcome?._tag === "BusinessFailed"
+              ? {
+                _tag: "Failure",
+                intentVersion: BpmnExecutionState.ParentCloseIntentVersion,
+                cause: {
+                  _tag: "ParentFailure",
+                  parentCauseEventId: outcome.failedActivityDigest
+                },
+                sourceTokenId: pending.resolution.tokenId,
+                taskNodeId: pending.resolution.taskNodeId,
+                failureKind: pending.failureKind,
+                ...(pending.errorRef === undefined
+                  ? undefined
+                  : { errorRef: pending.errorRef }),
+                requestedAt: pending.resolution.resolvedAt
+              }
+              : undefined
+          if (
+            expectedIntent === undefined ||
+            !sameJson(expectedIntent, event.intent) ||
+            state.status !== "active" ||
+            state.parentCloseIntent !== undefined
+          ) {
+            return journalFailure(
+              index,
+              "Failure parent-close intent has no exact durable task-failure cause"
+            )
+          }
+          state.status = "failing"
+          state.parentCloseIntent = directClone(event.intent)
+          pending!.stage = "source-token"
+          const started = startParentClosePropagation(
+            event.intent,
+            index
+          )
+          if (Result.isFailure(started)) {
+            return Result.fail(started.failure)
+          }
+          break
+        }
+
+        const pending = pendingOperationalWithdrawal
+        const expectedIntent:
+          | BpmnExecutionState.ParentCloseIntent
+          | undefined = pending !== undefined &&
+              pending.stage === "intent" &&
+              pending.schedulingFenced
+            ? {
+              _tag: "OperationalWithdrawal",
+              intentVersion: BpmnExecutionState.ParentCloseIntentVersion,
+              cause: {
+                _tag: "ParentCancellation",
+                parentCauseEventId: pending.record.command.requestId
+              },
+              requestId: pending.record.command.requestId,
+              rootScopeInstanceId: pending.rootScopeInstanceId,
+              requestedAt: pending.record.requestedAt
+            }
+            : undefined
+        if (
+          expectedIntent === undefined ||
+          !sameJson(expectedIntent, event.intent) ||
+          state.status !== "active" ||
+          state.parentCloseIntent !== undefined
+        ) {
+          return journalFailure(
+            index,
+            "Operational parent-close intent has no exact withdrawal cause"
+          )
+        }
+        state.status = "cancelling"
+        state.parentCloseIntent = directClone(event.intent)
+        pending!.stage = "propagating"
+        const started = startParentClosePropagation(
+          event.intent,
+          index
+        )
+        if (Result.isFailure(started)) {
+          return Result.fail(started.failure)
+        }
+        const finished = finishParentClosePropagation(
+          index,
+          event.intent.requestedAt
+        )
+        if (Result.isFailure(finished)) {
+          return Result.fail(finished.failure)
+        }
         break
       }
 
@@ -7221,6 +8263,39 @@ const replayJournal = (
             }
             break
           }
+          if (node?._tag === "CallActivity") {
+            const binding = kernel.callActivityBindingByNodeId.get(node.id)
+            const context = state.executionContext
+            const relation = binding === undefined ||
+                context === undefined
+              ? undefined
+              : BpmnCallActivityV3.deriveRelation(
+                context,
+                binding,
+                event.tokenId
+              )
+            if (
+              binding === undefined ||
+              context === undefined ||
+              relation === undefined ||
+              Result.isFailure(relation)
+            ) {
+              return journalFailure(
+                index,
+                `CallActivity token '${event.tokenId}' has no exact compiled child relation`
+              )
+            }
+            pendingCallOpen = {
+              callActivity: node,
+              binding,
+              ownerTokenId: event.tokenId,
+              scopeInstanceId: event.scopeInstanceId,
+              callFrameId: relation.success.parent.callId,
+              relation: relation.success,
+              openedAt: event.createdAt
+            }
+            break
+          }
           const branches: Array<CatchWaitBranch> = []
           if (node?._tag === "IntermediateCatchEvent") {
             branches.push({ catchEvent: node })
@@ -7252,7 +8327,7 @@ const replayJournal = (
           } else {
             return journalFailure(
               index,
-              `Stable node token '${event.tokenId}' is neither a Task nor a supported catch wait`
+              `Stable node token '${event.tokenId}' is neither a Task, CallActivity, nor a supported catch wait`
             )
           }
           if (
@@ -7301,6 +8376,480 @@ const replayJournal = (
           return journalFailure(index, `Task wait '${event.tokenId}' references a non-task node`)
         }
         pendingTaskWait = undefined
+        break
+      }
+
+      case "CallActivityInputEvaluated": {
+        const pending = pendingCallOpen
+        const scope = pending === undefined
+          ? undefined
+          : findScope(state, pending.scopeInstanceId)
+        const expectedEvaluator = pending === undefined
+          ? undefined
+          : kernel.evaluatorBindings.find((candidate) =>
+            candidate.language ===
+              pending.binding.encodedInputExpression.language &&
+            candidate.languageVersion ===
+              pending.binding.encodedInputExpression.version
+          )
+        if (
+          pending === undefined ||
+          pending.encodedInput !== undefined ||
+          scope === undefined ||
+          scope.status !== "active" ||
+          expectedEvaluator === undefined ||
+          event.callFrameId !== pending.callFrameId ||
+          event.ownerTokenId !== pending.ownerTokenId ||
+          event.callActivityNodeId !== pending.callActivity.id ||
+          event.scopeInstanceId !== pending.scopeInstanceId ||
+          event.evaluatedAt !== pending.openedAt ||
+          !sameExpression(
+            event.expression,
+            pending.binding.encodedInputExpression
+          ) ||
+          BpmnExpression.evaluatorBindingKey(event.evaluatorBinding) !==
+            BpmnExpression.evaluatorBindingKey(expectedEvaluator)
+        ) {
+          return journalFailure(
+            index,
+            `CallActivity input '${event.callFrameId}' has no exact opening cause`
+          )
+        }
+        const contextSnapshot = Json.snapshot({
+          _tag: "CallActivityInput",
+          expression: pending.binding.encodedInputExpression,
+          callActivity: pending.callActivity,
+          binding: pending.binding,
+          ownerTokenId: pending.ownerTokenId,
+          callFrameId: pending.callFrameId,
+          scopeInstance: scope,
+          state
+        })
+        const measuredInput = canonicalUtf8Bytes(
+          event.encodedInput as Schema.Json
+        )
+        let sourceUtf8Bytes: number
+        let contextCanonicalBytes: number
+        try {
+          sourceUtf8Bytes = new TextEncoder().encode(
+            pending.binding.encodedInputExpression.source
+          ).byteLength
+          contextCanonicalBytes = Result.isFailure(contextSnapshot)
+            ? -1
+            : new TextEncoder().encode(
+              Json.canonicalizeSnapshot(contextSnapshot.success)
+            ).byteLength
+        } catch {
+          sourceUtf8Bytes = -1
+          contextCanonicalBytes = -1
+        }
+        if (
+          Result.isFailure(contextSnapshot) ||
+          Result.isFailure(measuredInput) ||
+          measuredInput.success !==
+            event.encodedInputCanonicalBytes ||
+          measuredInput.success >
+            pending.binding.maxEncodedInputCanonicalBytes ||
+          event.usage.sourceUtf8Bytes !== sourceUtf8Bytes ||
+          event.usage.contextCanonicalBytes !==
+            contextCanonicalBytes ||
+          event.usage.steps > expectedEvaluator.limits.maxSteps ||
+          sourceUtf8Bytes >
+            expectedEvaluator.limits.maxSourceUtf8Bytes ||
+          contextCanonicalBytes >
+            expectedEvaluator.limits.maxContextCanonicalBytes
+        ) {
+          return journalFailure(
+            index,
+            `CallActivity input '${event.callFrameId}' has invalid usage or size evidence`
+          )
+        }
+        pending.encodedInput = directClone(event.encodedInput)
+        break
+      }
+
+      case "CallActivityChildCommandCommitted": {
+        const pending = pendingCallOpen
+        if (pending === undefined) {
+          const propagation = pendingParentClosePropagation
+          const expectedFrameId = propagation?.frameIds[0]
+          const frame = expectedFrameId === undefined
+            ? undefined
+            : state.callFrames.find((candidate) => candidate.callFrameId === expectedFrameId)
+          const child = frame === undefined
+            ? undefined
+            : BpmnCallActivityV3.foldFrame(frame)
+          const expected = propagation === undefined ||
+              frame === undefined ||
+              child === undefined ||
+              Result.isFailure(child)
+            ? undefined
+            : BpmnCallActivityV3.makeParentCloseCommand(
+              child.success.relation,
+              propagation.intent.cause
+            )
+          if (
+            propagation === undefined ||
+            propagation.expectedEvent !== undefined ||
+            expectedFrameId === undefined ||
+            frame === undefined ||
+            child === undefined ||
+            Result.isFailure(child) ||
+            expected === undefined ||
+            Result.isFailure(expected) ||
+            event.callFrameId !== expectedFrameId ||
+            event.committedAt !==
+              propagation.intent.requestedAt ||
+            frame.parentCloseCommand !== undefined ||
+            !sameJson(expected.success, event.command)
+          ) {
+            return journalFailure(
+              index,
+              `CallActivity child command '${event.command.commandId}' has no exact parent-close cause`
+            )
+          }
+          frame.parentCloseCommand = directClone(event.command)
+          frame.updatedAt = event.committedAt
+          propagation.frameIds.shift()
+          const projected = BpmnCallActivityV3.makeParentCloseEvent(
+            frame,
+            event.command,
+            event.committedAt
+          )
+          if (Result.isFailure(projected)) {
+            return journalFailure(
+              index,
+              `CallActivity child command '${event.command.commandId}' cannot project its canonical close fact`
+            )
+          }
+          if (projected.success !== undefined) {
+            propagation.expectedEvent = {
+              callFrameId: frame.callFrameId,
+              event: directClone(projected.success),
+              committedAt: event.committedAt
+            }
+            break
+          }
+          const checked = BpmnCallActivityV3.validateFrame(frame)
+          if (Result.isFailure(checked)) {
+            return journalFailure(
+              index,
+              `CallActivity child command '${event.command.commandId}' produced an invalid close frame`
+            )
+          }
+          const finished = finishParentClosePropagation(
+            index,
+            event.committedAt
+          )
+          if (Result.isFailure(finished)) {
+            return Result.fail(finished.failure)
+          }
+          break
+        }
+        if (
+          pending.encodedInput === undefined ||
+          pending.scheduleCommand !== undefined ||
+          event.callFrameId !== pending.callFrameId ||
+          event.committedAt !== pending.openedAt
+        ) {
+          return journalFailure(
+            index,
+            `CallActivity child command '${event.command.commandId}' has no exact opening cause`
+          )
+        }
+        const expected = BpmnCallActivityV3.makeScheduleCommand(
+          pending.relation,
+          pending.encodedInput,
+          pending.ownerTokenId
+        )
+        if (
+          Result.isFailure(expected) ||
+          !sameJson(expected.success, event.command)
+        ) {
+          return journalFailure(
+            index,
+            `CallActivity child command '${event.command.commandId}' is not the canonical ScheduleChild command`
+          )
+        }
+        pending.scheduleCommand = directClone(event.command)
+        break
+      }
+
+      case "CallActivityChildEventCommitted": {
+        const pending = pendingCallOpen
+        if (pending !== undefined) {
+          if (
+            pending.encodedInput === undefined ||
+            pending.scheduleCommand === undefined ||
+            event.callFrameId !== pending.callFrameId ||
+            event.backendLocator !== undefined ||
+            event.committedAt !== pending.openedAt
+          ) {
+            return journalFailure(
+              index,
+              `CallActivity schedule '${event.callFrameId}' does not match its input evaluation`
+            )
+          }
+          const expected = BpmnCallActivityV3.makeScheduledEvent(
+            pending.relation,
+            pending.encodedInput,
+            pending.openedAt,
+            pending.ownerTokenId
+          )
+          if (
+            Result.isFailure(expected) ||
+            !sameJson(expected.success, event.event)
+          ) {
+            return journalFailure(
+              index,
+              `CallActivity schedule '${event.callFrameId}' is not the canonical ChildScheduled fact`
+            )
+          }
+          const frame: MutableCallFrame = {
+            frameVersion: 1,
+            executionProtocolVersion: 3,
+            callFrameId: pending.callFrameId,
+            callActivityNodeId: pending.callActivity.id,
+            processId: pending.callActivity.processId,
+            scopeInstanceId: pending.scopeInstanceId,
+            ownerTokenId: pending.ownerTokenId,
+            childEvents: [directClone(event.event)],
+            enteredAt: pending.openedAt,
+            updatedAt: event.committedAt
+          }
+          const checked = BpmnCallActivityV3.validateFrame(frame)
+          if (Result.isFailure(checked)) {
+            return journalFailure(
+              index,
+              `CallActivity schedule '${event.callFrameId}' produced an invalid frame`
+            )
+          }
+          state.callFrames.push(directClone(checked.success))
+          pendingCallOpen = undefined
+          break
+        }
+
+        const expectedClose = pendingParentClosePropagation?.expectedEvent
+        if (expectedClose !== undefined) {
+          const frame = state.callFrames.find((candidate) => candidate.callFrameId === expectedClose.callFrameId)
+          if (
+            frame === undefined ||
+            event.callFrameId !== expectedClose.callFrameId ||
+            event.backendLocator !== undefined ||
+            event.committedAt !== expectedClose.committedAt ||
+            !sameJson(event.event, expectedClose.event)
+          ) {
+            return journalFailure(
+              index,
+              `CallActivity close fact '${event.event.eventId}' is not the required local projection`
+            )
+          }
+          frame.childEvents.push(directClone(event.event))
+          frame.updatedAt = event.committedAt
+          if (childEventTerminatesRelation(event.event)) {
+            frame.exitedAt = event.committedAt
+          }
+          const checked = BpmnCallActivityV3.validateFrame(frame)
+          if (Result.isFailure(checked)) {
+            return journalFailure(
+              index,
+              `CallActivity close fact '${event.event.eventId}' produced an invalid frame`
+            )
+          }
+          delete pendingParentClosePropagation!.expectedEvent
+          const finished = finishParentClosePropagation(
+            index,
+            event.committedAt
+          )
+          if (Result.isFailure(finished)) {
+            return Result.fail(finished.failure)
+          }
+          break
+        }
+
+        const frame = state.callFrames.find((candidate) => candidate.callFrameId === event.callFrameId)
+        if (frame === undefined) {
+          return journalFailure(
+            index,
+            `Child event '${event.event.eventId}' references an unknown CallActivity frame`
+          )
+        }
+        const terminalAudit = (
+          state.status === "failed" ||
+          state.status === "cancelled"
+        ) &&
+          frame.parentCloseCommand?.payload._tag ===
+            "RequestChildCancellation" &&
+          frame.parentCloseCommand.payload.closeAction ===
+            "RequestCancel"
+        if (
+          (
+            state.status === "completed" ||
+            state.status === "failed" ||
+            state.status === "cancelled"
+          ) &&
+          !terminalAudit
+        ) {
+          return journalFailure(
+            index,
+            `Terminal execution '${state.status}' cannot accept child fact '${event.event.eventId}'`
+          )
+        }
+        const existingEvent = frame.childEvents.find((candidate) => candidate.eventId === event.event.eventId)
+        if (existingEvent !== undefined) {
+          return journalFailure(
+            index,
+            `Repeated child event '${event.event.eventId}' must use CallActivityChildEventReplayed`
+          )
+        }
+        if (
+          event.event.callId !== frame.callFrameId ||
+          event.committedAt < frame.updatedAt ||
+          (
+            frame.backendLocator !== undefined &&
+            event.backendLocator !== undefined &&
+            !sameJson(frame.backendLocator, event.backendLocator)
+          ) ||
+          (
+            event.event.payload._tag ===
+              "ChildStartAccepted" &&
+            frame.backendLocator === undefined &&
+            event.backendLocator === undefined
+          )
+        ) {
+          return journalFailure(
+            index,
+            `Child event '${event.event.eventId}' does not match CallActivity frame '${frame.callFrameId}'`
+          )
+        }
+        frame.childEvents.push(directClone(event.event))
+        frame.updatedAt = event.committedAt
+        if (childEventTerminatesRelation(event.event)) {
+          frame.exitedAt = event.committedAt
+        }
+        if (
+          frame.backendLocator === undefined &&
+          event.backendLocator !== undefined
+        ) {
+          frame.backendLocator = directClone(event.backendLocator)
+        }
+        const folded = BpmnCallActivityV3.foldFrameHistory(frame)
+        if (Result.isFailure(folded)) {
+          return journalFailure(
+            index,
+            `Child event '${event.event.eventId}' violates its durable relation history`
+          )
+        }
+        if (
+          event.event.payload._tag === "ChildStartAccepted" &&
+          frame.parentCloseCommand !== undefined
+        ) {
+          const intent = state.parentCloseIntent
+          const terminalAudit = (
+            state.status === "failed" ||
+            state.status === "cancelled"
+          ) &&
+            frame.parentCloseCommand.payload._tag ===
+              "RequestChildCancellation" &&
+            frame.parentCloseCommand.payload.closeAction ===
+              "RequestCancel"
+          const projected = BpmnCallActivityV3.makeParentCloseEvent(
+            frame,
+            frame.parentCloseCommand,
+            event.committedAt
+          )
+          if (
+            intent === undefined ||
+            (
+              state.status !== "failing" &&
+              state.status !== "cancelling" &&
+              !terminalAudit
+            ) ||
+            Result.isFailure(projected) ||
+            projected.success === undefined
+          ) {
+            return journalFailure(
+              index,
+              `Accepted child start '${event.event.eventId}' did not produce its required cancellation projection`
+            )
+          }
+          pendingParentClosePropagation = {
+            intent: directClone(intent),
+            frameIds: [],
+            ...(terminalAudit ? { terminalAudit: true } : undefined),
+            expectedEvent: {
+              callFrameId: frame.callFrameId,
+              event: directClone(projected.success),
+              committedAt: event.committedAt
+            }
+          }
+          break
+        }
+        const checked = BpmnCallActivityV3.validateFrame(frame)
+        if (Result.isFailure(checked)) {
+          return journalFailure(
+            index,
+            `Child event '${event.event.eventId}' produced an invalid CallActivity frame`
+          )
+        }
+        if (
+          folded.success.phase._tag === "Succeeded" &&
+          state.status === "active" &&
+          frame.parentCloseCommand === undefined
+        ) {
+          const node = kernel.nodeById.get(frame.callActivityNodeId)
+          if (node?._tag !== "CallActivity") {
+            return journalFailure(
+              index,
+              `Successful child event '${event.event.eventId}' has no CallActivity owner`
+            )
+          }
+          pendingCallCompletion = {
+            callFrameId: frame.callFrameId,
+            ownerTokenId: frame.ownerTokenId,
+            callActivity: node,
+            scopeInstanceId: frame.scopeInstanceId,
+            completedAt: event.committedAt
+          }
+        }
+        if (
+          state.status === "failing" ||
+          state.status === "cancelling"
+        ) {
+          const intent = state.parentCloseIntent
+          if (intent === undefined) {
+            return journalFailure(
+              index,
+              `Closing CallActivity frame '${frame.callFrameId}' lost its parent-close intent`
+            )
+          }
+          pendingParentClosePropagation = {
+            intent: directClone(intent),
+            frameIds: []
+          }
+          const finished = finishParentClosePropagation(
+            index,
+            event.committedAt
+          )
+          if (Result.isFailure(finished)) {
+            return Result.fail(finished.failure)
+          }
+        }
+        break
+      }
+
+      case "CallActivityChildEventReplayed": {
+        const frame = state.callFrames.find((candidate) => candidate.callFrameId === event.callFrameId)
+        if (
+          frame === undefined ||
+          !frame.childEvents.some((candidate) => candidate.eventId === event.eventId) ||
+          event.observedAt < frame.updatedAt
+        ) {
+          return journalFailure(
+            index,
+            `CallActivity replay '${event.callFrameId}:${event.eventId}' has no committed fact`
+          )
+        }
         break
       }
 
@@ -8100,7 +9649,7 @@ const replayJournal = (
           if (
             event.waitGroupId !== expectedGroupId ||
             event.reason !== "execution-cancelled" ||
-            event.cancelledAt !== operational.record.requestedAt ||
+            event.cancelledAt !== operational.finalizedAt ||
             group === undefined ||
             group.status !== "waiting" ||
             !sameStringArray(event.armIds, group.armIds) ||
@@ -8170,7 +9719,7 @@ const replayJournal = (
           expectedGroupId === undefined ||
           event.waitGroupId !== expectedGroupId ||
           event.reason !== "execution-failed" ||
-          event.cancelledAt !== cleanup.resolution.resolvedAt ||
+          event.cancelledAt !== cleanup.finalizedAt ||
           group === undefined ||
           group.status !== "waiting" ||
           !sameStringArray(event.armIds, group.armIds) ||
@@ -9227,7 +10776,7 @@ const replayJournal = (
             event.itemIndex !== member.index ||
             event.itemKey !== member.itemKey ||
             event.reason !== "execution-cancelled" ||
-            event.terminatedAt !== operational.record.requestedAt
+            event.terminatedAt !== operational.finalizedAt
           ) {
             return journalFailure(
               index,
@@ -9280,7 +10829,7 @@ const replayJournal = (
           event.itemKey !== member.itemKey ||
           event.reason !== expectedReason ||
           event.terminatedAt !== (
-              pendingGroup?.transitionedAt ?? cleanup?.resolution.resolvedAt
+              pendingGroup?.transitionedAt ?? cleanup?.finalizedAt
             )
         ) {
           return journalFailure(
@@ -9325,7 +10874,7 @@ const replayJournal = (
             event.itemIndex !== member.index ||
             event.itemKey !== member.itemKey ||
             event.reason !== "execution-cancelled" ||
-            event.notGeneratedAt !== operational.record.requestedAt
+            event.notGeneratedAt !== operational.finalizedAt
           ) {
             return journalFailure(
               index,
@@ -9379,7 +10928,7 @@ const replayJournal = (
           event.reason !== expectedReason ||
           event.notGeneratedAt !== (
               pendingGroup?.transitionedAt ??
-                cleanup?.resolution.resolvedAt
+                cleanup?.finalizedAt
             )
         ) {
           return journalFailure(
@@ -9510,7 +11059,7 @@ const replayJournal = (
           !sameJson(event.counters, multiInstanceCounters(group)) ||
           event.reason !== expectedReason ||
           event.cancelledAt !== (
-              boundaryPending?.transitionedAt ?? cleanup?.resolution.resolvedAt
+              boundaryPending?.transitionedAt ?? cleanup?.finalizedAt
             )
         ) {
           return journalFailure(index, `Multi-instance cancellation '${event.groupId}' is inconsistent`)
@@ -9546,7 +11095,7 @@ const replayJournal = (
           event.activityId !== group.activityId ||
           event.activation !== group.activation ||
           event.requestId !== pending.record.command.requestId ||
-          event.closedAt !== pending.record.requestedAt ||
+          event.closedAt !== pending.finalizedAt ||
           !sameJson(event.counters, multiInstanceCounters(group))
         ) {
           return journalFailure(
@@ -9642,9 +11191,16 @@ const replayJournal = (
             ? "UnmappedBusinessFailure"
             : "UncaughtBpmnError",
           ...(errorRef === undefined ? undefined : { errorRef }),
-          tokenIds: state.tokens
-            .filter((candidate) => candidate.status === "active")
-            .map((candidate) => candidate.tokenId),
+          stage: "intent",
+          tokenIds: [
+            resolution.tokenId,
+            ...state.tokens
+              .filter((candidate) =>
+                candidate.status === "active" &&
+                candidate.tokenId !== resolution.tokenId
+              )
+              .map((candidate) => candidate.tokenId)
+          ],
           frameIds: state.gatewayFrames
             .filter((frame) => frame.status === "waiting" || frame.status === "satisfied")
             .map((frame) => frame.frameId),
@@ -9709,6 +11265,34 @@ const replayJournal = (
           break
         }
         if (token.position._tag === "AtNode") {
+          const callCompletion = pendingCallCompletion
+          if (callCompletion !== undefined) {
+            if (
+              event.tokenId !== callCompletion.ownerTokenId ||
+              event.reason !== "call-activity-succeeded" ||
+              event.consumedAt !== callCompletion.completedAt ||
+              token.position.nodeId !==
+                callCompletion.callActivity.id ||
+              token.scopeInstanceId !==
+                callCompletion.scopeInstanceId
+            ) {
+              return journalFailure(
+                index,
+                `CallActivity token '${event.tokenId}' does not match its successful child terminal`
+              )
+            }
+            pendingCallCompletion = undefined
+            pendingRoute = {
+              sourceNode: callCompletion.callActivity,
+              scopeInstanceId: callCompletion.scopeInstanceId,
+              routingKind: "activity",
+              routedAt: event.consumedAt,
+              evaluations: new Map()
+            }
+            token.status = "consumed"
+            token.consumedAt = event.consumedAt
+            break
+          }
           const task = kernel.nodeById.get(token.position.nodeId)
           const isProtocolSuccess = event.reason === "task-succeeded" &&
             pendingResolvedTask?.kind === "Succeeded" &&
@@ -9871,7 +11455,10 @@ const replayJournal = (
                 createdAt: event.consumedAt
               }]
             }
-          } else if (target._tag === "IntermediateCatchEvent") {
+          } else if (
+            target._tag === "IntermediateCatchEvent" ||
+            target._tag === "CallActivity"
+          ) {
             pendingEmissions = [{
               processId: scope.processId,
               scopeInstanceId: scope.scopeInstanceId,
@@ -9970,11 +11557,13 @@ const replayJournal = (
         if (operationalWithdrawal !== undefined) {
           const expectedTokenId = operationalWithdrawal.tokenIds[0]
           if (
+            operationalWithdrawal.stage !== "cleanup" ||
+            operationalWithdrawal.finalizedAt === undefined ||
             !operationalWithdrawal.schedulingFenced ||
             event.tokenId !== expectedTokenId ||
             event.reason !== "execution-cancelled" ||
             event.withdrawnAt !==
-              operationalWithdrawal.record.requestedAt
+              operationalWithdrawal.finalizedAt
           ) {
             return journalFailure(
               index,
@@ -10101,11 +11690,19 @@ const replayJournal = (
           : cleanup === undefined
           ? undefined
           : "unmapped-business-failure"
+        const expectedAt = cleanup?.stage === "source-token"
+          ? cleanup.resolution.resolvedAt
+          : cleanup?.finalizedAt
         if (
           cleanup === undefined ||
+          (
+            cleanup.stage !== "source-token" &&
+            cleanup.stage !== "cleanup"
+          ) ||
+          expectedAt === undefined ||
           event.tokenId !== expectedTokenId ||
           event.reason !== expectedReason ||
-          event.withdrawnAt !== cleanup.resolution.resolvedAt
+          event.withdrawnAt !== expectedAt
         ) {
           return journalFailure(
             index,
@@ -10115,6 +11712,16 @@ const replayJournal = (
         token.status = "withdrawn"
         token.consumedAt = event.withdrawnAt
         cleanup.tokenIds.shift()
+        if (cleanup.stage === "source-token") {
+          cleanup.stage = "propagating"
+          const finished = finishParentClosePropagation(
+            index,
+            event.withdrawnAt
+          )
+          if (Result.isFailure(finished)) {
+            return Result.fail(finished.failure)
+          }
+        }
         break
       }
 
@@ -10225,7 +11832,7 @@ const replayJournal = (
           cleanup === undefined ||
           event.frameId !== expectedFrameId ||
           event.sourceTokenId !== cleanup.resolution.tokenId ||
-          event.cancelledAt !== cleanup.resolution.resolvedAt ||
+          event.cancelledAt !== cleanup.finalizedAt ||
           frame === undefined ||
           (frame.status !== "waiting" && frame.status !== "satisfied")
         ) {
@@ -10249,7 +11856,7 @@ const replayJournal = (
           pending === undefined ||
           event.frameId !== expectedFrameId ||
           event.requestId !== pending.record.command.requestId ||
-          event.closedAt !== pending.record.requestedAt ||
+          event.closedAt !== pending.finalizedAt ||
           frame === undefined ||
           (
             frame.status !== "waiting" &&
@@ -10304,7 +11911,7 @@ const replayJournal = (
           event.frameId !== expectedFrameId ||
           event.sourceTokenId !== cleanup.resolution.tokenId ||
           event.reason !== expectedReason ||
-          event.cancelledAt !== cleanup.resolution.resolvedAt ||
+          event.cancelledAt !== cleanup.finalizedAt ||
           frame === undefined ||
           frame.status !== "active" ||
           event.activityId !== frame.activityId ||
@@ -10332,7 +11939,7 @@ const replayJournal = (
           pending === undefined ||
           event.frameId !== expectedFrameId ||
           event.requestId !== pending.record.command.requestId ||
-          event.closedAt !== pending.record.requestedAt ||
+          event.closedAt !== pending.finalizedAt ||
           frame === undefined ||
           frame.status !== "active" ||
           event.activityId !== frame.activityId ||
@@ -10522,9 +12129,10 @@ const replayJournal = (
           )
         const operationallyWithdrawn = state.status === "cancelled" &&
           state.operationalWithdrawal !== undefined &&
+          state.completedAt !== undefined &&
           token?.status === "withdrawn" &&
           token.consumedAt ===
-            state.operationalWithdrawal.requestedAt
+            state.completedAt
         const terminalTaskWait = token?.status === "consumed" ||
           (
             token?.status === "withdrawn" &&
@@ -10575,9 +12183,10 @@ const replayJournal = (
         if (
           state.status !== "cancelled" ||
           withdrawal === undefined ||
+          state.completedAt === undefined ||
           token === undefined ||
           token.status !== "withdrawn" ||
-          token.consumedAt !== withdrawal.requestedAt ||
+          token.consumedAt !== state.completedAt ||
           token.scopeInstanceId !== event.scopeInstanceId ||
           token.position._tag !== "AtNode" ||
           token.position.nodeId !== event.taskNodeId ||
@@ -10606,9 +12215,10 @@ const replayJournal = (
         if (
           state.status !== "cancelled" ||
           withdrawal === undefined ||
+          state.completedAt === undefined ||
           token === undefined ||
           token.status !== "withdrawn" ||
-          token.consumedAt !== withdrawal.requestedAt ||
+          token.consumedAt !== state.completedAt ||
           token.scopeInstanceId !== command.scopeInstanceId ||
           token.position._tag !== "AtNode" ||
           token.position.nodeId !== command.taskNodeId ||
@@ -10635,7 +12245,7 @@ const replayJournal = (
           cleanup === undefined ||
           event.scopeInstanceId !== expectedScopeId ||
           event.sourceTokenId !== cleanup.resolution.tokenId ||
-          event.exitedAt !== cleanup.resolution.resolvedAt ||
+          event.exitedAt !== cleanup.finalizedAt ||
           scope === undefined ||
           scope.status !== "active" ||
           event.definitionId !== scope.definitionId
@@ -10659,7 +12269,7 @@ const replayJournal = (
           cleanup === undefined ||
           event.scopeInstanceId !== expectedScopeId ||
           event.sourceTokenId !== cleanup.resolution.tokenId ||
-          event.exitedAt !== cleanup.resolution.resolvedAt ||
+          event.exitedAt !== cleanup.finalizedAt ||
           scope === undefined ||
           scope.status !== "active" ||
           event.definitionId !== scope.definitionId
@@ -10683,7 +12293,7 @@ const replayJournal = (
           pending === undefined ||
           event.scopeInstanceId !== expectedScopeId ||
           event.requestId !== pending.record.command.requestId ||
-          event.closedAt !== pending.record.requestedAt ||
+          event.closedAt !== pending.finalizedAt ||
           scope === undefined ||
           scope.status !== "active" ||
           event.definitionId !== scope.definitionId
@@ -10809,7 +12419,7 @@ const replayJournal = (
           event.taskNodeId !== cleanup.resolution.taskNodeId ||
           event.failureKind !== cleanup.failureKind ||
           event.errorRef !== cleanup.errorRef ||
-          event.failedAt !== cleanup.resolution.resolvedAt ||
+          event.failedAt !== cleanup.finalizedAt ||
           rootScope === undefined ||
           rootScope.parentScopeInstanceId !== undefined ||
           rootScope.status !== "failed" ||
@@ -10849,7 +12459,7 @@ const replayJournal = (
             event.command,
             pending.record.command
           ) ||
-          event.completedAt !== pending.record.requestedAt ||
+          event.completedAt !== pending.finalizedAt ||
           rootScope === undefined ||
           rootScope.parentScopeInstanceId !== undefined ||
           rootScope.status !== "cancelled" ||
@@ -10883,7 +12493,10 @@ const replayJournal = (
       case "OperationalWithdrawalReplayed": {
         const withdrawal = state.operationalWithdrawal
         if (
-          state.status !== "cancelled" ||
+          (
+            state.status !== "cancelling" &&
+            state.status !== "cancelled"
+          ) ||
           withdrawal === undefined ||
           !sameWithdrawalCommand(
             withdrawal.command,
@@ -10907,6 +12520,8 @@ const replayJournal = (
     pendingScopeEntry !== undefined ||
     pendingGatewayArrival !== undefined ||
     pendingTaskWait !== undefined ||
+    pendingCallOpen !== undefined ||
+    pendingCallCompletion !== undefined ||
     pendingCatchOpen !== undefined ||
     pendingCatchResolution !== undefined ||
     pendingCatchFence !== undefined ||
@@ -10915,8 +12530,15 @@ const replayJournal = (
     pendingBoundaryErrorCatch !== undefined ||
     pendingLoopTransition !== undefined ||
     pendingMultiInstanceTransition !== undefined ||
-    pendingFailureCleanup !== undefined ||
-    pendingOperationalWithdrawal !== undefined ||
+    (
+      pendingFailureCleanup !== undefined &&
+      pendingFailureCleanup.stage !== "waiting"
+    ) ||
+    (
+      pendingOperationalWithdrawal !== undefined &&
+      pendingOperationalWithdrawal.stage !== "waiting"
+    ) ||
+    pendingParentClosePropagation !== undefined ||
     pendingExecutionCompletion !== undefined
   ) {
     return journalFailure(events.length, "The transition journal ends before its causal transition completes")
@@ -10995,6 +12617,24 @@ const canonicalTaskBindings = (
         })
       )
       .sort((left, right) => left.taskNodeId.localeCompare(right.taskNodeId))
+  )
+
+const canonicalCallActivityBindings = (
+  bindings: ReadonlyArray<BpmnCallActivityV3.CallActivityBinding>
+): ReadonlyArray<BpmnCallActivityV3.CallActivityBinding> =>
+  Object.freeze(
+    bindings
+      .map((binding) =>
+        Object.freeze({
+          ...binding,
+          calledElement: Object.freeze({ ...binding.calledElement }),
+          target: structuredClone(binding.target),
+          encodedInputExpression: Object.freeze({
+            ...binding.encodedInputExpression
+          })
+        })
+      )
+      .sort((left, right) => left.callActivityNodeId.localeCompare(right.callActivityNodeId))
   )
 
 const canonicalMessageBindings = (
@@ -11093,6 +12733,9 @@ const compileStructure = (
 ): Result.Result<CompiledStructure, Diagnostic.CompilationError> => {
   const { limits, profileId, rootProcessId } = options
   const taskBindings = canonicalTaskBindings(options.taskBindings ?? [])
+  const callActivityBindings = canonicalCallActivityBindings(
+    options.callActivityBindings ?? []
+  )
   const messageBindings = canonicalMessageBindings(
     options.messageBindings ?? []
   )
@@ -11136,6 +12779,15 @@ const compileStructure = (
         binding.collectionExpression.version
       ]),
       binding.collectionExpression
+    )
+  }
+  for (const binding of callActivityBindings) {
+    requiredExpressionBindings.set(
+      JSON.stringify([
+        binding.encodedInputExpression.language,
+        binding.encodedInputExpression.version
+      ]),
+      binding.encodedInputExpression
     )
   }
   for (const binding of messageBindings) {
@@ -11325,6 +12977,49 @@ const compileStructure = (
       }
     }
   }
+  const callActivityBindingByNodeId = new Map<
+    string,
+    BpmnCallActivityV3.CallActivityBinding
+  >()
+  for (let index = 0; index < callActivityBindings.length; index++) {
+    const binding = callActivityBindings[index]!
+    const path = ["options", "callActivityBindings", index] as const
+    const node = nodeById.get(binding.callActivityNodeId)
+    if (
+      node === undefined ||
+      node._tag !== "CallActivity" ||
+      node.processId !== rootProcessId
+    ) {
+      diagnostics.push(error(
+        Codes.InvalidKernelProfile,
+        `CallActivity binding '${binding.callActivityNodeId}' must reference one exact CallActivity in executable root process '${rootProcessId}'`,
+        [...path, "callActivityNodeId"]
+      ))
+    } else if (
+      node.calledElement === undefined ||
+      node.calledElement.namespaceUri !==
+        binding.calledElement.namespaceUri ||
+      node.calledElement.localName !== binding.calledElement.localName
+    ) {
+      diagnostics.push(error(
+        Codes.InvalidKernelProfile,
+        `CallActivity binding '${binding.callActivityNodeId}' does not match its source calledElement QName`,
+        [...path, "calledElement"]
+      ))
+    }
+    if (callActivityBindingByNodeId.has(binding.callActivityNodeId)) {
+      diagnostics.push(error(
+        Codes.InvalidKernelProfile,
+        `CallActivity '${binding.callActivityNodeId}' has more than one executable child target`,
+        [...path, "callActivityNodeId"]
+      ))
+    } else {
+      callActivityBindingByNodeId.set(
+        binding.callActivityNodeId,
+        binding
+      )
+    }
+  }
   const messageBindingByCatchEventNodeId = new Map<
     string,
     BpmnEventV3.MessageBinding
@@ -11495,7 +13190,7 @@ const compileStructure = (
       continue
     }
     if (
-      node._tag === "CallActivity" || node._tag === "Transaction" || node._tag === "AdHocSubProcess" ||
+      node._tag === "Transaction" || node._tag === "AdHocSubProcess" ||
       node._tag === "EventSubProcess" ||
       node._tag === "IntermediateThrowEvent"
     ) {
@@ -11506,6 +13201,31 @@ const compileStructure = (
         `Node '${node.id}' of type '${node._tag}' is outside the executable token-kernel subset`,
         path
       ))
+      continue
+    }
+    if (node._tag === "CallActivity") {
+      const binding = callActivityBindingByNodeId.get(node.id)
+      const outgoing = node.outgoingSequenceFlowIds[0] === undefined
+        ? undefined
+        : flowById.get(node.outgoingSequenceFlowIds[0])
+      if (
+        binding === undefined ||
+        node.calledElement === undefined ||
+        node.incomingSequenceFlowIds.length !== 1 ||
+        node.outgoingSequenceFlowIds.length !== 1 ||
+        outgoing?.kind !== "normal" ||
+        node.loopCharacteristics !== undefined ||
+        node.isForCompensation === true ||
+        (node.startQuantity ?? 1) !== 1 ||
+        (node.completionQuantity ?? 1) !== 1 ||
+        node.defaultFlowId !== undefined
+      ) {
+        diagnostics.push(error(
+          Codes.UnsupportedActivity,
+          `CallActivity '${node.id}' requires one exact child binding, calledElement, one incoming and one normal outgoing flow, and no loop, compensation, quantity, or default-flow semantics in PortableChildProcess/1`,
+          path
+        ))
+      }
       continue
     }
     if (node._tag === "IntermediateCatchEvent") {
@@ -11957,6 +13677,7 @@ const compileStructure = (
     profileId,
     evaluatorBindings,
     taskBindings,
+    callActivityBindings,
     messageBindings,
     dataDocument,
     collectionBindings,
@@ -11968,6 +13689,9 @@ const compileStructure = (
     flowById: new Map(flowById),
     orderedOutgoingByNodeId: internalOutgoing,
     taskBindingByTaskNodeId: new Map(taskBindingByTaskNodeId),
+    callActivityBindingByNodeId: new Map(
+      callActivityBindingByNodeId
+    ),
     messageBindingByCatchEventNodeId: new Map(
       messageBindingByCatchEventNodeId
     ),
@@ -11998,6 +13722,9 @@ const authorizeKernel = (
     flowById: new Map(structure.flowById),
     orderedOutgoingByNodeId: publicOutgoing,
     taskBindingByTaskNodeId: new Map(structure.taskBindingByTaskNodeId),
+    callActivityBindingByNodeId: new Map(
+      structure.callActivityBindingByNodeId
+    ),
     messageBindingByCatchEventNodeId: new Map(
       structure.messageBindingByCatchEventNodeId
     ),
@@ -12065,6 +13792,7 @@ export const prepare = Effect.fnUntraced(function*(
     limits: structure.limits,
     evaluatorBindings: structure.evaluatorBindings,
     taskBindings: structure.taskBindings,
+    callActivityBindings: structure.callActivityBindings,
     messageBindings: structure.messageBindings,
     dataDocument: structure.dataDocument,
     collectionBindings: structure.collectionBindings,
@@ -12130,6 +13858,16 @@ export const initialize = (
     )))
   }
   const command = commandSnapshot.success as unknown as InitializeCommand
+  if (
+    authority.callActivityBindings.length > 0 &&
+    command.executionContext === undefined
+  ) {
+    return Result.fail(compilationError(error(
+      Codes.InvalidCommand,
+      "An execution containing CallActivity nodes requires an exact protocol-v3 executionContext",
+      ["command", "executionContext"]
+    )))
+  }
   const measuredInput = canonicalUtf8Bytes(command.input)
   if (Result.isFailure(measuredInput)) {
     return Result.fail(measuredInput.failure)
@@ -12159,6 +13897,9 @@ export const initialize = (
     model: directClone(authority.modelReference),
     status: "active",
     input: directClone(command.input),
+    ...(command.executionContext === undefined
+      ? undefined
+      : { executionContext: directClone(command.executionContext) }),
     startedAt: runtimeServices.now,
     extensionElements: [],
     scopeInstances: [],
@@ -12183,6 +13924,9 @@ export const initialize = (
     model: authority.modelReference,
     input: command.input,
     inputCanonicalBytes: measuredInput.success,
+    ...(command.executionContext === undefined
+      ? undefined
+      : { executionContext: command.executionContext }),
     startedAt: runtimeServices.now
   })
   const entered = enterScope(
@@ -12212,6 +13956,20 @@ export const initialize = (
   })
 }
 
+const ensureParentCloseIngress = (
+  state: BpmnExecutionState.BpmnExecutionState,
+  operation: string
+): Result.Result<void, Diagnostic.CompilationError> =>
+  state.status === "failing" ||
+    state.status === "cancelling"
+    ? Result.fail(compilationError(error(
+      Codes.InvalidCommand,
+      `${operation} cannot mutate an execution while parent close is '${state.status}'; only authoritative child facts and an exact withdrawal retry are accepted`,
+      ["state", "status"],
+      { status: state.status }
+    )))
+    : Result.succeed(undefined)
+
 /**
  * Advances an existing execution to its next stable wait state.
  *
@@ -12231,6 +13989,13 @@ export const advance = (
   const validated = validateKernelState(authority, stateInput)
   if (Result.isFailure(validated)) {
     return Result.fail(validated.failure)
+  }
+  const admitted = ensureParentCloseIngress(
+    validated.success,
+    "Kernel advance"
+  )
+  if (Result.isFailure(admitted)) {
+    return Result.fail(admitted.failure)
   }
   const resolvedServices = resolveServices(services, latestStateTimestamp(validated.success))
   if (Result.isFailure(resolvedServices)) {
@@ -12288,137 +14053,13 @@ const scopeDepth = (
   return depth
 }
 
-/**
- * Atomically withdraws one active BPMN root execution for operational reasons.
- *
- * **Details**
- *
- * This portable control is not BPMN Cancel, Terminate, or compensation. The
- * command is authenticated before mutation, the single trusted timestamp is
- * supplied by `services.now`, and the returned batch records an explicit
- * scheduling fence before deterministically closing every live structure.
- *
- * An exact retry after commit leaves state unchanged and emits only
- * `OperationalWithdrawalReplayed`. A different request, or a request against
- * a naturally completed or failed execution, is rejected deterministically.
- *
- * @category constructors
- * @since 4.0.0
- */
-export const withdrawExecution = (
-  kernel: CompiledKernel,
-  stateInput: unknown,
-  commandInput: unknown,
-  services: Services
-): Result.Result<TransitionBatch, Diagnostic.CompilationError> => {
-  const resolvedKernel = resolveKernel(kernel)
-  if (Result.isFailure(resolvedKernel)) {
-    return Result.fail(resolvedKernel.failure)
-  }
-  const authority = resolvedKernel.success
-  const commandSnapshot = Json.snapshot(commandInput)
-  if (Result.isFailure(commandSnapshot)) {
-    return Result.fail(compilationError(error(
-      Codes.InvalidCommand,
-      commandSnapshot.failure.message,
-      ["command", ...commandSnapshot.failure.path]
-    )))
-  }
-  const decodedCommand = decodeRequestInstanceWithdrawalCommand(
-    commandSnapshot.success
-  )
-  if (Result.isFailure(decodedCommand)) {
-    return Result.fail(compilationError(error(
-      Codes.InvalidCommand,
-      "Invalid operational instance-withdrawal command",
-      ["command"],
-      { issue: String(decodedCommand.failure) }
-    )))
-  }
-  const command = commandSnapshot.success as unknown as BpmnOperationalV3.RequestInstanceWithdrawalCommand
-  const validated = validateKernelState(authority, stateInput)
-  if (Result.isFailure(validated)) {
-    return Result.fail(validated.failure)
-  }
-  const resolvedServices = resolveServices(
-    services,
-    latestStateTimestamp(validated.success)
-  )
-  if (Result.isFailure(resolvedServices)) {
-    return Result.fail(resolvedServices.failure)
-  }
-  const runtimeServices = resolvedServices.success
-  const durableState = validated.success
-  const rootScope = durableState.scopeInstances.find(
-    (scope) => scope.parentScopeInstanceId === undefined
-  )
-  if (
-    rootScope === undefined ||
-    rootScope.scopeInstanceId !== command.rootScopeInstanceId
-  ) {
-    return Result.fail(compilationError(error(
-      Codes.InvalidCommand,
-      `Operational withdrawal does not identify the execution root scope '${command.rootScopeInstanceId}'`,
-      ["command", "rootScopeInstanceId"]
-    )))
-  }
-
-  if (durableState.status === "cancelled") {
-    const committed = durableState.operationalWithdrawal
-    if (
-      committed === undefined ||
-      !sameWithdrawalCommand(committed.command, command)
-    ) {
-      return Result.fail(compilationError(error(
-        Codes.InvalidCommand,
-        "Execution was already operationally withdrawn by a different request",
-        ["command", "requestId"],
-        {
-          committedRequestId: committed?.command.requestId ??
-            "missing-withdrawal-record",
-          requestedRequestId: command.requestId
-        }
-      )))
-    }
-    const replayed: Array<TransitionEvent> = []
-    recordEvent(replayed, {
-      _tag: "OperationalWithdrawalReplayed",
-      command,
-      observedAt: runtimeServices.now
-    })
-    return Result.succeed({
-      state: durableState,
-      events: immutableEvents(replayed)
-    })
-  }
-  if (durableState.status !== "active" || rootScope.status !== "active") {
-    return Result.fail(compilationError(error(
-      Codes.InvalidCommand,
-      `Execution status '${durableState.status}' cannot accept operational withdrawal`,
-      ["state", "status"]
-    )))
-  }
-
-  const state = directClone(durableState) as MutableState
-  const journal: Array<TransitionEvent> = []
-  const now = runtimeServices.now
-  const record: BpmnOperationalV3.OperationalInstanceWithdrawalRecord = {
-    withdrawalVersion: BpmnOperationalV3.OperationalInstanceWithdrawalVersion,
-    command: directClone(command),
-    requestedAt: now
-  }
-  state.operationalWithdrawal = directClone(record)
-  recordEvent(journal, {
-    _tag: "OperationalWithdrawalRequested",
-    record
-  })
-  recordEvent(journal, {
-    _tag: "OperationalWithdrawalSchedulingFenced",
-    rootScopeInstanceId: rootScope.scopeInstanceId,
-    requestId: command.requestId,
-    fencedAt: now
-  })
-
+const finalizeOperationalWithdrawal = (
+  state: MutableState,
+  command: BpmnOperationalV3.RequestInstanceWithdrawalCommand,
+  rootScope: MutableScopeInstance,
+  journal: Array<TransitionEvent>,
+  now: ProtocolV2Wire.Timestamp
+): void => {
   const activeTokenSet = new Set(
     state.tokens
       .filter((token) => token.status === "active")
@@ -12500,7 +14141,12 @@ export const withdrawExecution = (
   for (
     const group of state.catchWaitGroups
       .filter((candidate) => candidate.status === "waiting")
-      .sort((left, right) => stableIdentifierOrder(left.waitGroupId, right.waitGroupId))
+      .sort((left, right) =>
+        stableIdentifierOrder(
+          left.waitGroupId,
+          right.waitGroupId
+        )
+      )
   ) {
     cancelCatchWait(
       state,
@@ -12518,7 +14164,8 @@ export const withdrawExecution = (
     const scope of state.scopeInstances
       .filter((candidate) => candidate.status === "active")
       .sort((left, right) => {
-        const depth = scopeDepth(right, scopeById) - scopeDepth(left, scopeById)
+        const depth = scopeDepth(right, scopeById) -
+          scopeDepth(left, scopeById)
         return depth !== 0
           ? depth
           : stableIdentifierOrder(
@@ -12547,6 +14194,185 @@ export const withdrawExecution = (
     command,
     completedAt: now
   })
+}
+
+/**
+ * Atomically withdraws one active BPMN root execution for operational reasons.
+ *
+ * **Details**
+ *
+ * This portable control is not BPMN Cancel, Terminate, or compensation. The
+ * command is authenticated before mutation, the single trusted timestamp is
+ * supplied by `services.now`, and the returned batch records an explicit
+ * scheduling fence before deterministically closing every live structure.
+ *
+ * An exact retry after commit leaves state unchanged and emits only
+ * `OperationalWithdrawalReplayed`. A different request, or a request against
+ * a naturally completed or failed execution, is rejected deterministically.
+ *
+ * @category constructors
+ * @since 4.0.0
+ */
+export const withdrawExecution = (
+  kernel: CompiledKernel,
+  stateInput: unknown,
+  commandInput: unknown,
+  services: Services
+): Result.Result<TransitionBatch, Diagnostic.CompilationError> => {
+  const resolvedKernel = resolveKernel(kernel)
+  if (Result.isFailure(resolvedKernel)) {
+    return Result.fail(resolvedKernel.failure)
+  }
+  const authority = resolvedKernel.success
+  const commandSnapshot = Json.snapshot(commandInput)
+  if (Result.isFailure(commandSnapshot)) {
+    return Result.fail(compilationError(error(
+      Codes.InvalidCommand,
+      commandSnapshot.failure.message,
+      ["command", ...commandSnapshot.failure.path]
+    )))
+  }
+  const decodedCommand = decodeRequestInstanceWithdrawalCommand(
+    commandSnapshot.success
+  )
+  if (Result.isFailure(decodedCommand)) {
+    return Result.fail(compilationError(error(
+      Codes.InvalidCommand,
+      "Invalid operational instance-withdrawal command",
+      ["command"],
+      { issue: String(decodedCommand.failure) }
+    )))
+  }
+  const command = commandSnapshot.success as unknown as BpmnOperationalV3.RequestInstanceWithdrawalCommand
+  const validated = validateKernelState(authority, stateInput)
+  if (Result.isFailure(validated)) {
+    return Result.fail(validated.failure)
+  }
+  const resolvedServices = resolveServices(
+    services,
+    latestStateTimestamp(validated.success)
+  )
+  if (Result.isFailure(resolvedServices)) {
+    return Result.fail(resolvedServices.failure)
+  }
+  const runtimeServices = resolvedServices.success
+  const durableState = validated.success
+  const rootScope = durableState.scopeInstances.find(
+    (scope) => scope.parentScopeInstanceId === undefined
+  )
+  if (
+    rootScope === undefined ||
+    rootScope.scopeInstanceId !== command.rootScopeInstanceId
+  ) {
+    return Result.fail(compilationError(error(
+      Codes.InvalidCommand,
+      `Operational withdrawal does not identify the execution root scope '${command.rootScopeInstanceId}'`,
+      ["command", "rootScopeInstanceId"]
+    )))
+  }
+
+  if (
+    durableState.status === "cancelling" ||
+    durableState.status === "cancelled"
+  ) {
+    const committed = durableState.operationalWithdrawal
+    if (
+      committed === undefined ||
+      !sameWithdrawalCommand(committed.command, command)
+    ) {
+      return Result.fail(compilationError(error(
+        Codes.InvalidCommand,
+        "Execution was already operationally withdrawn by a different request",
+        ["command", "requestId"],
+        {
+          committedRequestId: committed?.command.requestId ??
+            "missing-withdrawal-record",
+          requestedRequestId: command.requestId
+        }
+      )))
+    }
+    const replayed: Array<TransitionEvent> = []
+    recordEvent(replayed, {
+      _tag: "OperationalWithdrawalReplayed",
+      command,
+      observedAt: runtimeServices.now
+    })
+    return Result.succeed({
+      state: durableState,
+      events: immutableEvents(replayed)
+    })
+  }
+  if (durableState.status !== "active" || rootScope.status !== "active") {
+    return Result.fail(compilationError(error(
+      Codes.InvalidCommand,
+      `Execution status '${durableState.status}' cannot accept operational withdrawal`,
+      ["state", "status"]
+    )))
+  }
+
+  const state = directClone(durableState) as MutableState
+  const journal: Array<TransitionEvent> = []
+  const now = runtimeServices.now
+  const record: BpmnOperationalV3.OperationalInstanceWithdrawalRecord = {
+    withdrawalVersion: BpmnOperationalV3.OperationalInstanceWithdrawalVersion,
+    command: directClone(command),
+    requestedAt: now
+  }
+  state.operationalWithdrawal = directClone(record)
+  recordEvent(journal, {
+    _tag: "OperationalWithdrawalRequested",
+    record
+  })
+  recordEvent(journal, {
+    _tag: "OperationalWithdrawalSchedulingFenced",
+    rootScopeInstanceId: rootScope.scopeInstanceId,
+    requestId: command.requestId,
+    fencedAt: now
+  })
+  const closeIntent: BpmnExecutionState.ParentCloseIntent = {
+    _tag: "OperationalWithdrawal",
+    intentVersion: BpmnExecutionState.ParentCloseIntentVersion,
+    cause: {
+      _tag: "ParentCancellation",
+      parentCauseEventId: command.requestId
+    },
+    requestId: command.requestId,
+    rootScopeInstanceId: rootScope.scopeInstanceId,
+    requestedAt: now
+  }
+  state.status = "cancelling"
+  state.parentCloseIntent = directClone(closeIntent)
+  recordEvent(journal, {
+    _tag: "ParentCloseIntentCommitted",
+    intent: closeIntent
+  })
+  const propagated = propagateParentCloseToCallFrames(
+    state,
+    closeIntent.cause,
+    journal,
+    now
+  )
+  if (Result.isFailure(propagated)) {
+    return Result.fail(propagated.failure)
+  }
+  if (!propagated.success) {
+    const checkedClosing = validateKernelState(authority, state)
+    if (Result.isFailure(checkedClosing)) {
+      return Result.fail(checkedClosing.failure)
+    }
+    return Result.succeed({
+      state: checkedClosing.success,
+      events: immutableEvents(journal)
+    })
+  }
+
+  finalizeOperationalWithdrawal(
+    state,
+    command,
+    rootScope as MutableScopeInstance,
+    journal,
+    now
+  )
   const checked = validateKernelState(authority, state)
   if (Result.isFailure(checked)) {
     return Result.fail(checked.failure)
@@ -12709,6 +14535,13 @@ export const acknowledgeTimerArm = (
   const validated = validateKernelState(authority, stateInput)
   if (Result.isFailure(validated)) {
     return Result.fail(validated.failure)
+  }
+  const admitted = ensureParentCloseIngress(
+    validated.success,
+    "Timer-arm acknowledgement"
+  )
+  if (Result.isFailure(admitted)) {
+    return Result.fail(admitted.failure)
   }
   const resolvedServices = resolveServices(
     services,
@@ -12880,6 +14713,13 @@ export const deliverMessage = (
   const validated = validateKernelState(authority, stateInput)
   if (Result.isFailure(validated)) {
     return Result.fail(validated.failure)
+  }
+  const admitted = ensureParentCloseIngress(
+    validated.success,
+    "Message delivery"
+  )
+  if (Result.isFailure(admitted)) {
+    return Result.fail(admitted.failure)
   }
   const resolvedServices = resolveServices(
     services,
@@ -13101,6 +14941,13 @@ export const observeDueTimer = (
   const validated = validateKernelState(authority, stateInput)
   if (Result.isFailure(validated)) {
     return Result.fail(validated.failure)
+  }
+  const admitted = ensureParentCloseIngress(
+    validated.success,
+    "Timer observation"
+  )
+  if (Result.isFailure(admitted)) {
+    return Result.fail(admitted.failure)
   }
   const resolvedServices = resolveServices(
     services,
@@ -13349,6 +15196,359 @@ export const replay = (
 }
 
 /**
+ * Commits one authoritative child-workflow fact into a waiting CallActivity.
+ *
+ * **Details**
+ *
+ * The child protocol reducer owns lifecycle legality, target contract
+ * matching, close-policy races, and event identity. The BPMN journal remains
+ * the single parent authority: this function neither starts nor polls a
+ * backend. A successful child consumes the CallActivity token and continues
+ * normal BPMN flow exactly once. Other terminal outcomes remain durable on
+ * the frame for the failure/close authority to resolve; they are never
+ * relabelled as BPMN Error, Cancel, or success.
+ *
+ * @category constructors
+ * @since 4.0.0
+ */
+export const applyChildEvent = (
+  kernel: CompiledKernel,
+  stateInput: unknown,
+  commandInput: unknown,
+  services: Services
+): Result.Result<TransitionBatch, Diagnostic.CompilationError> => {
+  const resolvedKernel = resolveKernel(kernel)
+  if (Result.isFailure(resolvedKernel)) {
+    return Result.fail(resolvedKernel.failure)
+  }
+  const authority = resolvedKernel.success
+  const command = BpmnCallActivityV3.validateApplyChildEventCommand(
+    commandInput
+  )
+  if (Result.isFailure(command)) {
+    return Result.fail(compilationError(error(
+      Codes.InvalidCommand,
+      "Invalid protocol-v3 CallActivity child-event command",
+      ["command"],
+      { issue: command.failure.message }
+    )))
+  }
+  const validated = validateKernelState(authority, stateInput)
+  if (Result.isFailure(validated)) {
+    return Result.fail(validated.failure)
+  }
+  const resolvedServices = resolveServices(
+    services,
+    latestStateTimestamp(validated.success)
+  )
+  if (Result.isFailure(resolvedServices)) {
+    return Result.fail(resolvedServices.failure)
+  }
+  const runtimeServices = resolvedServices.success
+  const durableState = validated.success
+  const durableFrame = durableState.callFrames.find((candidate) =>
+    candidate.callFrameId === command.success.callFrameId
+  )
+  if (durableFrame === undefined) {
+    return Result.fail(compilationError(error(
+      Codes.InvalidCommand,
+      `Unknown CallActivity frame '${command.success.callFrameId}'`,
+      ["command", "callFrameId"]
+    )))
+  }
+  const existing = durableFrame.childEvents.find((candidate) => candidate.eventId === command.success.event.eventId)
+  if (existing !== undefined) {
+    if (
+      !sameJson(existing, command.success.event) ||
+      (
+        command.success.backendLocator !== undefined &&
+        (
+          durableFrame.backendLocator === undefined ||
+          !sameJson(
+            durableFrame.backendLocator,
+            command.success.backendLocator
+          )
+        )
+      )
+    ) {
+      return Result.fail(compilationError(error(
+        Codes.InvalidCommand,
+        `Child event '${command.success.event.eventId}' conflicts with the committed CallActivity history`,
+        ["command", "event"]
+      )))
+    }
+    const replayed: Array<TransitionEvent> = []
+    recordEvent(replayed, {
+      _tag: "CallActivityChildEventReplayed",
+      callFrameId: durableFrame.callFrameId,
+      eventId: existing.eventId,
+      observedAt: runtimeServices.now
+    })
+    return Result.succeed({
+      state: durableState,
+      events: immutableEvents(replayed)
+    })
+  }
+  const acceptsLateRequestCancelFact = (
+    durableState.status === "failed" ||
+    durableState.status === "cancelled"
+  ) &&
+    durableFrame.parentCloseCommand?.payload._tag ===
+      "RequestChildCancellation" &&
+    durableFrame.parentCloseCommand.payload.closeAction ===
+      "RequestCancel"
+  if (
+    durableState.status !== "active" &&
+    durableState.status !== "failing" &&
+    durableState.status !== "cancelling" &&
+    !acceptsLateRequestCancelFact
+  ) {
+    return Result.fail(compilationError(error(
+      Codes.InvalidCommand,
+      `Terminal execution '${durableState.status}' cannot accept a new child event`,
+      ["state", "status"]
+    )))
+  }
+  if (
+    command.success.event.callId !== durableFrame.callFrameId ||
+    (
+      durableFrame.backendLocator !== undefined &&
+      command.success.backendLocator !== undefined &&
+      !sameJson(
+        durableFrame.backendLocator,
+        command.success.backendLocator
+      )
+    ) ||
+    (
+      command.success.event.payload._tag ===
+        "ChildStartAccepted" &&
+      durableFrame.backendLocator === undefined &&
+      command.success.backendLocator === undefined
+    )
+  ) {
+    return Result.fail(compilationError(error(
+      Codes.InvalidCommand,
+      `Child event '${command.success.event.eventId}' does not match frame '${durableFrame.callFrameId}' or its backend locator`,
+      ["command"]
+    )))
+  }
+
+  const state = directClone(durableState) as MutableState
+  const frame = state.callFrames.find((candidate) => candidate.callFrameId === command.success.callFrameId)!
+  frame.childEvents.push(directClone(command.success.event))
+  frame.updatedAt = runtimeServices.now
+  if (childEventTerminatesRelation(command.success.event)) {
+    frame.exitedAt = runtimeServices.now
+  }
+  if (
+    frame.backendLocator === undefined &&
+    command.success.backendLocator !== undefined
+  ) {
+    frame.backendLocator = directClone(
+      command.success.backendLocator
+    )
+  }
+  let folded = BpmnCallActivityV3.foldFrameHistory(frame)
+  if (Result.isFailure(folded)) {
+    return Result.fail(compilationError(error(
+      Codes.InvalidCommand,
+      `Child event '${command.success.event.eventId}' is illegal for CallActivity frame '${frame.callFrameId}'`,
+      ["command", "event"],
+      { issue: folded.failure.message }
+    )))
+  }
+  const journal: Array<TransitionEvent> = []
+  recordEvent(journal, {
+    _tag: "CallActivityChildEventCommitted",
+    callFrameId: frame.callFrameId,
+    event: command.success.event,
+    ...(command.success.backendLocator === undefined
+      ? undefined
+      : { backendLocator: command.success.backendLocator }),
+    committedAt: runtimeServices.now
+  })
+  if (
+    command.success.event.payload._tag ===
+      "ChildStartAccepted" &&
+    frame.parentCloseCommand !== undefined
+  ) {
+    const closeEvent = BpmnCallActivityV3.makeParentCloseEvent(
+      frame,
+      frame.parentCloseCommand,
+      runtimeServices.now
+    )
+    if (
+      Result.isFailure(closeEvent) ||
+      closeEvent.success === undefined
+    ) {
+      return Result.fail(compilationError(error(
+        Codes.InvalidKernelState,
+        `Accepted child start for closing CallActivity frame '${frame.callFrameId}' did not project its cancellation request`,
+        ["callFrames"],
+        {
+          issue: Result.isFailure(closeEvent)
+            ? closeEvent.failure.message
+            : "missing-cancellation-projection"
+        }
+      )))
+    }
+    frame.childEvents.push(directClone(closeEvent.success))
+    frame.updatedAt = runtimeServices.now
+    recordEvent(journal, {
+      _tag: "CallActivityChildEventCommitted",
+      callFrameId: frame.callFrameId,
+      event: closeEvent.success,
+      committedAt: runtimeServices.now
+    })
+    folded = BpmnCallActivityV3.foldFrameHistory(frame)
+    if (Result.isFailure(folded)) {
+      return Result.fail(compilationError(error(
+        Codes.InvalidKernelState,
+        `Closing CallActivity frame '${frame.callFrameId}' produced an invalid cancellation history`,
+        ["callFrames"],
+        { issue: folded.failure.message }
+      )))
+    }
+  }
+  const checkedFrame = BpmnCallActivityV3.validateFrame(frame)
+  if (Result.isFailure(checkedFrame)) {
+    return Result.fail(compilationError(error(
+      Codes.InvalidCommand,
+      `Child event '${command.success.event.eventId}' produced an invalid CallActivity frame`,
+      ["command", "event"],
+      { issue: checkedFrame.failure.message }
+    )))
+  }
+
+  if (
+    folded.success.phase._tag === "Succeeded" &&
+    state.status === "active" &&
+    frame.parentCloseCommand === undefined
+  ) {
+    const token = state.tokens.find((candidate) => candidate.tokenId === frame.ownerTokenId)
+    const scope = findScope(state, frame.scopeInstanceId)
+    const callActivity = authority.nodeById.get(
+      frame.callActivityNodeId
+    )
+    if (
+      token === undefined ||
+      token.status !== "active" ||
+      token.position._tag !== "AtNode" ||
+      token.position.nodeId !== frame.callActivityNodeId ||
+      scope === undefined ||
+      scope.status !== "active" ||
+      callActivity?._tag !== "CallActivity"
+    ) {
+      return Result.fail(compilationError(error(
+        Codes.InvalidKernelState,
+        `Successful CallActivity frame '${frame.callFrameId}' has no exact active BPMN wait`,
+        ["callFrames"]
+      )))
+    }
+    consumeToken(
+      token,
+      journal,
+      "call-activity-succeeded",
+      runtimeServices.now
+    )
+    const routed = routeActivityOutgoing(
+      authority,
+      runtimeServices,
+      state,
+      callActivity,
+      scope,
+      journal
+    )
+    if (Result.isFailure(routed)) {
+      return Result.fail(routed.failure)
+    }
+    const advanced = advanceMutable(
+      authority,
+      runtimeServices,
+      state,
+      journal
+    )
+    if (Result.isFailure(advanced)) {
+      return Result.fail(advanced.failure)
+    }
+  }
+  if (
+    state.status === "failing" ||
+    state.status === "cancelling"
+  ) {
+    const intent = state.parentCloseIntent
+    if (intent === undefined) {
+      return Result.fail(compilationError(error(
+        Codes.InvalidKernelState,
+        `Closing execution '${state.status}' has no parent close intent`,
+        ["parentCloseIntent"]
+      )))
+    }
+    const propagated = propagateParentCloseToCallFrames(
+      state,
+      intent.cause,
+      journal,
+      runtimeServices.now
+    )
+    if (Result.isFailure(propagated)) {
+      return Result.fail(propagated.failure)
+    }
+    if (propagated.success) {
+      if (intent._tag === "Failure") {
+        const sourceToken = state.tokens.find((candidate) => candidate.tokenId === intent.sourceTokenId)
+        if (sourceToken === undefined) {
+          return Result.fail(compilationError(error(
+            Codes.InvalidKernelState,
+            `Failure close intent references unknown token '${intent.sourceTokenId}'`,
+            ["parentCloseIntent", "sourceTokenId"]
+          )))
+        }
+        const finalized = finalizeExecutionFailure(
+          state,
+          sourceToken,
+          intent.taskNodeId,
+          intent.failureKind,
+          intent.errorRef,
+          journal,
+          runtimeServices.now
+        )
+        if (Result.isFailure(finalized)) {
+          return Result.fail(finalized.failure)
+        }
+      } else {
+        const record = state.operationalWithdrawal
+        const rootScope = state.scopeInstances.find((scope) =>
+          scope.scopeInstanceId === intent.rootScopeInstanceId &&
+          scope.parentScopeInstanceId === undefined
+        )
+        if (record === undefined || rootScope === undefined) {
+          return Result.fail(compilationError(error(
+            Codes.InvalidKernelState,
+            "Operational parent close intent lost its withdrawal authority",
+            ["parentCloseIntent"]
+          )))
+        }
+        finalizeOperationalWithdrawal(
+          state,
+          record.command,
+          rootScope,
+          journal,
+          runtimeServices.now
+        )
+      }
+    }
+  }
+  const checked = validateKernelState(authority, state)
+  if (Result.isFailure(checked)) {
+    return Result.fail(checked.failure)
+  }
+  return Result.succeed({
+    state: checked.success,
+    events: immutableEvents(journal)
+  })
+}
+
+/**
  * Completes one waiting task token and advances the execution to stability.
  *
  * **Details**
@@ -13394,6 +15594,13 @@ export const completeTask = (
   if (Result.isFailure(validated)) {
     return Result.fail(validated.failure)
   }
+  const admitted = ensureParentCloseIngress(
+    validated.success,
+    "Task completion"
+  )
+  if (Result.isFailure(admitted)) {
+    return Result.fail(admitted.failure)
+  }
   const resolvedServices = resolveServices(services, latestStateTimestamp(validated.success))
   if (Result.isFailure(resolvedServices)) {
     return Result.fail(resolvedServices.failure)
@@ -13438,8 +15645,9 @@ export const completeTask = (
     token.status === "withdrawn" &&
     validated.success.status === "cancelled" &&
     validated.success.operationalWithdrawal !== undefined &&
+    validated.success.completedAt !== undefined &&
     token.consumedAt ===
-      validated.success.operationalWithdrawal.requestedAt
+      validated.success.completedAt
   ) {
     recordEvent(journal, {
       _tag: "TaskCompletionFenced",
@@ -13574,6 +15782,13 @@ export const resolveTask = (
   if (Result.isFailure(validated)) {
     return Result.fail(validated.failure)
   }
+  const admitted = ensureParentCloseIngress(
+    validated.success,
+    "Task resolution"
+  )
+  if (Result.isFailure(admitted)) {
+    return Result.fail(admitted.failure)
+  }
   const resolvedServices = resolveServices(
     services,
     latestStateTimestamp(validated.success)
@@ -13640,8 +15855,9 @@ export const resolveTask = (
     token.status === "withdrawn" &&
     validated.success.status === "cancelled" &&
     validated.success.operationalWithdrawal !== undefined &&
+    validated.success.completedAt !== undefined &&
     token.consumedAt ===
-      validated.success.operationalWithdrawal.requestedAt
+      validated.success.completedAt
   ) {
     recordEvent(journal, {
       _tag: "TaskOutcomeFenced",
@@ -13731,7 +15947,7 @@ export const resolveTask = (
       ? undefined
       : matchingBoundaryError(authority, node.id, errorRef)
     if (boundary === undefined) {
-      const failed = failExecutionFromTask(
+      const failed = beginExecutionFailureFromTask(
         state,
         token,
         node.id,

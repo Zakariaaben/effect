@@ -33,7 +33,8 @@ const Operation = Schema.Literals([
   "resolveTask",
   "deliverMessage",
   "acknowledgeTimerArm",
-  "observeDueTimer"
+  "observeDueTimer",
+  "applyChildEvent"
 ])
 
 /**
@@ -84,6 +85,9 @@ const RuntimeErrorFields = Schema.Struct({
   loopActivation: Schema.optionalKey(ProtocolV2Wire.NonNegativeSafeInt),
   loopPhase: Schema.optionalKey(Schema.Literals(["before", "after"])),
   loopIteration: Schema.optionalKey(ProtocolV2Wire.NonNegativeSafeInt),
+  callActivityNodeId: Schema.optionalKey(Schema.NonEmptyString),
+  callFrameId: Schema.optionalKey(Schema.NonEmptyString),
+  callActivityOwnerTokenId: Schema.optionalKey(Schema.NonEmptyString),
   multiInstanceActivityId: Schema.optionalKey(Schema.NonEmptyString),
   multiInstanceGroupId: Schema.optionalKey(Schema.NonEmptyString),
   multiInstanceGroupActivation: Schema.optionalKey(ProtocolV2Wire.NonNegativeSafeInt),
@@ -113,6 +117,14 @@ const RuntimeErrorFields = Schema.Struct({
       fields.loopIteration
     ]
     const loopCoordinateCount = loopCoordinates.filter(
+      (coordinate) => coordinate !== undefined
+    ).length
+    const callActivityCoordinates = [
+      fields.callActivityNodeId,
+      fields.callFrameId,
+      fields.callActivityOwnerTokenId
+    ]
+    const callActivityCoordinateCount = callActivityCoordinates.filter(
       (coordinate) => coordinate !== undefined
     ).length
     const multiInstanceBaseCoordinates = [
@@ -157,6 +169,7 @@ const RuntimeErrorFields = Schema.Struct({
     const hasSequenceFlow = fields.sequenceFlowId !== undefined
     const decisionKinds = Number(hasSequenceFlow) +
       Number(loopCoordinateCount > 0) +
+      Number(callActivityCoordinateCount > 0) +
       Number(
         multiInstanceBaseCount > 0 ||
           hasMultiInstanceDataInputRef ||
@@ -175,6 +188,10 @@ const RuntimeErrorFields = Schema.Struct({
     }
     if (loopCoordinateCount > 0) {
       return loopCoordinateCount === loopCoordinates.length
+    }
+    if (callActivityCoordinateCount > 0) {
+      return callActivityCoordinateCount ===
+        callActivityCoordinates.length
     }
     if (
       multiInstanceBaseCount > 0 ||
@@ -206,7 +223,7 @@ const RuntimeErrorFields = Schema.Struct({
     return true
   }, {
     expected:
-      "no decision coordinates, one sequenceFlowId, one complete standard-loop tuple, one complete multi-instance cardinality tuple, one complete multi-instance collection tuple, one complete multi-instance completion tuple, one complete Message-correlation tuple, or one complete Timer-expression tuple"
+      "no decision coordinates, one sequenceFlowId, one complete standard-loop tuple, one complete CallActivity-input tuple, one complete multi-instance cardinality tuple, one complete multi-instance collection tuple, one complete multi-instance completion tuple, one complete Message-correlation tuple, or one complete Timer-expression tuple"
   })
 )
 
@@ -241,7 +258,7 @@ export const Requirements = Object.freeze(
     evaluatorRegistry: "trusted-exact-registry",
     evaluatorBindingResolution: "complete-tuple",
     operationReplay: "same-input-and-time",
-    decisionIdentityVersion: 4,
+    decisionIdentityVersion: 5,
     evaluatorTimeout: "binding-timeout-millis",
     evaluatorOutput: "strict-json-result",
     commitVisibility: "final-batch-only"
@@ -302,6 +319,12 @@ type DecisionCoordinates =
     readonly numberOfActiveInstances: number
     readonly numberOfCompletedInstances: number
     readonly numberOfTerminatedInstances: number
+  }
+  | {
+    readonly _tag: "CallActivityInput"
+    readonly callActivityNodeId: string
+    readonly callFrameId: string
+    readonly ownerTokenId: string
   }
   | {
     readonly _tag: "MessageCorrelation"
@@ -386,6 +409,12 @@ const runtimeError = (
         multiInstanceNumberOfCompletedInstances: coordinates.numberOfCompletedInstances,
         multiInstanceNumberOfTerminatedInstances: coordinates.numberOfTerminatedInstances
       }
+      : coordinates._tag === "CallActivityInput"
+      ? {
+        callActivityNodeId: coordinates.callActivityNodeId,
+        callFrameId: coordinates.callFrameId,
+        callActivityOwnerTokenId: coordinates.ownerTokenId
+      }
       : coordinates._tag === "MessageCorrelation"
       ? {
         catchEventNodeId: coordinates.catchEventNodeId,
@@ -453,6 +482,13 @@ const decisionCoordinates = (
         numberOfCompletedInstances: context.runtime.numberOfCompletedInstances,
         numberOfTerminatedInstances: context.runtime.numberOfTerminatedInstances
       }
+    case "CallActivityInput":
+      return {
+        _tag: context._tag,
+        callActivityNodeId: context.callActivity.id,
+        callFrameId: context.callFrameId,
+        ownerTokenId: context.ownerTokenId
+      }
     case "MessageCorrelation":
       return {
         _tag: context._tag,
@@ -515,6 +551,12 @@ const evaluationFailure = (
       multiInstanceNumberOfCompletedInstances: coordinates.numberOfCompletedInstances,
       multiInstanceNumberOfTerminatedInstances: coordinates.numberOfTerminatedInstances
     }
+    : coordinates._tag === "CallActivityInput"
+    ? {
+      callActivityNodeId: coordinates.callActivityNodeId,
+      callFrameId: coordinates.callFrameId,
+      callActivityOwnerTokenId: coordinates.ownerTokenId
+    }
     : coordinates._tag === "MessageCorrelation"
     ? {
       catchEventNodeId: coordinates.catchEventNodeId,
@@ -542,6 +584,8 @@ const evaluationFailure = (
     ? `Effectful evaluation is required for multi-instance collection on activity '${coordinates.activityId}'`
     : coordinates._tag === "MultiInstanceCompletionCondition"
     ? `Effectful evaluation is required for multi-instance completion condition on activity '${coordinates.activityId}'`
+    : coordinates._tag === "CallActivityInput"
+    ? `Effectful evaluation is required for encoded input on CallActivity '${coordinates.callActivityNodeId}'`
     : coordinates._tag === "MessageCorrelation"
     ? `Effectful evaluation is required for Message correlation on catch event '${coordinates.catchEventNodeId}'`
     : `Effectful evaluation is required for Timer expression on catch event '${coordinates.catchEventNodeId}'`
@@ -950,6 +994,40 @@ export const observeDueTimer = (
       kernel,
       (evaluateExpression) =>
         BpmnKernel.observeDueTimer(
+          kernel,
+          state,
+          command,
+          runtimeServices(now, evaluateExpression)
+        )
+    )
+  })
+
+/**
+ * Commits one child-workflow fact with exact Effect-native expression
+ * evaluation for any BPMN routing opened by a successful child.
+ *
+ * @category constructors
+ * @since 4.0.0
+ */
+export const applyChildEvent = (
+  kernel: BpmnKernel.CompiledKernel,
+  stateInput: unknown,
+  commandInput: unknown,
+  services: BpmnKernel.Services
+): Effect.Effect<
+  BpmnKernel.TransitionBatch,
+  Diagnostic.CompilationError | RuntimeError,
+  BpmnExpressionEvaluator.EvaluatorRegistry
+> =>
+  Effect.suspend(() => {
+    const now = captureNow(services)
+    const state = snapshotInput(stateInput)
+    const command = snapshotInput(commandInput)
+    return drive(
+      "applyChildEvent",
+      kernel,
+      (evaluateExpression) =>
+        BpmnKernel.applyChildEvent(
           kernel,
           state,
           command,

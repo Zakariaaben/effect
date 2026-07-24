@@ -53,9 +53,10 @@ Today the package provides:
 - a durable BPMN execution-state foundation with token positions, scope and
   invocation identity, gateway/loop/multi-instance/call frames, subscriptions,
   timers, work items, compensation registrations, and cancellation regions,
-  whose state version `8` carries a version `6` executable fingerprint
-  reference, exact protocol-v3 task-resolution records, atomic catch-wait
-  groups, and a global Message-delivery ledger;
+  whose state version `9` carries a version `7` executable fingerprint
+  reference, exact protocol-v3 task and CallActivity records, atomic catch-wait
+  groups, a global Message-delivery ledger, and durable `failing`/`cancelling`
+  parent-close barriers;
 - a normalized BPMN data/IO/interface slice and BPMNDI/DI/DC representation
   with aggregate reference, geometry, and semantic-kind validation;
 - a resource-bounded namespace-aware XML infoset plus strict named profile
@@ -187,14 +188,17 @@ Today the package provides:
   end-to-end scenarios execute conditional/default parallel/subprocess,
   bounded Standard Loop, fixed Multi-Instance, and one bounded Message/Timer
   gateway equality race through journal replay, canonical export, re-import,
-  recompilation, and same-state replay. Standalone Message/Timer catch shapes
-  have compile and canonical round-trip evidence; this does not claim each
-  shape has a separate end-to-end scenario;
+  recompilation, and same-state replay. Separate kernel scenarios execute
+  portable CallActivity opening, child success, parent close, delayed child
+  facts, and exact replay. Standalone Message/Timer catch shapes have compile
+  and canonical round-trip evidence; this does not claim each shape has a
+  separate end-to-end scenario;
 - Effectful BPMN kernel preparation that SHA-256 fingerprints the complete
   normalized semantic model, selected root, kernel semantics, limits, mapping
-  profile, and exact evaluator-build manifest; kernel semantic version `7`,
-  state version `8`, executable fingerprint version `6`, and transition-journal
-  version `7` reject cross-model or cross-profile substitution before
+  profile, exact evaluator-build manifest, and compiled CallActivity bindings;
+  kernel semantic version `8`, state version `9`, executable fingerprint
+  version `7`, and transition-journal version `8` reject cross-model or
+  cross-profile substitution before
   interpreting a marking;
 - strict build-pinned BPMN expression evaluator definitions and an Effect
   registry that permits old and new builds to coexist but performs no
@@ -490,10 +494,15 @@ external effect, remote service, or human action physically stopped, and it
 does not undo a committed effect. This profile is only bounded partial WCP20
 Cancel Case evidence. It is not BPMN `CancelEventDefinition`, a Transaction
 Cancel, a Terminate End Event, compensation, rollback, or WCP19 targeted task
-cancellation. `CallActivity` propagation remains excluded while executable
-call frames are unsupported, as do work-item/human-task withdrawal, targeted
-scope withdrawal, unrelated or merely message-correlated process instances,
-and any physical-stop guarantee. Consequently:
+cancellation. Executable CallActivity frames participate in the same
+parent-close transition: a parent failure or operational withdrawal derives
+the target-pinned close command, commits it with the frame, and delays the
+parent's failed or cancelled terminal fact until every `CancelAndWait` barrier
+has a terminal child projection. `RequestCancel` is released after durable
+cancellation intent and `Abandon` detaches without claiming that the child
+stopped. Work-item/human-task withdrawal, targeted scope withdrawal, unrelated
+or merely message-correlated process instances, and any physical-stop guarantee
+remain excluded. Consequently:
 
 `BPMN Process Execution Conformance: not claimed`.
 
@@ -519,16 +528,28 @@ interruption when selected. Workflow Builder records portable BPMN group
 semantics and exact native occurrences; it does not reimplement or require
 those backend capabilities.
 
-A BPMN `callActivity` can be represented and round-tripped. Its protocol-v3
-relation and replay semantics are modeled, but executable admission still
-rejects it until source QNames resolve through a trusted
-compiler-semantic-version-2 artifact family and a single transactional
-parent/child authority is installed.
-The compiler-v2 document, digest primitives, and static-DAG artifact verifier
-establish exact content pins but do not yet constitute that execution
-authority. Trusted executable-catalog attestation, persistent
-content-addressed storage, atomic run binding, and a transactional parent/child
-authority are still required.
+A BPMN `callActivity` is executable in the bounded `PortableChildProcess/1`
+profile. Compilation binds the source `calledElement` expanded QName, the exact
+protocol-v3 child target pin (including artifact, contract, deployment,
+lineage, recursion, and close-policy authority), and one explicit encoded-input
+expression. The expression must produce a bounded protocol-v3 `EncodedPayload`;
+the kernel neither guesses a codec nor infers a BPMN data association. Opening
+the wait records the evaluated input, canonical `ChildScheduled` fact, durable
+call frame, and canonical `ScheduleChild` outbox command. A trusted authority
+feeds child facts back through `applyChildEvent`; event identity, relation,
+target contracts, backend locator, and lifecycle are validated and replayed
+without polling or re-running the child. A successful child consumes the
+waiting token and follows normal outgoing flow exactly once. Other terminal
+outcomes remain durable close/failure facts rather than being relabelled as
+BPMN Error, Cancel, or success.
+
+This is portable parent/child semantics, not a backend implementation. The
+package still supplies no persistent store, scheduler, outbox relay, child-run
+starter, inbox/transport, or cluster/failover authority. A host must atomically
+coordinate the committed parent transition and egress command, then deliver
+authoritative child events. The optional native Effect Workflow adapter remains
+pending for this CallActivity lifecycle, and the package makes no full BPMN
+Process Execution Conformance claim.
 
 See the runnable [typed DAG example](./examples/basic.ts),
 [BPMN XML execution example](./examples/bpmn-executable.ts), and detailed

@@ -62,6 +62,11 @@ export * as BpmnActivityV3 from "./BpmnActivityV3.ts"
 /**
  * @since 4.0.0
  */
+export * as BpmnCallActivityV3 from "./BpmnCallActivityV3.ts"
+
+/**
+ * @since 4.0.0
+ */
 export * as BpmnConformance from "./BpmnConformance.ts"
 
 /**

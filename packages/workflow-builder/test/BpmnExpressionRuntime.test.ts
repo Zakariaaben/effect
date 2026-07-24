@@ -523,6 +523,13 @@ describe("BpmnExpressionRuntime", () => {
     })))
     assert.isTrue(Result.isSuccess(decode({
       ...base,
+      operation: "applyChildEvent",
+      callActivityNodeId: "call-child",
+      callFrameId: "child-call:1",
+      callActivityOwnerTokenId: "token-call"
+    })))
+    assert.isTrue(Result.isSuccess(decode({
+      ...base,
       multiInstanceActivityId: "multi",
       multiInstanceGroupId: "multi-instance-group:1",
       multiInstanceGroupActivation: 0
@@ -580,6 +587,18 @@ describe("BpmnExpressionRuntime", () => {
       ...base,
       loopActivityId: "loop",
       loopFrameId: "loop-frame:1"
+    })))
+    assert.isTrue(Result.isFailure(decode({
+      ...base,
+      callActivityNodeId: "call-child",
+      callFrameId: "child-call:1"
+    })))
+    assert.isTrue(Result.isFailure(decode({
+      ...base,
+      sequenceFlowId: "flow-one",
+      callActivityNodeId: "call-child",
+      callFrameId: "child-call:1",
+      callActivityOwnerTokenId: "token-call"
     })))
     assert.isTrue(Result.isFailure(decode({
       ...base,

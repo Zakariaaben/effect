@@ -622,6 +622,7 @@ describe("BpmnKernel OperationalInstanceWithdrawal/1", () => {
     assert.deepStrictEqual(eventTags(batch.events), [
       "OperationalWithdrawalRequested",
       "OperationalWithdrawalSchedulingFenced",
+      "ParentCloseIntentCommitted",
       "TokenWithdrawn",
       "OperationalWithdrawalScopeClosed",
       "OperationalWithdrawalCompleted"

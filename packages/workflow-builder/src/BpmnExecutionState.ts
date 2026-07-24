@@ -15,10 +15,12 @@
 import * as Result from "effect/Result"
 import * as Schema from "effect/Schema"
 import * as BpmnActivityV3 from "./BpmnActivityV3.ts"
+import * as BpmnCallActivityV3 from "./BpmnCallActivityV3.ts"
 import * as BpmnEventV3 from "./BpmnEventV3.ts"
 import * as BpmnModel from "./BpmnModel.ts"
 import * as BpmnOperationalV3 from "./BpmnOperationalV3.ts"
 import * as BpmnTime from "./BpmnTime.ts"
+import * as ChildWorkflowProtocolV3 from "./ChildWorkflowProtocolV3.ts"
 import * as Diagnostic from "./Diagnostic.ts"
 import * as Json from "./internal/json.ts"
 import * as ProtocolV2Wire from "./ProtocolV2Wire.ts"
@@ -106,7 +108,7 @@ const codeError = (
  * @category constants
  * @since 4.0.0
  */
-export const BpmnExecutionStateVersion = 8 as const
+export const BpmnExecutionStateVersion = 9 as const
 
 /**
  * Version of the executable BPMN fingerprint preimage.
@@ -114,7 +116,7 @@ export const BpmnExecutionStateVersion = 8 as const
  * @category constants
  * @since 4.0.0
  */
-export const BpmnExecutableFingerprintVersion = 6 as const
+export const BpmnExecutableFingerprintVersion = 7 as const
 
 /**
  * Version of the token-kernel semantics committed by an execution.
@@ -122,7 +124,7 @@ export const BpmnExecutableFingerprintVersion = 6 as const
  * @category constants
  * @since 4.0.0
  */
-export const BpmnKernelSemanticVersion = "7" as const
+export const BpmnKernelSemanticVersion = "8" as const
 
 /**
  * Execution snapshot identity pinned to one BPMN semantic model version.
@@ -511,20 +513,7 @@ export type MultiInstanceGroup = Schema.Schema.Type<typeof MultiInstanceGroup>
  * @category schemas
  * @since 4.0.0
  */
-export const CallFrame = Schema.Struct({
-  callFrameId: Identifier,
-  callActivityId: Identifier,
-  processId: Identifier,
-  parentScopeInstanceId: Identifier,
-  childExecutionId: Identifier,
-  childProcessId: Identifier,
-  status: Schema.Literals(["active", "completed", "cancelled", "failed"]),
-  enteredAt: ProtocolV2Wire.Timestamp,
-  exitedAt: Schema.optionalKey(ProtocolV2Wire.Timestamp)
-}).annotate({
-  identifier: "WorkflowBpmnCallFrame",
-  parseOptions: strictParseOptions
-})
+export const CallFrame = BpmnCallActivityV3.CallFrame
 
 /**
  * The decoded type of {@link CallFrame}.
@@ -532,7 +521,7 @@ export const CallFrame = Schema.Struct({
  * @category models
  * @since 4.0.0
  */
-export type CallFrame = Schema.Schema.Type<typeof CallFrame>
+export type CallFrame = BpmnCallActivityV3.CallFrame
 
 /**
  * Exact winner of one atomic catch-event wait group.
@@ -858,6 +847,80 @@ export const CancellationRegion = Schema.Struct({
 export type CancellationRegion = Schema.Schema.Type<typeof CancellationRegion>
 
 /**
+ * Format version of a durable parent-close intent.
+ *
+ * @category constants
+ * @since 4.0.0
+ */
+export const ParentCloseIntentVersion = 1 as const
+
+/**
+ * Durable failure intent retained while synchronous child cancellation waits.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const FailureCloseIntent = Schema.TaggedStruct("Failure", {
+  intentVersion: Schema.Literal(ParentCloseIntentVersion),
+  cause: ChildWorkflowProtocolV3.ParentFailure,
+  sourceTokenId: Identifier,
+  taskNodeId: Identifier,
+  failureKind: Schema.Literals([
+    "UnmappedBusinessFailure",
+    "UncaughtBpmnError"
+  ]),
+  errorRef: Schema.optionalKey(Identifier),
+  requestedAt: ProtocolV2Wire.Timestamp
+}).annotate({
+  identifier: "WorkflowBpmnFailureCloseIntent",
+  parseOptions: strictParseOptions
+})
+
+/**
+ * Durable operational-withdrawal intent retained while children close.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const OperationalWithdrawalCloseIntent = Schema.TaggedStruct(
+  "OperationalWithdrawal",
+  {
+    intentVersion: Schema.Literal(ParentCloseIntentVersion),
+    cause: ChildWorkflowProtocolV3.ParentCancellation,
+    requestId: Identifier,
+    rootScopeInstanceId: Identifier,
+    requestedAt: ProtocolV2Wire.Timestamp
+  }
+).annotate({
+  identifier: "WorkflowBpmnOperationalWithdrawalCloseIntent",
+  parseOptions: strictParseOptions
+})
+
+/**
+ * Exact parent close that fences normal scheduling and may wait for children.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const ParentCloseIntent = Schema.Union([
+  FailureCloseIntent,
+  OperationalWithdrawalCloseIntent
+]).annotate({
+  identifier: "WorkflowBpmnParentCloseIntent",
+  parseOptions: strictParseOptions
+})
+
+/**
+ * The decoded type of {@link ParentCloseIntent}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type ParentCloseIntent = Schema.Schema.Type<
+  typeof ParentCloseIntent
+>
+
+/**
  * Durable BPMN execution-state snapshot.
  *
  * @category schemas
@@ -867,13 +930,25 @@ export const BpmnExecutionState = Schema.Struct({
   stateKind: Schema.Literal("BpmnExecutionState"),
   stateVersion: Schema.Literal(BpmnExecutionStateVersion),
   model: ModelReference,
-  status: Schema.Literals(["active", "completed", "failed", "cancelled", "terminated"]),
+  status: Schema.Literals([
+    "active",
+    "failing",
+    "cancelling",
+    "completed",
+    "failed",
+    "cancelled",
+    "terminated"
+  ]),
   startedAt: ProtocolV2Wire.Timestamp,
   input: Schema.Json,
+  executionContext: Schema.optionalKey(
+    BpmnCallActivityV3.ExecutionContext
+  ),
   completedAt: Schema.optionalKey(ProtocolV2Wire.Timestamp),
   operationalWithdrawal: Schema.optionalKey(
     BpmnOperationalV3.OperationalInstanceWithdrawalRecord
   ),
+  parentCloseIntent: Schema.optionalKey(ParentCloseIntent),
   extensionElements: Schema.Array(BpmnModel.ExtensionElement),
   scopeInstances: Schema.Array(ScopeInstance),
   tokens: Schema.Array(Token),
@@ -1085,14 +1160,21 @@ export const validate = (
       ["scopeInstances"]
     ))
   }
-  if (state.status === "active" && state.completedAt !== undefined) {
+  const isClosing = state.status === "failing" ||
+    state.status === "cancelling"
+  const isTerminal = state.status !== "active" &&
+    !isClosing
+  if (
+    (state.status === "active" || isClosing) &&
+    state.completedAt !== undefined
+  ) {
     diagnostics.push(codeError(
       Codes.InvalidState,
-      "Active BPMN execution state cannot record completedAt",
+      `Non-terminal BPMN execution state '${state.status}' cannot record completedAt`,
       ["completedAt"]
     ))
   }
-  if (state.status !== "active" && state.completedAt === undefined) {
+  if (isTerminal && state.completedAt === undefined) {
     diagnostics.push(codeError(
       Codes.InvalidState,
       `Terminal BPMN execution state '${state.status}' must record completedAt`,
@@ -1107,10 +1189,14 @@ export const validate = (
     ))
   }
   const rootScope = rootScopes.length === 1 ? rootScopes[0] : undefined
-  if (state.status === "active" && rootScope !== undefined && rootScope.status !== "active") {
+  if (
+    (state.status === "active" || isClosing) &&
+    rootScope !== undefined &&
+    rootScope.status !== "active"
+  ) {
     diagnostics.push(codeError(
       Codes.InvalidState,
-      "An active BPMN execution requires an active root scope",
+      `A non-terminal BPMN execution '${state.status}' requires an active root scope`,
       ["scopeInstances"]
     ))
   }
@@ -1137,23 +1223,90 @@ export const validate = (
   }
   if (state.status === "cancelled") {
     const withdrawal = state.operationalWithdrawal
+    const intent = state.parentCloseIntent
     if (
       withdrawal === undefined ||
+      intent?._tag !== "OperationalWithdrawal" ||
       rootScope === undefined ||
       withdrawal.command.rootScopeInstanceId !== rootScope.scopeInstanceId ||
-      withdrawal.requestedAt !== state.completedAt
+      withdrawal.command.requestId !== intent.requestId ||
+      withdrawal.requestedAt !== intent.requestedAt ||
+      intent.cause.parentCauseEventId !== intent.requestId ||
+      state.completedAt === undefined ||
+      state.completedAt < intent.requestedAt
     ) {
       diagnostics.push(codeError(
         Codes.InvalidState,
-        "A cancelled BPMN execution requires exact operational-withdrawal evidence for its root scope and terminal timestamp",
+        "A cancelled BPMN execution requires exact operational-withdrawal intent and terminal evidence",
+        ["operationalWithdrawal"]
+      ))
+    }
+  } else if (state.status === "cancelling") {
+    const withdrawal = state.operationalWithdrawal
+    const intent = state.parentCloseIntent
+    if (
+      withdrawal === undefined ||
+      intent?._tag !== "OperationalWithdrawal" ||
+      rootScope === undefined ||
+      withdrawal.command.rootScopeInstanceId !== rootScope.scopeInstanceId ||
+      withdrawal.command.requestId !== intent.requestId ||
+      withdrawal.requestedAt !== intent.requestedAt ||
+      intent.cause.parentCauseEventId !== intent.requestId
+    ) {
+      diagnostics.push(codeError(
+        Codes.InvalidState,
+        "A cancelling BPMN execution requires exact operational-withdrawal intent",
         ["operationalWithdrawal"]
       ))
     }
   } else if (state.operationalWithdrawal !== undefined) {
     diagnostics.push(codeError(
       Codes.InvalidState,
-      "Only an operationally withdrawn BPMN execution may retain operational-withdrawal evidence",
+      "Only a cancelling or cancelled BPMN execution may retain operational-withdrawal evidence",
       ["operationalWithdrawal"]
+    ))
+  }
+  if (
+    (state.status === "failing" || state.status === "failed") &&
+    state.parentCloseIntent?._tag !== "Failure"
+  ) {
+    diagnostics.push(codeError(
+      Codes.InvalidState,
+      `A ${state.status} BPMN execution requires an exact failure close intent`,
+      ["parentCloseIntent"]
+    ))
+  } else if (
+    (state.status === "cancelling" ||
+      state.status === "cancelled") &&
+    state.parentCloseIntent?._tag !== "OperationalWithdrawal"
+  ) {
+    diagnostics.push(codeError(
+      Codes.InvalidState,
+      `A ${state.status} BPMN execution requires an exact operational close intent`,
+      ["parentCloseIntent"]
+    ))
+  } else if (
+    (
+      state.status === "active" ||
+      state.status === "completed" ||
+      state.status === "terminated"
+    ) &&
+    state.parentCloseIntent !== undefined
+  ) {
+    diagnostics.push(codeError(
+      Codes.InvalidState,
+      `Execution status '${state.status}' cannot retain a parent close intent`,
+      ["parentCloseIntent"]
+    ))
+  }
+  if (
+    state.parentCloseIntent !== undefined &&
+    state.parentCloseIntent.requestedAt < state.startedAt
+  ) {
+    diagnostics.push(codeError(
+      Codes.InvalidState,
+      "Parent close intent cannot precede execution start",
+      ["parentCloseIntent", "requestedAt"]
     ))
   }
 
@@ -1734,6 +1887,25 @@ export const validate = (
         Codes.InvalidActivityResolution,
         `Activity resolution for token '${resolution.tokenId}' predates its task wait`,
         [...path, "resolvedAt"]
+      ))
+    }
+  }
+  if (state.parentCloseIntent?._tag === "Failure") {
+    const intent = state.parentCloseIntent
+    const resolution = state.activityResolutions.find((candidate) =>
+      candidate.tokenId === intent.sourceTokenId &&
+      candidate.taskNodeId === intent.taskNodeId
+    )
+    if (
+      resolution?.outcome._tag !== "BusinessFailed" ||
+      resolution.resolvedAt !== intent.requestedAt ||
+      resolution.outcome.failedActivityDigest !==
+        intent.cause.parentCauseEventId
+    ) {
+      diagnostics.push(codeError(
+        Codes.InvalidState,
+        "Failure close intent does not match one exact durable task failure",
+        ["parentCloseIntent"]
       ))
     }
   }
@@ -2755,33 +2927,187 @@ export const validate = (
   for (let index = 0; index < state.callFrames.length; index++) {
     const frame = state.callFrames[index]!
     registerId(seenStateIds, diagnostics, frame.callFrameId, ["callFrames", index, "callFrameId"])
-    const node = nodeById.get(frame.callActivityId)
+    const framePath = ["callFrames", index] as const
+    const validatedFrame = BpmnCallActivityV3.validateFrame(frame)
+    const foldedFrame = BpmnCallActivityV3.foldFrame(frame)
+    if (Result.isFailure(validatedFrame) || Result.isFailure(foldedFrame)) {
+      diagnostics.push(codeError(
+        Codes.InvalidCallFrame,
+        `Call frame '${frame.callFrameId}' has an invalid child relation history`,
+        framePath,
+        {
+          issue: Result.isFailure(validatedFrame)
+            ? validatedFrame.failure.message
+            : Result.isFailure(foldedFrame)
+            ? foldedFrame.failure.message
+            : "invalid-frame"
+        }
+      ))
+      continue
+    }
+    const child = foldedFrame.success
+    const relation = child.relation
+    const node = nodeById.get(frame.callActivityNodeId)
     if (node === undefined) {
       diagnostics.push(codeError(
         Codes.UnknownCallActivityRef,
-        `Call frame '${frame.callFrameId}' references unknown call activity '${frame.callActivityId}'`,
-        ["callFrames", index, "callActivityId"]
+        `Call frame '${frame.callFrameId}' references unknown call activity '${frame.callActivityNodeId}'`,
+        [...framePath, "callActivityNodeId"]
       ))
     } else if (node._tag !== "CallActivity") {
       diagnostics.push(codeError(
         Codes.InvalidCallFrame,
         `Call frame '${frame.callFrameId}' must reference a call activity`,
-        ["callFrames", index, "callActivityId"]
+        [...framePath, "callActivityNodeId"]
       ))
-    }
-    if (!scopeInstances.has(frame.parentScopeInstanceId)) {
-      diagnostics.push(codeError(
-        Codes.UnknownParentScopeInstanceRef,
-        `Call frame '${frame.callFrameId}' references unknown parent scope instance '${frame.parentScopeInstanceId}'`,
-        ["callFrames", index, "parentScopeInstanceId"]
-      ))
-    }
-    if (!processIds.has(frame.childProcessId)) {
+    } else if (node.processId !== frame.processId) {
       diagnostics.push(codeError(
         Codes.InvalidCallFrame,
-        `Call frame '${frame.callFrameId}' references unknown child process '${frame.childProcessId}'`,
-        ["callFrames", index, "childProcessId"]
+        `Call frame '${frame.callFrameId}' process does not match its CallActivity`,
+        [...framePath, "processId"]
       ))
+    }
+    const scope = scopeInstances.get(frame.scopeInstanceId)
+    if (scope === undefined) {
+      diagnostics.push(codeError(
+        Codes.UnknownParentScopeInstanceRef,
+        `Call frame '${frame.callFrameId}' references unknown owning scope '${frame.scopeInstanceId}'`,
+        [...framePath, "scopeInstanceId"]
+      ))
+    } else if (
+      scope.processId !== frame.processId ||
+      node?._tag === "CallActivity" &&
+        scope.definitionId !== node.parentScopeId
+    ) {
+      diagnostics.push(codeError(
+        Codes.InvalidCallFrame,
+        `Call frame '${frame.callFrameId}' does not belong to the CallActivity owning scope`,
+        [...framePath, "scopeInstanceId"]
+      ))
+    }
+    const ownerToken = tokens.get(frame.ownerTokenId)
+    if (
+      ownerToken === undefined ||
+      ownerToken.processId !== frame.processId ||
+      ownerToken.scopeInstanceId !== frame.scopeInstanceId ||
+      ownerToken.position._tag !== "AtNode" ||
+      ownerToken.position.nodeId !== frame.callActivityNodeId
+    ) {
+      diagnostics.push(codeError(
+        Codes.InvalidCallFrame,
+        `Call frame '${frame.callFrameId}' has no exact owner token at its CallActivity`,
+        [...framePath, "ownerTokenId"]
+      ))
+    } else if (
+      state.status === "cancelled" ||
+        state.status === "failed"
+        ? ownerToken.status !== "withdrawn"
+        : child.phase._tag === "Succeeded"
+        ? ownerToken.status !== "consumed"
+        : ownerToken.status !== "active"
+    ) {
+      diagnostics.push(codeError(
+        Codes.InvalidCallFrame,
+        `Call frame '${frame.callFrameId}' owner token status does not match child phase '${child.phase._tag}'`,
+        [...framePath, "ownerTokenId"]
+      ))
+    }
+    if (
+      frame.callFrameId !== relation.parent.callId ||
+      frame.callActivityNodeId !== relation.parent.nodeId ||
+      frame.ownerTokenId !== relation.parent.nodeInstanceId
+    ) {
+      diagnostics.push(codeError(
+        Codes.InvalidCallFrame,
+        `Call frame '${frame.callFrameId}' does not match its canonical parent-child relation`,
+        framePath
+      ))
+    }
+    const executionContext = state.executionContext
+    if (
+      executionContext === undefined ||
+      executionContext.tenantId !== relation.parent.tenantId ||
+      executionContext.runId !== relation.parent.parentRunId ||
+      executionContext.rootRunId !== relation.parent.rootRunId ||
+      executionContext.artifactDigest !==
+        relation.parent.parentArtifactDigest ||
+      executionContext.workflowFamilyIdentity !==
+        relation.parent.parentWorkflowFamilyIdentity ||
+      Json.canonicalizeSnapshot(
+          executionContext.ancestry as unknown as Schema.Json
+        ) !==
+        Json.canonicalizeSnapshot(
+          relation.parent.ancestry as unknown as Schema.Json
+        )
+    ) {
+      diagnostics.push(codeError(
+        Codes.InvalidCallFrame,
+        `Call frame '${frame.callFrameId}' relation does not match the execution context`,
+        ["executionContext"]
+      ))
+    }
+    const closeBarrier = BpmnCallActivityV3.parentCloseBarrier(frame)
+    const closeIntent = state.parentCloseIntent
+    const closeCommand = frame.parentCloseCommand
+    if (Result.isFailure(closeBarrier)) {
+      diagnostics.push(codeError(
+        Codes.InvalidCallFrame,
+        `Call frame '${frame.callFrameId}' has an invalid parent-close barrier`,
+        [...framePath, "parentCloseCommand"],
+        { issue: closeBarrier.failure.message }
+      ))
+    } else if (
+      (state.status === "active" ||
+        state.status === "completed") &&
+      closeCommand !== undefined
+    ) {
+      diagnostics.push(codeError(
+        Codes.InvalidCallFrame,
+        `Execution status '${state.status}' cannot retain a CallActivity parent-close command`,
+        [...framePath, "parentCloseCommand"]
+      ))
+    } else if (
+      state.status === "failing" ||
+      state.status === "cancelling" ||
+      state.status === "failed" ||
+      state.status === "cancelled"
+    ) {
+      if (closeBarrier.success === "NotRequested") {
+        diagnostics.push(codeError(
+          Codes.InvalidCallFrame,
+          `Parent close has not propagated to CallActivity frame '${frame.callFrameId}'`,
+          [...framePath, "parentCloseCommand"]
+        ))
+      }
+      if (
+        (state.status === "failed" ||
+          state.status === "cancelled") &&
+        closeBarrier.success !== "Discharged"
+      ) {
+        diagnostics.push(codeError(
+          Codes.InvalidCallFrame,
+          `Terminal execution cannot pass CallActivity barrier '${closeBarrier.success}'`,
+          [...framePath, "parentCloseCommand"]
+        ))
+      }
+      if (
+        closeCommand !== undefined &&
+        closeIntent !== undefined &&
+        closeCommand.payload._tag !== "ScheduleChild"
+      ) {
+        const cause = closeCommand.payload.parentCause
+        if (
+          cause._tag !== closeIntent.cause._tag ||
+          cause.parentCauseEventId !==
+            closeIntent.cause.parentCauseEventId
+        ) {
+          diagnostics.push(codeError(
+            Codes.InvalidCallFrame,
+            `Call frame '${frame.callFrameId}' close command does not match the execution close intent`,
+            [...framePath, "parentCloseCommand", "payload", "parentCause"]
+          ))
+        }
+      }
     }
   }
 

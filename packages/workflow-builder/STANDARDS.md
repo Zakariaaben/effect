@@ -99,10 +99,13 @@ another process instance, sibling root, or merely message-correlated execution
 is not implicitly withdrawn.
 
 `OperationalWithdrawalCompleted` means logical engine closure, not physical
-stop or reversal of side effects. Version `1` excludes executable Call Activity
-propagation, work items/human tasks, Transaction Cancel, compensation,
-Terminate End Event semantics, targeted task/scope withdrawal, and any
-physical-stop guarantee. `prepareCommittedWithdrawal` first authenticates the
+stop or reversal of side effects. Executable CallActivity frames receive the
+same target-pinned parent-close command: `CancelAndWait` delays final failure
+or cancellation until terminal child projection, `RequestCancel` waits only for
+durable cancellation intent, and `Abandon` detaches without a stopping claim.
+Work items/human tasks, Transaction Cancel, compensation, Terminate End Event
+semantics, targeted task/scope withdrawal, and any physical-stop guarantee
+remain excluded. `prepareCommittedWithdrawal` first authenticates the
 committed portable snapshot. Local catch channels then use
 `prepareCancelledWaitNotification` plus `notifyCancelledWait`, whose deferred
 state-change value is only a reload hint. The separate
@@ -266,10 +269,10 @@ Implemented foundations:
   and failover conformance remains pending;
 - an Effectful executable-preparation boundary whose domain-separated
   SHA-256 fingerprint commits to the normalized semantic model, root process,
-  kernel semantic version, limits, named profile, and exact evaluator-build
-  manifest; kernel semantic version `7`, state version `8`, fingerprint version
-  `6`, and transition-journal version `7` fail closed on a model/profile
-  mismatch;
+  kernel semantic version, limits, named profile, exact evaluator-build
+  manifest, and exact CallActivity bindings; kernel semantic version `8`, state
+  version `9`, fingerprint version `7`, and transition-journal version `8`
+  fail closed on a model/profile mismatch;
 - a strict Effect evaluator registry with full language/version/build/limit
   tuple resolution and no compatibility or latest fallback, plus exact
   evaluator-binding and bounded usage evidence in condition journal events; an
@@ -278,10 +281,16 @@ Implemented foundations:
   interruption-preserving failure handling;
 - a sealed journal artifact whose complete causal payload has an independently
   anchorable history digest; and
-- separate protocol-version `3` child-target, parent-link, lineage,
-  close-policy, definition-build, command/event, relation-identity, and pure
-  replay contracts. They deliberately model durable parent/child facts without
-  yet claiming transactional child execution; and
+- executable `PortableChildProcess/1` CallActivity frames. Compilation pins
+  each source `calledElement` expanded QName to its exact protocol-v3 child
+  target and explicit encoded-input expression; the expression returns a
+  bounded `EncodedPayload`, never an inferred codec or BPMN data association.
+  Opening records the evaluated input, canonical `ChildScheduled` relation
+  fact, frame, and `ScheduleChild` outbox command. Trusted child-event ingress
+  validates relation/event identity, target contracts, locator, and lifecycle,
+  and replays them through the parent journal; child success continues normal
+  flow exactly once. Parent failure and withdrawal remain `failing` or
+  `cancelling` until all target-selected close barriers discharge; and
 - a thin protocol-v3 host over an injected native Effect `WorkflowEngine`, plus
   bounded replay-stable operation names and memory-backed contract tests for
   native activity replay, deferred suspension/resume, forced-durable clocks,
@@ -374,10 +383,11 @@ Not yet implemented and therefore not claimed:
   projection. Open creation and draining require a separate
   `OpenForEachGroup/1` profile instead of widening the closed
   `FixedMultiInstance/1` or `CollectionMultiInstance/1` journals;
-- executable call activities, immutable callable-element resolution, a
-  transactional parent/child execution authority, and integration of the
-  implemented protocol-v3 linkage, cancellation, lineage, and replay semantics
-  into BPMN token execution;
+- a persistent transactional parent/child execution authority and the backend
+  mechanisms that it requires: store, scheduler, outbox relay, child-run
+  starter, authenticated ingress/transport, and cluster crash/restart/failover
+  proof. The portable kernel implements neither those services nor a native
+  Effect Workflow CallActivity lifecycle adapter;
 - a production native Effect Workflow adapter, rebuildable BPMN semantic
   timeline/export, externally authenticated history anchors, migration tooling
   for pre-fingerprint states/journals, and isolated evaluator adapters or any
@@ -611,13 +621,13 @@ The data IR uses stable slot and binding identities, schemas, versions, scopes,
 lifetimes, mutability, transfer modes, storage bindings, ACLs, and sensitivity.
 Absent data is distinct from JSON `null`, empty values, zero, and false.
 
-| Pattern group and book pages  | Named requirements                                                                                                                                                   | BPMN and extension boundary                                                                                                                          |
-| ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Visibility, 190–203           | Task, block, arbitrary scope, MI instance, case, folder, global, and environment data.                                                                               | Task/block/case are **N**; MI is **N/C**; arbitrary scope and folder are **E**; DataStore only partially covers tenant-scoped global/external state. |
-| Internal interaction, 203–214 | Task-to-task, block/subprocess parameters, MI scatter/gather with value/reference and shared/isolated data, and inter-case interaction.                              | Data Associations and Call Activity mappings are **N**; dynamic aggregation, references, and case relationship navigation are **E**.                 |
-| External interaction, 214–221 | Process push, process pull, environment push, and environment pull with request/reply, authentication, correlation, inbox/outbox, timeout, and late-response policy. | Message events/tasks are **N/C**; connector consistency and remote-read transactions are **I/E**.                                                    |
-| Transfer, 221–229             | By value, copy-in/copy-out, unlocked reference, locked reference, input transform, and output transform.                                                             | Value/copy/transform are **N**; transferable references, leases, and fencing are **E**.                                                              |
-| Data routing, 230–237         | Existence/value preconditions, existence/value postconditions, event trigger, data trigger, and XOR/OR routing.                                                      | Events and gateways are **N/C**; full missing-data and postcondition policies need extensions.                                                       |
+| Pattern group and book pages  | Named requirements                                                                                                                                                   | BPMN and extension boundary                                                                                                                                                       |
+| ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Visibility, 190–203           | Task, block, arbitrary scope, MI instance, case, folder, global, and environment data.                                                                               | Task/block/case are **N**; MI is **N/C**; arbitrary scope and folder are **E**; DataStore only partially covers tenant-scoped global/external state.                              |
+| Internal interaction, 203–214 | Task-to-task, block/subprocess parameters, MI scatter/gather with value/reference and shared/isolated data, and inter-case interaction.                              | The exact CallActivity target and encoded-input mapping are **C**; general BPMN Data Associations, dynamic aggregation, references, and case relationship navigation are **N/E**. |
+| External interaction, 214–221 | Process push, process pull, environment push, and environment pull with request/reply, authentication, correlation, inbox/outbox, timeout, and late-response policy. | Message events/tasks are **N/C**; connector consistency and remote-read transactions are **I/E**.                                                                                 |
+| Transfer, 221–229             | By value, copy-in/copy-out, unlocked reference, locked reference, input transform, and output transform.                                                             | Value/copy/transform are **N**; transferable references, leases, and fencing are **E**.                                                                                           |
+| Data routing, 230–237         | Existence/value preconditions, existence/value postconditions, event trigger, data trigger, and XOR/OR routing.                                                      | Events and gateways are **N/C**; full missing-data and postcondition policies need extensions.                                                                                    |
 
 Required core ADTs include `DataScope`, `DataSlot`, `DataBinding`,
 `TransferMode`, `Condition`, `UnmetConditionPolicy`, `ExternalInteraction`, and

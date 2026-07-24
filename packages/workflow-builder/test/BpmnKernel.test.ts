@@ -2172,6 +2172,7 @@ describe("BpmnKernel", () => {
       assert(
         result.failure.diagnostics.some((diagnostic) =>
           diagnostic.code === BpmnKernel.Codes.InvalidKernelState ||
+          diagnostic.code === BpmnExecutionState.Codes.InvalidState ||
           diagnostic.code === BpmnKernel.Codes.BpmnModelFingerprintMismatch
         ),
         result.failure.diagnostics.map((diagnostic) => diagnostic.code).join(",")
@@ -2401,7 +2402,7 @@ describe("BpmnKernel", () => {
       new Set([
         BpmnKernel.Codes.UnsupportedEvent,
         BpmnKernel.Codes.UnsupportedLoop,
-        BpmnKernel.Codes.UnsupportedNode,
+        BpmnKernel.Codes.UnsupportedActivity,
         BpmnKernel.Codes.UnsupportedGateway
       ])
     )
