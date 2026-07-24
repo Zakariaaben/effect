@@ -251,7 +251,8 @@ export const ErrorCodes = {
   UnsupportedBlobPayload: "UnsupportedBlobPayload",
   OperationPreparationFailed: "OperationPreparationFailed",
   ActivityResolutionFailed: "ActivityResolutionFailed",
-  ClockRegression: "ClockRegression"
+  ClockRegression: "ClockRegression",
+  UnsupportedAttemptExecutor: "UnsupportedAttemptExecutor"
 } as const
 
 /**
@@ -270,7 +271,8 @@ const ErrorCode = Schema.Literals([
   ErrorCodes.UnsupportedBlobPayload,
   ErrorCodes.OperationPreparationFailed,
   ErrorCodes.ActivityResolutionFailed,
-  ErrorCodes.ClockRegression
+  ErrorCodes.ClockRegression,
+  ErrorCodes.UnsupportedAttemptExecutor
 ])
 
 /**
@@ -718,6 +720,41 @@ export interface PrepareOptions {
  * @since 4.0.0
  */
 export type ExecutionOptions = EffectWorkflowSemanticV3.ActivityExecutionOptions
+
+/**
+ * Optional execution strategy for one already-prepared managed attempt.
+ *
+ * **Details**
+ *
+ * The retry controller retains attempt creation, classification, backoff, and
+ * deadlines. An executor replaces only the direct node-handler transport and
+ * must return the authoritative native Activity completion receipt. The
+ * current extension point is admitted only when schedule-to-start and
+ * start-to-close are disabled because those dimensions require a worker-start
+ * handshake.
+ *
+ * This is a trusted infrastructure capability, not an untrusted extension
+ * boundary. Implementations must obtain the receipt from
+ * `EffectWorkflowSemanticV3` completion APIs so descriptor/backend binding and
+ * exact host codec validation cannot be bypassed. The retry controller still
+ * revalidates the returned attempt and activity digest.
+ *
+ * Without schedule-to-close, `E` remains a typed infrastructure error. Inside
+ * a schedule-to-close controller, non-business errors participate in the
+ * durable success-only winner envelope as defects, matching the direct
+ * semantic backend.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type AttemptExecutor<E = never, R = never> = (
+  resolution: SemanticExecutableRegistryV3.ResolvedNodeAttemptActivity,
+  options: ExecutionOptions
+) => Effect.Effect<
+  EffectWorkflowSemanticV3.NodeAttemptCompletion,
+  E,
+  EffectWorkflowSemanticV3.Requirements | R
+>
 
 interface CapturedPrepareOptions {
   readonly artifact: unknown
@@ -2048,24 +2085,54 @@ type AttemptFence = () => Effect.Effect<
   EffectWorkflowSemanticV3.Requirements
 >
 
-const executeAttempt = (
+const executeAttempt = <E, R>(
   state: InvocationState,
   attempt: PreparedAttempt,
-  options: ExecutionOptions
+  options: ExecutionOptions,
+  executor?: AttemptExecutor<E, R> | undefined
 ): Effect.Effect<
   NodeAttemptOutcome,
   | EffectWorkflowRetryError
-  | EffectWorkflowSemanticV3.EffectWorkflowSemanticError,
-  EffectWorkflowSemanticV3.Requirements
+  | EffectWorkflowSemanticV3.EffectWorkflowSemanticError
+  | E,
+  EffectWorkflowSemanticV3.Requirements | R
 > => {
   if (
     attempt.scheduleToStart === undefined &&
     attempt.startToClose === undefined
   ) {
-    return EffectWorkflowSemanticV3.nodeAttempt(
-      attempt.resolution,
-      options
-    )
+    return executor === undefined
+      ? EffectWorkflowSemanticV3.nodeAttempt(
+        attempt.resolution,
+        options
+      )
+      : Effect.flatMap(
+        executor(attempt.resolution, options),
+        (completion) =>
+          Effect.flatMap(
+            completion.exit,
+            (outcome) =>
+              Effect.as(
+                validateAttemptOutcome(
+                  state,
+                  attempt,
+                  outcome
+                ),
+                outcome
+              )
+          )
+      )
+  }
+  if (executor !== undefined) {
+    return Effect.fail(retryError(
+      ErrorCodes.UnsupportedAttemptExecutor,
+      "An injected attempt executor requires schedule-to-start and start-to-close to be disabled",
+      {
+        nodeId: state.node.binding.nodeId,
+        operationId: attempt.operation.document.operationId,
+        operationDigest: attempt.operation.operationDigest
+      }
+    ))
   }
 
   return Effect.gen(function*() {
@@ -2706,18 +2773,21 @@ const executeAttempt = (
   })
 }
 
-const retryLoop = (
+const retryLoop = <E, R>(
   state: InvocationState,
   options: ExecutionOptions,
+  executor?: AttemptExecutor<E, R> | undefined,
   initialObservation?: Wire.Timestamp | undefined,
   sleep: RetryTimer = EffectWorkflowSemanticV3.sleep,
   attemptFence?: AttemptFence | undefined
 ): Effect.Effect<
   RetryExecutionOutcome,
   | EffectWorkflowRetryError
-  | EffectWorkflowSemanticV3.EffectWorkflowSemanticError,
+  | EffectWorkflowSemanticV3.EffectWorkflowSemanticError
+  | E,
   | Crypto.Crypto
   | EffectWorkflowSemanticV3.Requirements
+  | R
 > =>
   Effect.gen(function*() {
     const initialObservedAt = initialObservation ??
@@ -2735,7 +2805,8 @@ const retryLoop = (
       const outcome = yield* executeAttempt(
         state,
         attempt,
-        options
+        options,
+        executor
       )
       if (outcome._tag === "Succeeded") {
         return outcome
@@ -2899,10 +2970,11 @@ const scheduleToCloseWinner = (
   exit
 })
 
-const retryWinner = (
+const retryWinner = <E, R>(
   state: InvocationState,
   controller: PreparedScheduleToClose,
   options: ExecutionOptions,
+  executor: AttemptExecutor<E, R> | undefined,
   initialObservedAt: Wire.Timestamp,
   attemptFence: AttemptFence
 ): Effect.Effect<
@@ -2910,10 +2982,12 @@ const retryWinner = (
   never,
   | Crypto.Crypto
   | EffectWorkflowSemanticV3.Requirements
+  | R
 > =>
   retryLoop(
     state,
     options,
+    executor,
     initialObservedAt,
     (operation) => nonSuspendingTimer(state, operation),
     attemptFence
@@ -2949,6 +3023,7 @@ const retryWinner = (
     never,
     | Crypto.Crypto
     | EffectWorkflowSemanticV3.Requirements
+    | R
   >
 
 const timeoutOutcome = (
@@ -3501,16 +3576,19 @@ const clockWinner = (
     })
   )
 
-const scheduleToClose = (
+const scheduleToClose = <E, R>(
   state: InvocationState,
   controller: PreparedScheduleToClose,
-  options: ExecutionOptions
+  options: ExecutionOptions,
+  executor?: AttemptExecutor<E, R> | undefined
 ): Effect.Effect<
   RetryExecutionOutcome,
   | EffectWorkflowRetryError
-  | EffectWorkflowSemanticV3.EffectWorkflowSemanticError,
+  | EffectWorkflowSemanticV3.EffectWorkflowSemanticError
+  | E,
   | Crypto.Crypto
   | EffectWorkflowSemanticV3.Requirements
+  | R
 > =>
   Effect.gen(function*() {
     // Descriptor binding always precedes cached-winner lookup, so replay
@@ -3627,6 +3705,7 @@ const scheduleToClose = (
               state,
               controller,
               options,
+              executor,
               initialObservedAt,
               attemptFence
             ),
@@ -3707,19 +3786,46 @@ const scheduleToClose = (
     return outcome
   })
 
-const executePrepared = (
+const executePrepared = <E, R>(
   state: InvocationState,
-  options: ExecutionOptions
+  options: ExecutionOptions,
+  executor?: AttemptExecutor<E, R> | undefined
 ): Effect.Effect<
   RetryExecutionOutcome,
   | EffectWorkflowRetryError
-  | EffectWorkflowSemanticV3.EffectWorkflowSemanticError,
+  | EffectWorkflowSemanticV3.EffectWorkflowSemanticError
+  | E,
   | Crypto.Crypto
   | EffectWorkflowSemanticV3.Requirements
-> =>
-  state.scheduleToClose === undefined
-    ? retryLoop(state, options)
-    : scheduleToClose(state, state.scheduleToClose, options)
+  | R
+> => {
+  const timeouts = state.node.binding.activityPolicy.timeouts
+  if (
+    executor !== undefined &&
+    (
+      timeouts.scheduleToStart._tag !== "Disabled" ||
+      timeouts.startToClose._tag !== "Disabled"
+    )
+  ) {
+    return Effect.fail(retryError(
+      ErrorCodes.UnsupportedAttemptExecutor,
+      "An injected attempt executor requires schedule-to-start and start-to-close to be disabled",
+      {
+        nodeId: state.node.binding.nodeId,
+        operationId: state.firstAttempt.operation.document.operationId,
+        operationDigest: state.firstAttempt.operation.operationDigest
+      }
+    ))
+  }
+  return state.scheduleToClose === undefined
+    ? retryLoop(state, options, executor)
+    : scheduleToClose(
+      state,
+      state.scheduleToClose,
+      options,
+      executor
+    )
+}
 
 /**
  * Executes an opaque prepared invocation and returns its raw durable outcome.
@@ -3755,7 +3861,45 @@ export const executeDetailed = (
       "Retry execution requires the exact PreparedRetryInvocation returned by prepare"
     ))
   }
-  return executePrepared(state, options)
+  return executePrepared<never, never>(state, options)
+}
+
+/**
+ * Executes an opaque prepared invocation with an explicit node-attempt
+ * executor and returns its raw durable outcome.
+ *
+ * **Details**
+ *
+ * The injected executor replaces only direct handler transport. Retry
+ * classification, attempt creation, backoff, schedule-to-close, output
+ * decoding, and terminal explanation remain owned by this module.
+ * Schedule-to-start and start-to-close currently reject an injected executor
+ * because the executor contract has no worker-acquisition handshake.
+ *
+ * @category execution
+ * @since 4.0.0
+ */
+export const executeDetailedWithExecutor = <E, R>(
+  invocation: PreparedRetryInvocation,
+  options: ExecutionOptions,
+  executor: AttemptExecutor<E, R>
+): Effect.Effect<
+  RetryExecutionOutcome,
+  | E
+  | EffectWorkflowRetryError
+  | EffectWorkflowSemanticV3.EffectWorkflowSemanticError,
+  | R
+  | Crypto.Crypto
+  | EffectWorkflowSemanticV3.Requirements
+> => {
+  const state = invocationStates.get(invocation)
+  if (state === undefined) {
+    return Effect.fail(retryError(
+      ErrorCodes.InvalidInvocation,
+      "Retry execution requires the exact PreparedRetryInvocation returned by prepare"
+    ))
+  }
+  return executePrepared(state, options, executor)
 }
 
 /**
@@ -3810,7 +3954,47 @@ export const execute = (
     ))
   }
   return Effect.flatMap(
-    executePrepared(state, options),
+    executePrepared<never, never>(state, options),
+    (outcome) => completeRetryOutcome(state, outcome)
+  )
+}
+
+/**
+ * Executes an opaque prepared invocation with an explicit node-attempt
+ * executor.
+ *
+ * **Details**
+ *
+ * This projects {@link executeDetailedWithExecutor} through the same terminal
+ * output decoder as {@link execute}; it never delegates retry or timeout
+ * meaning to the transport.
+ *
+ * @category execution
+ * @since 4.0.0
+ */
+export const executeWithExecutor = <E, R>(
+  invocation: PreparedRetryInvocation,
+  options: ExecutionOptions,
+  executor: AttemptExecutor<E, R>
+): Effect.Effect<
+  unknown,
+  | E
+  | TerminalFailure
+  | EffectWorkflowRetryError
+  | EffectWorkflowSemanticV3.EffectWorkflowSemanticError,
+  | R
+  | Crypto.Crypto
+  | EffectWorkflowSemanticV3.Requirements
+> => {
+  const state = invocationStates.get(invocation)
+  if (state === undefined) {
+    return Effect.fail(retryError(
+      ErrorCodes.InvalidInvocation,
+      "Retry execution requires the exact PreparedRetryInvocation returned by prepare"
+    ))
+  }
+  return Effect.flatMap(
+    executePrepared(state, options, executor),
     (outcome) => completeRetryOutcome(state, outcome)
   )
 }

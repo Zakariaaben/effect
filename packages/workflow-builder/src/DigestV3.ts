@@ -52,7 +52,8 @@ export const Domains = {
   ExecutableBuild: "workflow.executable-build.v3",
   EncodedSchema: "workflow.encoded-schema.v3",
   Occurrence: "workflow.occurrence.v3",
-  Operation: "workflow.operation.v3"
+  Operation: "workflow.operation.v3",
+  NativeWorkerRoute: "workflow.native-worker-route.v3"
 } as const
 
 const DomainSchema = Schema.Literals([
@@ -62,7 +63,8 @@ const DomainSchema = Schema.Literals([
   Domains.ExecutableBuild,
   Domains.EncodedSchema,
   Domains.Occurrence,
-  Domains.Operation
+  Domains.Operation,
+  Domains.NativeWorkerRoute
 ]).annotate({ identifier: "WorkflowDigestV3Domain" })
 
 /**
@@ -369,3 +371,17 @@ export const operation = (
     DigestInputError | DigestCryptoError,
     Crypto.Crypto
   >
+
+/**
+ * Computes the content identity of one native distributed-worker route.
+ *
+ * @category encoding
+ * @since 4.0.0
+ */
+export const nativeWorkerRoute = (
+  value: unknown
+): Effect.Effect<
+  Wire.Sha256Digest,
+  DigestInputError | DigestCryptoError,
+  Crypto.Crypto
+> => digest(Domains.NativeWorkerRoute, value)

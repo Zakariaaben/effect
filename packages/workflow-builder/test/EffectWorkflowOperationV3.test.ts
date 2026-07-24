@@ -52,6 +52,25 @@ describe("EffectWorkflowOperationV3", () => {
       binding.slice(Operation.BindingNamePrefix.length),
       first.slice(Operation.NamePrefix.length)
     )
+    const executionBackend = success(
+      Operation.executionBackendBindingName(activity(
+        digest("a"),
+        "handler[\"primary\"]"
+      ))
+    )
+    assert.isTrue(
+      executionBackend.startsWith(
+        Operation.ExecutionBackendBindingNamePrefix
+      )
+    )
+    assert.notStrictEqual(executionBackend, first)
+    assert.notStrictEqual(executionBackend, binding)
+    assert.strictEqual(
+      executionBackend.slice(
+        Operation.ExecutionBackendBindingNamePrefix.length
+      ),
+      first.slice(Operation.NamePrefix.length)
+    )
     assert.isAtMost(
       new TextEncoder().encode(first).byteLength,
       Operation.MaximumNameBytes

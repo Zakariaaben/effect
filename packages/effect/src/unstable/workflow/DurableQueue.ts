@@ -56,6 +56,48 @@ export interface DurableQueue<
 }
 
 /**
+ * Native persisted-queue metadata supplied to a durable queue worker.
+ *
+ * **Details**
+ *
+ * `attempts` is the number of prior non-interrupt acquisition failures
+ * recorded for the same queue item. It starts at `0`; an interrupted
+ * acquisition is requeued without incrementing this value.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export interface WorkerMetadata {
+  readonly id: string
+  readonly attempts: number
+}
+
+/**
+ * Configuration for durable queue workers.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export interface WorkerOptions {
+  /**
+   * The maximum number of workers that process queue items concurrently.
+   */
+  readonly concurrency?: number | undefined
+
+  /**
+   * Passed directly to `PersistedQueue.take` as its maximum number of
+   * non-interrupt acquisition failures. Defaults to the persisted queue
+   * default.
+   *
+   * **Details**
+   *
+   * A durable queue captures the user handler's `Exit` into its deferred
+   * result, so this is not a business-handler retry limit.
+   */
+  readonly maxAttempts?: number | undefined
+}
+
+/**
  * Creates a `DurableQueue` that waits for persisted items to finish processing
  * using a `DurableDeferred`.
  *
@@ -247,6 +289,12 @@ const defaultRetrySchedule = Schedule.min([
 /**
  * Create a worker effect that processes items from the durable queue.
  *
+ * **Details**
+ *
+ * The handler receives persisted-queue metadata as its second argument. The
+ * `id` identifies the queue item and `attempts` reports prior non-interrupt
+ * acquisition failures. Existing one-argument handlers remain supported.
+ *
  * @category Worker
  * @since 4.0.0
  */
@@ -257,8 +305,11 @@ export const makeWorker: <
   R
 >(
   self: DurableQueue<Payload, Success, Error>,
-  f: (payload: Payload["Type"]) => Effect.Effect<Success["Type"], Error["Type"], R>,
-  options?: { readonly concurrency?: number | undefined } | undefined
+  f: (
+    payload: Payload["Type"],
+    metadata: WorkerMetadata
+  ) => Effect.Effect<Success["Type"], Error["Type"], R>,
+  options?: WorkerOptions | undefined
 ) => Effect.Effect<
   never,
   never,
@@ -276,10 +327,11 @@ export const makeWorker: <
   R
 >(
   self: DurableQueue<Payload, Success, Error>,
-  f: (payload: Payload["Type"]) => Effect.Effect<Success["Type"], Error["Type"], R>,
-  options?: {
-    readonly concurrency?: number | undefined
-  }
+  f: (
+    payload: Payload["Type"],
+    metadata: WorkerMetadata
+  ) => Effect.Effect<Success["Type"], Error["Type"], R>,
+  options?: WorkerOptions
 ) {
   const queue = yield* PersistedQueue.make({
     name: `DurableQueue/${self.name}`,
@@ -287,7 +339,7 @@ export const makeWorker: <
   })
   const concurrency = options?.concurrency ?? 1
 
-  const worker = queue.take((item_) => {
+  const worker = queue.take((item_, metadata) => {
     const item = item_ as {
       readonly token: DurableDeferred.Token
       readonly payload: Payload["Type"]
@@ -296,7 +348,7 @@ export const makeWorker: <
       readonly sampled: boolean
     }
     return Effect.withSpan(
-      f(item.payload).pipe(
+      f(item.payload, metadata).pipe(
         Effect.exit,
         Effect.flatMap((exit) =>
           DurableDeferred.done(self.deferred, {
@@ -316,7 +368,7 @@ export const makeWorker: <
         })
       }
     )
-  }).pipe(
+  }, { maxAttempts: options?.maxAttempts }).pipe(
     Effect.catchCause(Effect.logWarning),
     Effect.forever,
     Effect.annotateLogs({
@@ -334,6 +386,11 @@ export const makeWorker: <
 /**
  * Create a layer that runs workers for the durable queue.
  *
+ * **Details**
+ *
+ * The handler receives persisted-queue metadata as its second argument. The
+ * `maxAttempts` option is passed through to the underlying persisted queue.
+ *
  * @category Worker
  * @since 4.0.0
  */
@@ -344,10 +401,11 @@ export const worker: <
   R
 >(
   self: DurableQueue<Payload, Success, Error>,
-  f: (payload: Payload["Type"]) => Effect.Effect<Success["Type"], Error["Type"], R>,
-  options?: {
-    readonly concurrency?: number | undefined
-  } | undefined
+  f: (
+    payload: Payload["Type"],
+    metadata: WorkerMetadata
+  ) => Effect.Effect<Success["Type"], Error["Type"], R>,
+  options?: WorkerOptions | undefined
 ) => Layer.Layer<
   never,
   never,

@@ -297,6 +297,11 @@ export * as EffectWorkflowChildLifecycleV3 from "./EffectWorkflowChildLifecycleV
 /**
  * @since 4.0.0
  */
+export * as EffectWorkflowDurableQueueV3 from "./EffectWorkflowDurableQueueV3.ts"
+
+/**
+ * @since 4.0.0
+ */
 export * as EffectWorkflowOperationV3 from "./EffectWorkflowOperationV3.ts"
 
 /**

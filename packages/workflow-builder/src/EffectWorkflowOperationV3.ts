@@ -59,6 +59,15 @@ export const NamePrefix = "@effect/workflow-builder/effect-workflow/v3/operation
 export const BindingNamePrefix = "@effect/workflow-builder/effect-workflow/v3/binding/a1/" as const
 
 /**
+ * Stable prefix for native node-attempt execution-backend guard activities.
+ *
+ * @category constants
+ * @since 4.0.0
+ */
+export const ExecutionBackendBindingNamePrefix =
+  "@effect/workflow-builder/effect-workflow/v3/execution-backend/a1/" as const
+
+/**
  * Maximum UTF-8 size of one generated native operation name.
  *
  * **Details**
@@ -368,6 +377,35 @@ export const bindingName = (
   const operationName = name(input)
   if (Result.isFailure(operationName)) return operationName
   const value = `${BindingNamePrefix}${operationName.success.slice(NamePrefix.length)}`
+  if (new TextEncoder().encode(value).byteLength > MaximumNameBytes) {
+    return Result.fail(error(
+      ErrorCodes.NameTooLong,
+      `Native operation names cannot exceed ${MaximumNameBytes} UTF-8 bytes`
+    ))
+  }
+  return Result.succeed(value)
+}
+
+/**
+ * Returns the stable native activity name that binds one node attempt to its
+ * selected execution backend.
+ *
+ * **Details**
+ *
+ * The selected backend and its configuration digest are recorded as the
+ * activity result, not included in this name. Replaying an incomplete attempt
+ * with a different backend therefore produces drift instead of dispatching a
+ * second implementation.
+ *
+ * @category constructors
+ * @since 4.0.0
+ */
+export const executionBackendBindingName = (
+  input: unknown
+): Result.Result<string, EffectWorkflowOperationError> => {
+  const operationName = name(input)
+  if (Result.isFailure(operationName)) return operationName
+  const value = `${ExecutionBackendBindingNamePrefix}${operationName.success.slice(NamePrefix.length)}`
   if (new TextEncoder().encode(value).byteLength > MaximumNameBytes) {
     return Result.fail(error(
       ErrorCodes.NameTooLong,

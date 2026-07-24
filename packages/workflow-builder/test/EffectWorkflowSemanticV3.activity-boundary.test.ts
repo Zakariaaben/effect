@@ -17,6 +17,7 @@ import * as Deployment from "../src/Deployment.ts"
 import * as DeploymentHandlers from "../src/DeploymentHandlers.ts"
 import * as DigestV3 from "../src/DigestV3.ts"
 import * as NativeSemantic from "../src/EffectWorkflowSemanticV3.ts"
+import * as Identity from "../src/Identity.ts"
 import * as LinkPolicy from "../src/LinkPolicy.ts"
 import * as Node from "../src/Node.ts"
 import * as PlanStoreV3 from "../src/PlanStoreV3.ts"
@@ -251,9 +252,10 @@ const activityPolicy = (
       buildDigest: classifierBuildDigest
     },
     failureIdentity: {
-      _tag: "EffectTagged",
+      _tag: "Constant",
       identityContractVersion: 1,
-      code: "OptionalString"
+      errorTag: "BoundaryFailure",
+      errorCode: "BUSINESS_DENIED"
     },
     nonRetryableErrorTags: [],
     nonRetryableErrorCodes: [],
@@ -872,7 +874,14 @@ describe("EffectWorkflowSemanticV3 node activity boundary", () => {
       }
       assert.strictEqual(firstRequest!.context.attempt, 1)
       assert.strictEqual(secondRequest!.context.attempt, 2)
-      assert.isNotEmpty(firstRequest!.context.idempotencyKey)
+      assert.strictEqual(
+        firstRequest!.context.idempotencyKey,
+        Identity.durableActivityIdempotencyKey(
+          "tenant-boundary",
+          "run-success",
+          first.occurrence.occurrenceDigest
+        )
+      )
       assert.strictEqual(
         firstRequest!.context.idempotencyKey,
         secondRequest!.context.idempotencyKey
@@ -1020,6 +1029,169 @@ describe("EffectWorkflowSemanticV3 node activity boundary", () => {
       )
       assert.strictEqual(fixture.telemetry.requests.length, 8)
       assert.strictEqual(fixture.telemetry.getterReads, 0)
+    }).pipe(provideCrypto))
+
+  it.effect("runs an admitted node attempt without selecting a durable transport", () =>
+    Effect.gen(function*() {
+      const fixture = yield* makeFixture()
+      const prepared = yield* prepareNodeAttempt(fixture, {
+        runId: "run-transport-neutral-success",
+        input: { value: "worker" }
+      })
+
+      const outcome = yield* NativeSemantic.runNodeAttemptHandler(
+        prepared.resolution
+      )
+
+      assert.strictEqual(outcome._tag, "Succeeded")
+      if (outcome._tag !== "Succeeded") return
+      assert.strictEqual(
+        outcome.activityDigest,
+        prepared.operation.operationDigest
+      )
+      assert.strictEqual(outcome.attempt, 1)
+      assert.deepStrictEqual(outcome.output, {
+        _tag: "Inline",
+        value: {
+          value: "handled:worker"
+        }
+      })
+      assert.strictEqual(fixture.telemetry.requests.length, 1)
+      assert.strictEqual(
+        fixture.telemetry.requests[0]!.context.idempotencyKey,
+        Identity.durableActivityIdempotencyKey(
+          "tenant-boundary",
+          "run-transport-neutral-success",
+          prepared.occurrence.occurrenceDigest
+        )
+      )
+    }).pipe(provideCrypto))
+
+  it.effect("keeps a worker-side typed failure inside the managed outcome vocabulary", () =>
+    Effect.gen(function*() {
+      const fixture = yield* makeFixture()
+      const prepared = yield* prepareNodeAttempt(fixture, {
+        runId: "run-transport-neutral-failure",
+        input: { value: HandlerModes.BusinessFailure }
+      })
+
+      const outcome = yield* NativeSemantic.runNodeAttemptHandler(
+        prepared.resolution
+      )
+
+      assert.strictEqual(outcome._tag, "ApplicationFailed")
+      if (outcome._tag !== "ApplicationFailed") return
+      assert.strictEqual(
+        outcome.failure.activityDigest,
+        prepared.operation.operationDigest
+      )
+      assert.deepStrictEqual(outcome.failure.failure, {
+        _tag: "Inline",
+        value: {
+          code: "BUSINESS_DENIED"
+        }
+      })
+      assert.strictEqual(fixture.telemetry.requests.length, 1)
+    }).pipe(provideCrypto))
+
+  it.effect("revalidates transport output with the exact host codec", () =>
+    Effect.gen(function*() {
+      const fixture = yield* makeFixture()
+      const prepared = yield* prepareNodeAttempt(fixture, {
+        runId: "run-invalid-transport-output",
+        input: { value: "must-not-run" }
+      })
+
+      const terminal = yield* runInWorkflow(
+        "invalid-transport-output",
+        Effect.gen(function*() {
+          const completion = yield* NativeSemantic.nodeAttemptCompletionWithHandlerResult(
+            prepared.resolution,
+            {
+              backendBindingVersion: 1,
+              backendId: "TestTransport",
+              backendVersion: "1",
+              configurationDigest: null
+            },
+            Effect.succeed({
+              _tag: "Succeeded",
+              handlerResultVersion: 1,
+              attempt: 1,
+              activityDigest: prepared.operation.operationDigest,
+              output: {
+                _tag: "Inline",
+                value: { value: 42 }
+              }
+            }),
+            { interruptRetryPolicy: noInterruptRetry }
+          )
+          yield* completion.exit
+          return "unexpected"
+        })
+      )
+
+      assertActivityDefect(
+        terminal.exit,
+        NativeSemantic.ActivityDefectCodes.InvalidOutput
+      )
+      assert.strictEqual(fixture.telemetry.requests.length, 0)
+    }).pipe(provideCrypto))
+
+  it.effect("recomputes transport failure identity from the pinned policy", () =>
+    Effect.gen(function*() {
+      const fixture = yield* makeFixture()
+      const prepared = yield* prepareNodeAttempt(fixture, {
+        runId: "run-invalid-transport-identity",
+        input: { value: "must-not-run" }
+      })
+
+      const terminal = yield* runInWorkflow(
+        "invalid-transport-identity",
+        Effect.gen(function*() {
+          const completion = yield* NativeSemantic.nodeAttemptCompletionWithHandlerResult(
+            prepared.resolution,
+            {
+              backendBindingVersion: 1,
+              backendId: "TestTransport",
+              backendVersion: "1",
+              configurationDigest: null
+            },
+            Effect.succeed({
+              _tag: "ApplicationFailed",
+              handlerResultVersion: 1,
+              attempt: 1,
+              activityDigest: prepared.operation.operationDigest,
+              failure: {
+                _tag: "ApplicationFailure",
+                failureCauseVersion: 1,
+                attempt: 1,
+                activityDigest: prepared.operation.operationDigest,
+                identity: {
+                  failureIdentityVersion: 1,
+                  errorTag: "ForgedFailure",
+                  errorCode: "FORGED"
+                },
+                failure: {
+                  _tag: "Inline",
+                  value: {
+                    code: "BUSINESS_DENIED"
+                  }
+                }
+              }
+            }),
+            { interruptRetryPolicy: noInterruptRetry }
+          )
+          yield* completion.exit
+          return "unexpected"
+        })
+      )
+
+      assertActivityDefect(
+        terminal.exit,
+        NativeSemantic.ActivityDefectCodes
+          .InvalidFailureIdentity
+      )
+      assert.strictEqual(fixture.telemetry.requests.length, 0)
     }).pipe(provideCrypto))
 
   it.effect("returns and replays the durable successful node-attempt completion receipt", () =>

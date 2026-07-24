@@ -22,7 +22,8 @@ describe("DigestV3", () => {
         DigestV3.compiledPlan(value),
         DigestV3.boundaryContract(value),
         DigestV3.executableBuild(value),
-        DigestV3.encodedSchema(value)
+        DigestV3.encodedSchema(value),
+        DigestV3.nativeWorkerRoute(value)
       ])
 
       assert.strictEqual(digests[0], reordered)
@@ -48,7 +49,8 @@ describe("DigestV3", () => {
         DigestV3.compiledPlan(value),
         DigestV3.boundaryContract(value),
         DigestV3.executableBuild(value),
-        DigestV3.encodedSchema(value)
+        DigestV3.encodedSchema(value),
+        DigestV3.nativeWorkerRoute(value)
       ])
 
       assert.deepStrictEqual(digests.map(String), [
@@ -56,7 +58,8 @@ describe("DigestV3", () => {
         "sha256:a021d0fba5e848726ca9a6ba3b194d9b3eae39a43bafece80903c81fbf2b9f2c",
         "sha256:c9680b14d08b5ace27b7caefa56bb45556fee5c430bd75a087a10aa7868ee056",
         "sha256:dda071f7408cdda8c985b4a582b462dd7c30b11b39f3edb1fb87146769229718",
-        "sha256:bbb97ccdd5f2455737bcbbe3c615a10c1f7e2fda91eb3789768617a0b92bb7be"
+        "sha256:bbb97ccdd5f2455737bcbbe3c615a10c1f7e2fda91eb3789768617a0b92bb7be",
+        "sha256:32e337263f07fc72b60d84613cfab4aff62f1c7b730136abad655bd55301acd7"
       ])
     }).pipe(withSha256))
 

@@ -4,7 +4,27 @@ import { TestClock } from "effect/testing"
 import { PersistedQueue } from "effect/unstable/persistence"
 import { DurableQueue, Workflow, WorkflowEngine } from "effect/unstable/workflow"
 
-const PersistedQueueLayer = PersistedQueue.layer.pipe(
+const maxAttempts = new Array<number | undefined>()
+
+const PersistedQueueLayer = Layer.effect(
+  PersistedQueue.PersistedQueueFactory,
+  PersistedQueue.makeFactory.pipe(
+    Effect.map((factory) =>
+      PersistedQueue.PersistedQueueFactory.of({
+        make: (options) =>
+          factory.make(options).pipe(
+            Effect.map((queue) => ({
+              ...queue,
+              take: (f, options) => {
+                maxAttempts.push(options?.maxAttempts)
+                return queue.take(f, options)
+              }
+            }))
+          )
+      })
+    )
+  )
+).pipe(
   Layer.provideMerge(PersistedQueue.layerStoreMemory)
 )
 
@@ -22,6 +42,8 @@ const pollUntilComplete = <A, E, R>(
   })
 
 describe("DurableQueue", () => {
+  const successWorkerMetadata = new Array<DurableQueue.WorkerMetadata>()
+
   const SuccessQueue = DurableQueue.make({
     name: "DurableQueueTest/SuccessQueue",
     payload: {
@@ -47,20 +69,29 @@ describe("DurableQueue", () => {
     SuccessWorkflow.toLayer(({ id, value }) => DurableQueue.process(SuccessQueue, { id, value })),
     DurableQueue.worker(
       SuccessQueue,
-      ({ value }) => Effect.succeed(value + 1)
+      ({ value }, metadata) =>
+        Effect.sync(() => {
+          successWorkerMetadata.push(metadata)
+          return value + 1
+        }),
+      { maxAttempts: 1 }
     )
   ).pipe(
     Layer.provideMerge(WorkflowEngine.layerMemory),
     Layer.provideMerge(PersistedQueueLayer)
   )
 
-  it.effect("processes queued items and resumes the workflow", () =>
+  it.effect("forwards max attempts and metadata to workers", () =>
     Effect.gen(function*() {
       const executionId = yield* SuccessWorkflow.execute({ id: "success", value: 41 }, { discard: true })
       const polled = yield* pollUntilComplete(SuccessWorkflow.poll(executionId))
 
       assert(Option.isSome(polled) && polled.value._tag === "Complete" && Exit.isSuccess(polled.value.exit))
       assert.strictEqual(polled.value.exit.value, 42)
+      assert.isTrue(maxAttempts.includes(1))
+      assert.strictEqual(successWorkerMetadata.length, 1)
+      assert.strictEqual(successWorkerMetadata[0]!.attempts, 0)
+      assert.isTrue(successWorkerMetadata[0]!.id.length > 0)
     }).pipe(Effect.provide(SuccessLayer)))
 
   const FailureQueue = DurableQueue.make({

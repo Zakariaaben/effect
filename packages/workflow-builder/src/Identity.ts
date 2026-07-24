@@ -48,6 +48,17 @@ export const durableActivityIdempotencyKey = (
 ): string => identity("DurableActivityIdempotencyKey", tenantId, runId, nodeInstanceId)
 
 /**
+ * Returns the stable user idempotency key of one native queued node attempt.
+ *
+ * @category constructors
+ * @since 4.0.0
+ */
+export const nativeNodeAttemptWorkIdempotencyKey = (
+  routeDigest: string,
+  operationDigest: string
+): string => identity("NativeNodeAttemptWork", routeDigest, operationDigest)
+
+/**
  * Returns the shared identity of a schedule command and its scheduled event.
  *
  * @category constructors

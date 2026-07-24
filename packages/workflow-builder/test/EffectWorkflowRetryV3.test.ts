@@ -3455,7 +3455,10 @@ describe("EffectWorkflowRetryV3 managed runtime", () => {
             value: 42
           })
         }
-        assert.strictEqual(workflowPasses, 2)
+        // The independently journaled execution-backend guard adds one
+        // replay when the final durable gate resumes. Handler, classifier,
+        // jitter, and failure encoding remain cached below.
+        assert.strictEqual(workflowPasses, 3)
         assert.deepStrictEqual(attempts, [1, 2])
         assert.strictEqual(classified.length, 1)
         assert.strictEqual(randomRuns, 1)

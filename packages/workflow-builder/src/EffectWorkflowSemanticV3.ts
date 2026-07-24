@@ -32,6 +32,7 @@ import * as ActivityPolicyV3 from "./ActivityPolicyV3.ts"
 import type * as DigestV3 from "./DigestV3.ts"
 import * as EffectWorkflowBackendV3 from "./EffectWorkflowBackendV3.ts"
 import * as NativeName from "./EffectWorkflowOperationV3.ts"
+import * as Identity from "./Identity.ts"
 import * as Json from "./internal/json.ts"
 import type * as Node from "./Node.ts"
 import * as Wire from "./ProtocolV3Wire.ts"
@@ -64,7 +65,9 @@ export const ErrorCodes = {
   InvalidRaceResolution: "InvalidRaceResolution",
   InvalidNativeCoordinates: "InvalidNativeCoordinates",
   UnsupportedOperation: "UnsupportedOperation",
-  DescriptorDrift: "DescriptorDrift"
+  DescriptorDrift: "DescriptorDrift",
+  InvalidExecutionBackend: "InvalidExecutionBackend",
+  ExecutionBackendDrift: "ExecutionBackendDrift"
 } as const
 
 /**
@@ -89,7 +92,9 @@ const ErrorCode = Schema.Literals([
   ErrorCodes.InvalidRaceResolution,
   ErrorCodes.InvalidNativeCoordinates,
   ErrorCodes.UnsupportedOperation,
-  ErrorCodes.DescriptorDrift
+  ErrorCodes.DescriptorDrift,
+  ErrorCodes.InvalidExecutionBackend,
+  ErrorCodes.ExecutionBackendDrift
 ])
 
 /**
@@ -473,6 +478,179 @@ export type NodeAttemptCompletion = NativeActivity.Completed<
 >
 
 /**
+ * Generic persisted identity of the execution backend selected for one node
+ * attempt.
+ *
+ * **Details**
+ *
+ * `backendId` and `backendVersion` identify a strategy such as direct native
+ * execution or an optional distributed transport. `configurationDigest`
+ * commits provider-specific immutable configuration without teaching the
+ * semantic core its fields.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const NodeAttemptExecutionBackend = Schema.Struct({
+  backendBindingVersion: Schema.Literal(1),
+  backendId: Wire.AtomicIdentifier,
+  backendVersion: Wire.AtomicIdentifier,
+  configurationDigest: Schema.NullOr(Wire.Sha256Digest)
+}).annotate({
+  identifier: "WorkflowEffectSemanticV3NodeAttemptExecutionBackend",
+  parseOptions: strictParseOptions
+})
+
+/**
+ * The decoded type of {@link NodeAttemptExecutionBackend}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type NodeAttemptExecutionBackend = Schema.Schema.Type<
+  typeof NodeAttemptExecutionBackend
+>
+
+/**
+ * Backend identity used by the direct native handler path.
+ *
+ * @category constants
+ * @since 4.0.0
+ */
+export const NativeDirectNodeAttemptBackend: NodeAttemptExecutionBackend = Object.freeze({
+  backendBindingVersion: 1,
+  backendId: "NativeActivityDirect",
+  backendVersion: "1",
+  configurationDigest: null
+})
+
+/**
+ * Transport-neutral successful result of one exact node handler.
+ *
+ * **Details**
+ *
+ * The handler boundary encodes output once but does not choose a durable
+ * transport or claim a canonical completion time. The hosting workflow adds
+ * that timestamp only after the transport result reaches its authoritative
+ * native activity boundary.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const NodeAttemptHandlerSucceeded = Schema.TaggedStruct("Succeeded", {
+  handlerResultVersion: Schema.Literal(1),
+  attempt: Wire.PositiveSafeInt,
+  activityDigest: Wire.OperationDigest,
+  output: Wire.InlineEncodedPayload
+}).annotate({
+  identifier: "WorkflowEffectSemanticV3NodeAttemptHandlerSucceeded",
+  parseOptions: strictParseOptions
+})
+
+/**
+ * The decoded type of {@link NodeAttemptHandlerSucceeded}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type NodeAttemptHandlerSucceeded = Schema.Schema.Type<
+  typeof NodeAttemptHandlerSucceeded
+>
+
+const NodeAttemptHandlerApplicationFailedStruct = Schema.TaggedStruct(
+  "ApplicationFailed",
+  {
+    handlerResultVersion: Schema.Literal(1),
+    attempt: Wire.PositiveSafeInt,
+    activityDigest: Wire.OperationDigest,
+    failure: Schema.Struct({
+      _tag: Schema.Literal("ApplicationFailure"),
+      failureCauseVersion: Schema.Literal(1),
+      activityDigest: Wire.OperationDigest,
+      attempt: Wire.PositiveSafeInt,
+      identity: ActivityPolicyV3.FailureIdentity,
+      failure: Wire.InlineEncodedPayload
+    })
+  }
+)
+
+/**
+ * Transport-neutral typed failure returned by one exact node handler.
+ *
+ * **Details**
+ *
+ * The duplicated coordinates make the result independently inspectable and
+ * must equal the nested application-failure coordinates.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const NodeAttemptHandlerApplicationFailed = NodeAttemptHandlerApplicationFailedStruct.check(
+  Schema.makeFilter((value) => {
+    const issues: Array<Schema.FilterIssue> = []
+    if (value.attempt !== value.failure.attempt) {
+      issues.push({
+        path: ["failure", "attempt"],
+        issue: "failure attempt must equal the handler-result attempt"
+      })
+    }
+    if (
+      value.activityDigest !==
+        value.failure.activityDigest
+    ) {
+      issues.push({
+        path: ["failure", "activityDigest"],
+        issue: "failure activityDigest must equal the handler-result digest"
+      })
+    }
+    return issues
+  })
+).annotate({
+  identifier: "WorkflowEffectSemanticV3NodeAttemptHandlerApplicationFailed",
+  parseOptions: strictParseOptions
+})
+
+/**
+ * The decoded type of {@link NodeAttemptHandlerApplicationFailed}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type NodeAttemptHandlerApplicationFailed = Schema.Schema.Type<
+  typeof NodeAttemptHandlerApplicationFailed
+>
+
+/**
+ * Complete transport-neutral result vocabulary of a node handler.
+ *
+ * **Details**
+ *
+ * Timeout is deliberately absent: only the workflow-side retry controller may
+ * select a timeout terminal. Defects and interruption remain in the Effect
+ * cause channel and are not representable here.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const NodeAttemptHandlerResult = Schema.Union([
+  NodeAttemptHandlerSucceeded,
+  NodeAttemptHandlerApplicationFailed
+]).annotate({
+  identifier: "WorkflowEffectSemanticV3NodeAttemptHandlerResult",
+  parseOptions: strictParseOptions
+})
+
+/**
+ * The decoded type of {@link NodeAttemptHandlerResult}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type NodeAttemptHandlerResult = Schema.Schema.Type<
+  typeof NodeAttemptHandlerResult
+>
+
+/**
  * Explicit worker-side start gate for one managed node attempt.
  *
  * **Details**
@@ -635,6 +813,144 @@ export const bind = (
   )
 }
 
+const decodeNodeAttemptExecutionBackend = Schema.decodeUnknownResult(
+  NodeAttemptExecutionBackend,
+  strictParseOptions
+)
+
+const sameNodeAttemptExecutionBackend = (
+  left: NodeAttemptExecutionBackend,
+  right: NodeAttemptExecutionBackend
+): boolean =>
+  left.backendBindingVersion === right.backendBindingVersion &&
+  left.backendId === right.backendId &&
+  left.backendVersion === right.backendVersion &&
+  left.configurationDigest === right.configurationDigest
+
+/**
+ * Binds one exact managed attempt to an explicit execution backend.
+ *
+ * **Details**
+ *
+ * The guard name depends only on the stable semantic activity coordinates and
+ * attempt. Its recorded value contains the generic backend identity and
+ * optional provider-owned configuration digest. Replaying an incomplete
+ * attempt with another backend or configuration then fails before handler
+ * construction or dispatch.
+ *
+ * @category execution
+ * @since 4.0.0
+ */
+export const bindNodeAttemptExecutionBackend = (
+  resolution: SemanticExecutableRegistryV3.ResolvedNodeAttemptActivity,
+  input: NodeAttemptExecutionBackend
+): Effect.Effect<
+  void,
+  EffectWorkflowSemanticError,
+  Requirements
+> => {
+  if (
+    !SemanticExecutableRegistryV3.isResolvedActivity(resolution) ||
+    resolution._tag !== "NodeAttempt"
+  ) {
+    return Effect.fail(error(
+      ErrorCodes.InvalidActivityResolution,
+      "Execution-backend binding requires an exact NodeAttempt resolution"
+    ))
+  }
+  let backend: ReturnType<
+    typeof decodeNodeAttemptExecutionBackend
+  >
+  try {
+    backend = decodeNodeAttemptExecutionBackend(input)
+  } catch {
+    return Effect.fail(error(
+      ErrorCodes.InvalidExecutionBackend,
+      "Node-attempt execution-backend validation threw unexpectedly",
+      {
+        nodeId: resolution.node.binding.nodeId,
+        operationId: resolution.operation.document.operationId,
+        currentDigest: resolution.operation.operationDigest
+      }
+    ))
+  }
+  if (Result.isFailure(backend)) {
+    return Effect.fail(error(
+      ErrorCodes.InvalidExecutionBackend,
+      `Invalid node-attempt execution backend: ${backend.failure.message}`,
+      {
+        nodeId: resolution.node.binding.nodeId,
+        operationId: resolution.operation.document.operationId,
+        currentDigest: resolution.operation.operationDigest
+      }
+    ))
+  }
+  const document = resolution.operation.document
+  if (document._tag !== "Activity") {
+    return Effect.fail(error(
+      ErrorCodes.InvalidActivityResolution,
+      "Execution-backend binding requires a managed Activity descriptor",
+      {
+        nodeId: resolution.node.binding.nodeId,
+        operationId: document.operationId,
+        currentDigest: resolution.operation.operationDigest
+      }
+    ))
+  }
+  const coordinates = SemanticOperationV3.nativeCoordinates(
+    resolution.operation
+  )
+  if (Result.isFailure(coordinates)) {
+    return Effect.fail(error(
+      ErrorCodes.InvalidNativeCoordinates,
+      coordinates.failure.message,
+      {
+        nodeId: resolution.node.binding.nodeId,
+        operationId: document.operationId,
+        currentDigest: resolution.operation.operationDigest
+      }
+    ))
+  }
+  const name = NativeName.executionBackendBindingName(
+    coordinates.success
+  )
+  if (Result.isFailure(name)) {
+    return Effect.fail(error(
+      ErrorCodes.InvalidNativeCoordinates,
+      name.failure.message,
+      {
+        nodeId: resolution.node.binding.nodeId,
+        operationId: document.operationId,
+        currentDigest: resolution.operation.operationDigest
+      }
+    ))
+  }
+  const current = Object.freeze(backend.success)
+  return NativeActivity.make({
+    name: name.success,
+    success: NodeAttemptExecutionBackend,
+    execute: Effect.succeed(current)
+  }).pipe(
+    Effect.provideService(
+      NativeActivity.CurrentAttempt,
+      document.attempt
+    ),
+    Effect.flatMap((committed) =>
+      sameNodeAttemptExecutionBackend(committed, current)
+        ? Effect.void
+        : Effect.fail(error(
+          ErrorCodes.ExecutionBackendDrift,
+          "Native node-attempt coordinates are already bound to a different execution backend or configuration",
+          {
+            nodeId: resolution.node.binding.nodeId,
+            operationId: document.operationId,
+            currentDigest: resolution.operation.operationDigest
+          }
+        ))
+    )
+  )
+}
+
 /**
  * Executes one descriptor-bound semantic activity attempt through native
  * `Activity`.
@@ -735,7 +1051,12 @@ const nativeResolvedActivity = <A, E, R>(
 const executeResolvedActivityCompletion = <A, E, R>(
   resolution: SemanticExecutableRegistryV3.ResolvedActivity,
   execute: Effect.Effect<A, E, R>,
-  options: ActivityExecutionOptions
+  options: ActivityExecutionOptions,
+  beforeExecution?: Effect.Effect<
+    void,
+    EffectWorkflowSemanticError,
+    Requirements
+  >
 ): Effect.Effect<
   NativeActivity.Completed<A, E>,
   EffectWorkflowSemanticError,
@@ -774,7 +1095,12 @@ const executeResolvedActivityCompletion = <A, E, R>(
     execute,
     options
   )
-  return Effect.andThen(bind(operation), native) as Effect.Effect<
+  return Effect.andThen(
+    bind(operation),
+    beforeExecution === undefined
+      ? native
+      : Effect.andThen(beforeExecution, native)
+  ) as Effect.Effect<
     NativeActivity.Completed<A, E>,
     EffectWorkflowSemanticError,
     | Requirements
@@ -885,13 +1211,8 @@ const captureNodeOutput = (
 }
 
 const prepareNodeHandlerEffect = (
-  resolution: ResolvedNodeExecutionActivity,
-  operationName: string
-): Effect.Effect<
-  Effect.Effect<unknown, unknown>,
-  never,
-  NativeWorkflowEngine.WorkflowInstance
-> =>
+  resolution: ResolvedNodeExecutionActivity
+): Effect.Effect<Effect.Effect<unknown, unknown>> =>
   Effect.gen(function*() {
     const document = resolution.operation.document
     if (document._tag !== "Activity") {
@@ -920,18 +1241,26 @@ const prepareNodeHandlerEffect = (
         "Pinned node configuration is absent or incompatible in the semantic plan"
       ))
     }
-    const config = yield* Schema.decodeUnknownEffect(
-      resolution.node.contract.config.schema,
-      strictParseOptions
-    )(semanticNode.config).pipe(
-      Effect.mapError((cause) =>
-        activityDefect(
-          resolution,
-          ActivityDefectCodes.InvalidConfiguration,
-          `Pinned node configuration is invalid: ${cause.message}`
+    const config = yield* (
+      Schema.decodeUnknownEffect(
+        resolution.node.contract.config.schema,
+        strictParseOptions
+      )(semanticNode.config).pipe(
+        Effect.mapError((cause) =>
+          activityDefect(
+            resolution,
+            ActivityDefectCodes.InvalidConfiguration,
+            `Pinned node configuration is invalid: ${cause.message}`
+          )
+        ),
+        Effect.orDie,
+        Effect.updateContext((current) =>
+          Context.merge(
+            resolution.node.contract.invocationCodecContext,
+            current
+          ) as Context.Context<any>
         )
-      ),
-      Effect.orDie
+      ) as Effect.Effect<unknown>
     )
     if (document.input._tag === "Blob") {
       return yield* Effect.die(activityDefect(
@@ -940,21 +1269,31 @@ const prepareNodeHandlerEffect = (
         "Node input blobs require an explicit digest-verifying BlobStore adapter"
       ))
     }
-    const inputs = yield* Schema.decodeUnknownEffect(
-      resolution.node.contract.inputSchema,
-      strictParseOptions
-    )(document.input.value).pipe(
-      Effect.mapError((cause) =>
-        activityDefect(
-          resolution,
-          ActivityDefectCodes.InvalidInput,
-          `Node input aggregate is invalid: ${cause.message}`
+    const inputs = yield* (
+      Schema.decodeUnknownEffect(
+        resolution.node.contract.inputSchema,
+        strictParseOptions
+      )(document.input.value).pipe(
+        Effect.mapError((cause) =>
+          activityDefect(
+            resolution,
+            ActivityDefectCodes.InvalidInput,
+            `Node input aggregate is invalid: ${cause.message}`
+          )
+        ),
+        Effect.orDie,
+        Effect.updateContext((current) =>
+          Context.merge(
+            resolution.node.contract.invocationCodecContext,
+            current
+          ) as Context.Context<any>
         )
-      ),
-      Effect.orDie
+      ) as Effect.Effect<unknown>
     )
-    const idempotencyKey = yield* NativeActivity.idempotencyKey(
-      operationName
+    const idempotencyKey = Identity.durableActivityIdempotencyKey(
+      document.occurrence.document.tenantId,
+      document.occurrence.document.runId,
+      document.occurrence.occurrenceDigest
     )
     const handlerEffect = yield* Effect.try({
       try: () => {
@@ -1000,47 +1339,42 @@ const prepareNodeHandlerEffect = (
         ) as Context.Context<any>
       )
     ) as Effect.Effect<unknown, unknown>
-  }) as Effect.Effect<
-    Effect.Effect<unknown, unknown>,
-    never,
-    NativeWorkflowEngine.WorkflowInstance
-  >
+  })
 
 const invokeNodeHandler = (
-  resolution: SemanticExecutableRegistryV3.ResolvedNodeHandlerActivity,
-  operationName: string
-): Effect.Effect<
-  Readonly<Record<string, unknown>>,
-  unknown,
-  NativeWorkflowEngine.WorkflowInstance
-> =>
+  resolution: SemanticExecutableRegistryV3.ResolvedNodeHandlerActivity
+): Effect.Effect<Readonly<Record<string, unknown>>, unknown> =>
   Effect.flatMap(
-    prepareNodeHandlerEffect(resolution, operationName),
+    prepareNodeHandlerEffect(resolution),
     (handlerEffect) =>
       Effect.flatMap(handlerEffect, (value) => {
         const captured = captureNodeOutput(resolution, value)
         if (Result.isFailure(captured)) {
           return Effect.die(captured.failure)
         }
-        return Schema.encodeUnknownEffect(
-          resolution.node.contract.successSchema
-        )(captured.success).pipe(
-          Effect.mapError((cause) =>
-            activityDefect(
-              resolution,
-              ActivityDefectCodes.InvalidOutput,
-              `Node handler output is incompatible with its exact codecs: ${cause.message}`
+        return (
+          Schema.encodeUnknownEffect(
+            resolution.node.contract.successSchema
+          )(captured.success).pipe(
+            Effect.mapError((cause) =>
+              activityDefect(
+                resolution,
+                ActivityDefectCodes.InvalidOutput,
+                `Node handler output is incompatible with its exact codecs: ${cause.message}`
+              )
+            ),
+            Effect.orDie,
+            Effect.as(captured.success),
+            Effect.updateContext((current) =>
+              Context.merge(
+                resolution.node.contract.resultCodecContext,
+                current
+              ) as Context.Context<any>
             )
-          ),
-          Effect.orDie,
-          Effect.as(captured.success)
+          ) as Effect.Effect<Readonly<Record<string, unknown>>>
         )
       })
-  ) as Effect.Effect<
-    Readonly<Record<string, unknown>>,
-    unknown,
-    NativeWorkflowEngine.WorkflowInstance
-  >
+  )
 
 /**
  * Executes one descriptor-bound node-handler attempt through native
@@ -1073,11 +1407,9 @@ export const activity = (
       "Node activity execution requires an exact NodeHandler resolution"
     ))
   }
-  const native = resolve(resolution.operation)
-  if (Result.isFailure(native)) return Effect.fail(native.failure)
   return executeResolvedActivity(
     resolution,
-    invokeNodeHandler(resolution, native.success.operationName),
+    invokeNodeHandler(resolution),
     options
   ) as Effect.Effect<
     unknown,
@@ -1090,6 +1422,34 @@ const decodeManagedOutcome = Schema.decodeUnknownResult(
   SemanticOperationV3.NodeAttemptOutcome,
   strictParseOptions
 )
+
+const decodeNodeAttemptHandlerResult = Schema.decodeUnknownResult(
+  NodeAttemptHandlerResult,
+  strictParseOptions
+)
+
+const admitNodeAttemptHandlerResult = (
+  resolution: SemanticExecutableRegistryV3.ResolvedNodeAttemptActivity,
+  input: unknown
+): Effect.Effect<NodeAttemptHandlerResult> => {
+  let admitted: ReturnType<typeof decodeNodeAttemptHandlerResult>
+  try {
+    admitted = decodeNodeAttemptHandlerResult(input)
+  } catch {
+    return Effect.die(activityDefect(
+      resolution,
+      ActivityDefectCodes.InvalidOutcome,
+      "Node-attempt handler-result validation threw unexpectedly"
+    ))
+  }
+  return Result.isFailure(admitted)
+    ? Effect.die(activityDefect(
+      resolution,
+      ActivityDefectCodes.InvalidOutcome,
+      `Node-attempt handler result is invalid: ${admitted.failure.message}`
+    ))
+    : Effect.succeed(Object.freeze(admitted.success))
+}
 
 const admitManagedOutcome = (
   resolution: SemanticExecutableRegistryV3.ResolvedNodeAttemptActivity,
@@ -1262,10 +1622,10 @@ const managedCompletionTimestamp = (
       }).pipe(Effect.orDie)
   )
 
-const managedSuccess = (
+const handlerSuccess = (
   resolution: SemanticExecutableRegistryV3.ResolvedNodeAttemptActivity,
   value: unknown
-): Effect.Effect<SemanticOperationV3.NodeAttemptOutcome> => {
+): Effect.Effect<NodeAttemptHandlerResult> => {
   const captured = captureNodeOutput(resolution, value)
   if (Result.isFailure(captured)) {
     return Effect.die(captured.failure)
@@ -1286,21 +1646,20 @@ const managedSuccess = (
       ActivityDefectCodes.InvalidOutput,
       "Node handler output"
     )
-    return yield* admitManagedOutcome(resolution, {
+    return yield* admitNodeAttemptHandlerResult(resolution, {
       _tag: "Succeeded",
-      outcomeVersion: 2,
+      handlerResultVersion: 1,
       attempt: document.attempt,
       activityDigest: resolution.operation.operationDigest,
-      completedAt: yield* managedCompletionTimestamp(resolution),
       output
     })
   })
 }
 
-const managedFailure = (
+const handlerFailure = (
   resolution: SemanticExecutableRegistryV3.ResolvedNodeAttemptActivity,
   failure: unknown
-): Effect.Effect<SemanticOperationV3.NodeAttemptOutcome> => {
+): Effect.Effect<NodeAttemptHandlerResult> => {
   const document = resolution.operation.document
   if (document._tag !== "Activity") {
     return Effect.die(activityDefect(
@@ -1336,16 +1695,150 @@ const managedFailure = (
       identity: identity.success,
       failure: encodedFailure
     } satisfies ActivityPolicyV3.ApplicationFailure
-    return yield* admitManagedOutcome(resolution, {
+    return yield* admitNodeAttemptHandlerResult(resolution, {
       _tag: "ApplicationFailed",
-      outcomeVersion: 2,
+      handlerResultVersion: 1,
       attempt: document.attempt,
       activityDigest: resolution.operation.operationDigest,
-      completedAt: yield* managedCompletionTimestamp(resolution),
       failure: applicationFailure
     })
   })
 }
+
+const verifyNodeAttemptHandlerResultCoordinates = (
+  resolution: SemanticExecutableRegistryV3.ResolvedNodeAttemptActivity,
+  result: NodeAttemptHandlerResult
+): Effect.Effect<NodeAttemptHandlerResult> => {
+  const document = resolution.operation.document
+  if (
+    document._tag !== "Activity" ||
+    result.attempt !== document.attempt ||
+    result.activityDigest !== resolution.operation.operationDigest
+  ) {
+    return Effect.die(activityDefect(
+      resolution,
+      ActivityDefectCodes.InvalidOutcome,
+      "Node-attempt handler result does not match its exact activity coordinates"
+    ))
+  }
+  return Effect.succeed(result)
+}
+
+const validateNodeAttemptHandlerResultContracts = (
+  resolution: SemanticExecutableRegistryV3.ResolvedNodeAttemptActivity,
+  result: NodeAttemptHandlerResult
+): Effect.Effect<NodeAttemptHandlerResult> => {
+  const decode = (
+    schema: Schema.Top,
+    payload: unknown,
+    defectCode:
+      | typeof ActivityDefectCodes.InvalidOutput
+      | typeof ActivityDefectCodes.InvalidFailure,
+    label: string
+  ): Effect.Effect<void> =>
+    Schema.decodeUnknownEffect(
+      schema,
+      strictParseOptions
+    )(payload).pipe(
+      Effect.updateContext((current) =>
+        Context.merge(
+          resolution.node.contract.resultCodecContext,
+          current
+        ) as Context.Context<any>
+      ),
+      Effect.mapError((cause) =>
+        activityDefect(
+          resolution,
+          defectCode,
+          `${label} is incompatible with its exact codecs: ${cause.message}`
+        )
+      ),
+      Effect.orDie,
+      Effect.asVoid
+    ) as Effect.Effect<void>
+  if (result._tag === "Succeeded") {
+    return Effect.as(
+      decode(
+        resolution.node.contract.successSchema,
+        result.output.value,
+        ActivityDefectCodes.InvalidOutput,
+        "Transport-provided node output"
+      ),
+      result
+    )
+  }
+  return Effect.flatMap(
+    decode(
+      resolution.node.contract.failure.schema,
+      result.failure.failure.value,
+      ActivityDefectCodes.InvalidFailure,
+      "Transport-provided node failure"
+    ),
+    (): Effect.Effect<NodeAttemptHandlerResult> => {
+      const expected = ActivityPolicyV3.extractFailureIdentity(
+        resolution.node.binding.activityPolicy.retry.failureIdentity,
+        result.failure.failure.value
+      )
+      if (Result.isFailure(expected)) {
+        return Effect.die(activityDefect(
+          resolution,
+          ActivityDefectCodes.InvalidFailureIdentity,
+          `Transport-provided node failure has no valid policy-pinned identity: ${expected.failure.message}`
+        ))
+      }
+      const actual = result.failure.identity
+      return expected.success.failureIdentityVersion ===
+            actual.failureIdentityVersion &&
+          expected.success.errorTag === actual.errorTag &&
+          expected.success.errorCode === actual.errorCode
+        ? Effect.succeed(result)
+        : Effect.die(activityDefect(
+          resolution,
+          ActivityDefectCodes.InvalidFailureIdentity,
+          "Transport-provided node failure identity does not match its exact policy contract"
+        ))
+    }
+  )
+}
+
+const completeManagedNodeAttemptHandlerResult = (
+  resolution: SemanticExecutableRegistryV3.ResolvedNodeAttemptActivity,
+  result: NodeAttemptHandlerResult,
+  validateTransportContracts = false
+): Effect.Effect<SemanticOperationV3.NodeAttemptOutcome> =>
+  Effect.gen(function*() {
+    const coordinates = yield* verifyNodeAttemptHandlerResultCoordinates(
+      resolution,
+      result
+    )
+    const verified = validateTransportContracts
+      ? yield* validateNodeAttemptHandlerResultContracts(
+        resolution,
+        coordinates
+      )
+      : coordinates
+    const completedAt = yield* managedCompletionTimestamp(resolution)
+    return yield* admitManagedOutcome(
+      resolution,
+      verified._tag === "Succeeded"
+        ? {
+          _tag: "Succeeded",
+          outcomeVersion: 2,
+          attempt: verified.attempt,
+          activityDigest: verified.activityDigest,
+          completedAt,
+          output: verified.output
+        }
+        : {
+          _tag: "ApplicationFailed",
+          outcomeVersion: 2,
+          attempt: verified.attempt,
+          activityDigest: verified.activityDigest,
+          completedAt,
+          failure: verified.failure
+        }
+    )
+  })
 
 const verifyManagedOutcomeCoordinates = (
   resolution: SemanticExecutableRegistryV3.ResolvedNodeAttemptActivity,
@@ -1366,9 +1859,108 @@ const verifyManagedOutcomeCoordinates = (
   return Effect.succeed(outcome)
 }
 
+const executeManagedNodeAttemptHandler = (
+  resolution: SemanticExecutableRegistryV3.ResolvedNodeAttemptActivity
+): Effect.Effect<NodeAttemptHandlerResult> =>
+  Effect.flatMap(
+    prepareNodeHandlerEffect(resolution),
+    (handlerEffect) =>
+      Effect.matchEffect(handlerEffect, {
+        onSuccess: (value) => handlerSuccess(resolution, value),
+        onFailure: (failure) => handlerFailure(resolution, failure)
+      })
+  )
+
+/**
+ * Runs one already-admitted node-attempt handler without choosing a durable
+ * transport.
+ *
+ * **Details**
+ *
+ * This is the transport-neutral worker boundary shared by native activity and
+ * external-worker adapters. It validates the exact process-local executable
+ * resolution, constructs the stable tenant-scoped handler context, and turns
+ * only the handler's typed failure into `ApplicationFailed`. Protocol and
+ * codec failures remain defects, as do interruption and handler defects.
+ *
+ * This function owns no persistence, queue, retry, timeout, cancellation,
+ * lease, or scheduling behavior. A transport must authenticate and bind the
+ * operation before invoking it and must persist the returned result through
+ * its own explicit durability boundary.
+ *
+ * @category execution
+ * @since 4.0.0
+ */
+export const runNodeAttemptHandler = (
+  resolution: SemanticExecutableRegistryV3.ResolvedNodeAttemptActivity
+): Effect.Effect<
+  NodeAttemptHandlerResult,
+  EffectWorkflowSemanticError
+> => {
+  if (
+    !SemanticExecutableRegistryV3.isResolvedActivity(resolution) ||
+    resolution._tag !== "NodeAttempt"
+  ) {
+    return Effect.fail(error(
+      ErrorCodes.InvalidActivityResolution,
+      "Worker-side node-attempt execution requires an exact NodeAttempt resolution"
+    ))
+  }
+  return Effect.flatMap(
+    executeManagedNodeAttemptHandler(resolution),
+    (result) =>
+      verifyNodeAttemptHandlerResultCoordinates(
+        resolution,
+        result
+      )
+  )
+}
+
+/**
+ * Converts one exact worker result into a canonical managed-attempt outcome.
+ *
+ * **Details**
+ *
+ * The workflow host performs this step after its selected transport returns.
+ * It revalidates the strict closed result vocabulary, exact attempt
+ * coordinates, pinned codecs, and failure identity, then observes the
+ * canonical completion time. It performs no persistence itself; callers place
+ * it inside the authoritative native activity boundary.
+ *
+ * @category execution
+ * @since 4.0.0
+ */
+export const completeNodeAttemptHandlerResult = (
+  resolution: SemanticExecutableRegistryV3.ResolvedNodeAttemptActivity,
+  input: unknown
+): Effect.Effect<
+  SemanticOperationV3.NodeAttemptOutcome,
+  EffectWorkflowSemanticError
+> => {
+  if (
+    !SemanticExecutableRegistryV3.isResolvedActivity(resolution) ||
+    resolution._tag !== "NodeAttempt"
+  ) {
+    return Effect.fail(error(
+      ErrorCodes.InvalidActivityResolution,
+      "Handler-result completion requires an exact NodeAttempt resolution"
+    ))
+  }
+  return Effect.flatMap(
+    admitNodeAttemptHandlerResult(resolution, input),
+    (result) =>
+      completeManagedNodeAttemptHandlerResult(
+        resolution,
+        result,
+        true
+      )
+  )
+}
+
 const executeNodeAttemptCompletion = <R>(
   resolution: SemanticExecutableRegistryV3.ResolvedNodeAttemptActivity,
   options: ActivityExecutionOptions,
+  executionBackend: NodeAttemptExecutionBackend,
   startGate?: Effect.Effect<
     SemanticOperationV3.NodeAttemptTimedOut | undefined,
     never,
@@ -1376,6 +1968,11 @@ const executeNodeAttemptCompletion = <R>(
   >,
   expectedTimeout?: Effect.Effect<
     SemanticOperationV3.NodeAttemptTimedOut | undefined,
+    never,
+    R
+  >,
+  handlerResult?: Effect.Effect<
+    NodeAttemptHandlerResult,
     never,
     R
   >
@@ -1400,18 +1997,15 @@ const executeNodeAttemptCompletion = <R>(
         : "Managed node-attempt start gate requires an exact NodeAttempt resolution"
     ))
   }
-  const native = resolve(resolution.operation)
-  if (Result.isFailure(native)) return Effect.fail(native.failure)
   const executeHandler = Effect.flatMap(
-    prepareNodeHandlerEffect(
-      resolution,
-      native.success.operationName
-    ),
-    (handlerEffect) =>
-      Effect.matchEffect(handlerEffect, {
-        onSuccess: (value) => managedSuccess(resolution, value),
-        onFailure: (failure) => managedFailure(resolution, failure)
-      })
+    handlerResult ??
+      executeManagedNodeAttemptHandler(resolution),
+    (result) =>
+      completeManagedNodeAttemptHandlerResult(
+        resolution,
+        result,
+        handlerResult !== undefined
+      )
   )
   const execute: Effect.Effect<
     SemanticOperationV3.NodeAttemptOutcome,
@@ -1438,7 +2032,11 @@ const executeNodeAttemptCompletion = <R>(
     executeResolvedActivityCompletion(
       resolution,
       execute,
-      options
+      options,
+      bindNodeAttemptExecutionBackend(
+        resolution,
+        executionBackend
+      )
     ),
     (completion) =>
       Exit.isFailure(completion.exit)
@@ -1485,12 +2083,64 @@ export const nodeAttemptCompletion = (
 > =>
   executeNodeAttemptCompletion<never>(
     resolution,
-    options
+    options,
+    NativeDirectNodeAttemptBackend
   ) as Effect.Effect<
     NodeAttemptCompletion,
     EffectWorkflowSemanticError,
     Requirements
   >
+
+/**
+ * Persists one transport-provided node-handler result through the exact native
+ * node-attempt activity.
+ *
+ * **Details**
+ *
+ * The supplied Effect is an execution strategy, not a second semantic
+ * authority. It may use a queue, local pool, or another application-provided
+ * transport, but its only successful value is the closed
+ * {@link NodeAttemptHandlerResult} vocabulary and its typed error channel is
+ * impossible. This boundary binds the operation descriptor, validates exact
+ * result coordinates, decodes the payload again with the host's exact pinned
+ * codec context, recomputes failure identity, observes the workflow-host
+ * completion timestamp, and persists the final
+ * {@link SemanticOperationV3.NodeAttemptOutcome}.
+ *
+ * Interruption and defects from the transport remain native causes. Retry,
+ * timeout, cancellation, scheduling, leasing, and worker supervision are not
+ * supplied here.
+ *
+ * @category execution
+ * @since 4.0.0
+ */
+export const nodeAttemptCompletionWithHandlerResult = <R>(
+  resolution: SemanticExecutableRegistryV3.ResolvedNodeAttemptActivity,
+  executionBackend: NodeAttemptExecutionBackend,
+  handlerResult: Effect.Effect<
+    NodeAttemptHandlerResult,
+    never,
+    R
+  >,
+  options: ActivityOptions
+): Effect.Effect<
+  NodeAttemptCompletion,
+  EffectWorkflowSemanticError,
+  | Requirements
+  | Exclude<
+    R,
+    | NativeWorkflowEngine.WorkflowEngine
+    | NativeWorkflowEngine.WorkflowInstance
+  >
+> =>
+  executeNodeAttemptCompletion(
+    resolution,
+    options,
+    executionBackend,
+    undefined,
+    undefined,
+    handlerResult
+  )
 
 /**
  * Executes one managed node attempt whose complete business outcome is
@@ -1553,6 +2203,7 @@ export const nodeAttemptCompletionWithStartGate = <R>(
   executeNodeAttemptCompletion(
     resolution,
     options,
+    NativeDirectNodeAttemptBackend,
     options.startGate,
     options.expectedTimeout
   )
@@ -2145,10 +2796,7 @@ const prepareBoundRaceParticipant = (
       participant,
       native.success.operationName,
       operation.document.attempt,
-      invokeNodeHandler(
-        participant,
-        native.success.operationName
-      ),
+      invokeNodeHandler(participant),
       options
     ) as Effect.Effect<unknown, unknown, Requirements>)
   }

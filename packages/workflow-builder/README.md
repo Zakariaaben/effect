@@ -308,11 +308,24 @@ Today the package provides:
   fallback;
 - an initial semantic-to-native mapper that admits one-shot static-DAG
   occurrences only from an exact semantic execution, records each operation
-  digest through a disjoint native guard activity before execution, rejects
-  same-coordinate descriptor drift during replay, maps semantic attempts to
-  native `Activity.CurrentAttempt`, requires an explicit infrastructure
-  interruption policy, and forces every positive business timer through
-  `DurableClock` with a zero in-memory threshold;
+  digest and a generic execution-backend pin through disjoint native guard
+  activities before execution, rejects same-coordinate descriptor/backend
+  drift during replay, maps semantic attempts to native
+  `Activity.CurrentAttempt`, exposes a transport-neutral encoded handler
+  result, revalidates transport output/failure codecs and failure identity at
+  the workflow host, requires an explicit infrastructure interruption policy,
+  and forces every positive business timer through `DurableClock` with a zero
+  in-memory threshold;
+- an opt-in protocol-v3 native `DurableQueue` transport for distributed node
+  handlers. Content-addressed routes pin logical queue, deployment, and handler
+  build; strict work items carry the complete operation pin; every delivery
+  reloads and verifies the artifact, operation, executable registry, route, and
+  build before user code. Queue storage, worker loops, waiting, redelivery, and
+  concurrency remain native Effect responsibilities. Offer and attestation
+  retry plus the native queue acquisition-failure limit are explicit. The
+  adapter rejects schedule-to-start/start-to-close until native worker-start
+  fencing exists and claims neither remote cancellation, dead-letter repair,
+  stale-worker completion fencing, nor exactly-once external effects;
 - authenticated ordered `FirstSettled` and `FirstSuccess` semantic races over
   exact node activities, durable timers, and pinned deferred generations.
   Race membership and result contracts are derived rather than caller-supplied;
@@ -348,6 +361,12 @@ Today the package provides:
   external side effect already dispatched. `executeDetailed` exposes that same
   closed durable outcome without decoding or rerunning the handler, allowing
   trusted adapters to retain attempt and activity coordinates.
+  `executeWithExecutor` and `executeDetailedWithExecutor` accept a trusted
+  attempt transport while the retry controller retains attempt creation,
+  receipt-coordinate validation, classification, backoff, and
+  schedule-to-close. An executor without a worker-start handshake is rejected
+  before any durable deadline is armed when schedule-to-start or start-to-close
+  is enabled.
   Schedule-to-start first persists one canonical `ScheduleToStartArmed`
   acknowledgement containing the activity/timer digests, attempt, `armedAt`,
   duration, and absolute deadline. Only that canonical acknowledgement is used
