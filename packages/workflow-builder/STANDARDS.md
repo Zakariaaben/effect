@@ -302,7 +302,15 @@ Implemented foundations:
   validates relation/event identity, target contracts, locator, and lifecycle,
   and replays them through the parent journal; child success continues normal
   flow exactly once. Parent failure and withdrawal remain `failing` or
-  `cancelling` until all target-selected close barriers discharge; and
+  `cancelling` until all target-selected close barriers discharge. The
+  child-lifecycle preparation boundary retains authoritative source order and
+  occurrence time, derives canonical projection identity and causation, and
+  proves the next transition through the protocol-v3 reducer. Its native
+  ingress also proves the exact artifact binding and deterministic child
+  locator. It deliberately performs no persistence: a host authority must
+  first-write and deduplicate the source fact, allocate its source coordinates
+  once, compare-and-set the parent relation head, and atomically append or
+  enqueue the prepared projection; and
 - a thin protocol-v3 host over an injected native Effect `WorkflowEngine`, plus
   bounded replay-stable operation names and memory-backed contract tests for
   native activity replay, deferred suspension/resume, forced-durable clocks,
@@ -397,9 +405,10 @@ Not yet implemented and therefore not claimed:
   `FixedMultiInstance/1` or `CollectionMultiInstance/1` journals;
 - a persistent transactional parent/child execution authority and the backend
   mechanisms that it requires: store, scheduler, outbox relay, cooperating
-  child lifecycle reporter, authenticated ingress/transport, and cluster
-  crash/restart/failover proof. Native deterministic start and interruption
-  delegation do not by themselves supply those guarantees;
+  child lifecycle source outbox, authenticated ingress/transport, and cluster
+  crash/restart/failover proof. Pure lifecycle preparation plus native
+  deterministic start and interruption delegation do not by themselves supply
+  those guarantees;
 - a production native Effect Workflow adapter, rebuildable BPMN semantic
   timeline/export, externally authenticated history anchors, migration tooling
   for pre-fingerprint states/journals, and isolated evaluator adapters or any

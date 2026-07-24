@@ -1081,6 +1081,18 @@ callId)` and atomically mutate every record named by one relation transition:
 - a child terminal projection is deduplicated by its source event identity and
   cannot be accepted after the relation was abandoned.
 
+`ChildWorkflowLifecycleV3` is the pure preparation boundary for those
+lifecycle projections. It accepts a strict immutable source fact whose source
+sequence and occurrence time were allocated by the first durable write, derives
+canonical parent event identity and causation, allocates only the next
+relation-local sequence, and proves the transition with
+`ChildWorkflowStateV3.reduce`. `EffectWorkflowBpmnCallActivityV3` can further
+bind that preparation to one exact native artifact and deterministic child
+locator. Both return opaque capabilities and perform no append, publish, or
+clock read. On Activity replay, the child host must therefore return the
+original canonical source fact; resampling its time or source sequence under
+the same source event ID is a conflict, not a retry.
+
 Two independently atomic parent and child stores do not satisfy this boundary:
 they permit start-versus-cancel split brain and cross-run partial commits. The
 process-local reference authority therefore uses one state owner, while a

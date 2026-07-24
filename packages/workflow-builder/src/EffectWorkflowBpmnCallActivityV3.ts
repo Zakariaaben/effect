@@ -30,7 +30,9 @@ import * as Result from "effect/Result"
 import * as Schema from "effect/Schema"
 import type * as NativeWorkflowEngine from "effect/unstable/workflow/WorkflowEngine"
 import * as BpmnCallActivityV3 from "./BpmnCallActivityV3.ts"
+import * as ChildWorkflowLifecycleV3 from "./ChildWorkflowLifecycleV3.ts"
 import * as ChildWorkflowProtocolV3 from "./ChildWorkflowProtocolV3.ts"
+import type * as ChildWorkflowStateV3 from "./ChildWorkflowStateV3.ts"
 import type * as ChildWorkflowV3 from "./ChildWorkflowV3.ts"
 import * as EffectWorkflowBackendV3 from "./EffectWorkflowBackendV3.ts"
 import * as Json from "./internal/json.ts"
@@ -56,6 +58,22 @@ export const AdapterVersion = 1 as const
  * @since 4.0.0
  */
 export const ReceiptVersion = 1 as const
+
+/**
+ * Version of native lifecycle ingress requests.
+ *
+ * @category constants
+ * @since 4.0.0
+ */
+export const LifecycleIngressRequestVersion = 1 as const
+
+/**
+ * Version of prepared native lifecycle ingress capabilities.
+ *
+ * @category constants
+ * @since 4.0.0
+ */
+export const PreparedLifecycleIngressVersion = 1 as const
 
 /**
  * Stable backend identifier stored in portable CallActivity locators.
@@ -93,6 +111,59 @@ export const NativeBackendLocator = BpmnCallActivityV3.BackendLocator.check(
  */
 export type NativeBackendLocator = Schema.Schema.Type<
   typeof NativeBackendLocator
+>
+
+const NativeLifecycleIngressRequestStruct = Schema.Struct({
+  requestVersion: Schema.Literal(LifecycleIngressRequestVersion),
+  lifecycle: ChildWorkflowLifecycleV3.PrepareLifecycleEventRequest,
+  locator: Schema.optionalKey(NativeBackendLocator)
+}).annotate({
+  identifier: "WorkflowEffectWorkflowBpmnCallActivityV3NativeLifecycleIngressRequestStruct",
+  parseOptions: strictParseOptions
+})
+
+/**
+ * Exact native address plus one lifecycle source fact.
+ *
+ * **Details**
+ *
+ * Accepted-start, cancellation-acceptance, and terminal facts require the
+ * exact native child locator. A permanent `ChildStartFailed` fact represents a
+ * run which was never accepted and therefore forbids a locator.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const NativeLifecycleIngressRequest = NativeLifecycleIngressRequestStruct.check(
+  Schema.makeFilter((request) => {
+    const startFailed = request.lifecycle.fact._tag === "ChildStartFailed"
+    if (startFailed && request.locator !== undefined) {
+      return [{
+        path: ["locator"],
+        issue: "ChildStartFailed must not claim an accepted native child address"
+      }]
+    }
+    if (!startFailed && request.locator === undefined) {
+      return [{
+        path: ["locator"],
+        issue: "Child-originated lifecycle facts require the exact native child address"
+      }]
+    }
+    return []
+  })
+).annotate({
+  identifier: "WorkflowEffectWorkflowBpmnCallActivityV3NativeLifecycleIngressRequest",
+  parseOptions: strictParseOptions
+})
+
+/**
+ * The decoded type of {@link NativeLifecycleIngressRequest}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type NativeLifecycleIngressRequest = Schema.Schema.Type<
+  typeof NativeLifecycleIngressRequest
 >
 
 /**
@@ -538,6 +609,7 @@ export const ErrorCodes = {
   UnexpectedCommand: "UnexpectedCommand",
   InvalidBindingRegistry: "InvalidBindingRegistry",
   DuplicateBinding: "DuplicateBinding",
+  InvalidLifecycleIngressRequest: "InvalidLifecycleIngressRequest",
   InvalidAuthorityResult: "InvalidAuthorityResult",
   AuthorityCommandMismatch: "AuthorityCommandMismatch",
   AuthorityClaimMismatch: "AuthorityClaimMismatch",
@@ -557,6 +629,7 @@ const ErrorCode = Schema.Literals([
   ErrorCodes.UnexpectedCommand,
   ErrorCodes.InvalidBindingRegistry,
   ErrorCodes.DuplicateBinding,
+  ErrorCodes.InvalidLifecycleIngressRequest,
   ErrorCodes.InvalidAuthorityResult,
   ErrorCodes.AuthorityCommandMismatch,
   ErrorCodes.AuthorityClaimMismatch,
@@ -767,6 +840,158 @@ export class ChildRelationAuthority extends Context.Service<
 >()(
   "@effect/workflow-builder/EffectWorkflowBpmnCallActivityV3/ChildRelationAuthority"
 ) {}
+
+const decodeNativeLifecycleIngressRequest = Schema.decodeUnknownResult(
+  NativeLifecycleIngressRequest,
+  strictParseOptions
+)
+
+const validateNativeLifecycleIngressRequest = (
+  input: unknown
+): Result.Result<
+  NativeLifecycleIngressRequest,
+  EffectWorkflowBpmnCallActivityError
+> => {
+  const snapshot = Json.snapshot(input)
+  if (Result.isFailure(snapshot)) {
+    return Result.fail(adapterError(
+      ErrorCodes.InvalidLifecycleIngressRequest,
+      `Native child lifecycle ingress must be bounded strict JSON: ${snapshot.failure.message}`
+    ))
+  }
+  let decoded: ReturnType<
+    typeof decodeNativeLifecycleIngressRequest
+  >
+  try {
+    decoded = decodeNativeLifecycleIngressRequest(snapshot.success)
+  } catch {
+    return Result.fail(adapterError(
+      ErrorCodes.InvalidLifecycleIngressRequest,
+      "Native child lifecycle ingress validation threw unexpectedly"
+    ))
+  }
+  return Result.isFailure(decoded)
+    ? Result.fail(adapterError(
+      ErrorCodes.InvalidLifecycleIngressRequest,
+      `Invalid native child lifecycle ingress: ${decoded.failure}`
+    ))
+    : Result.succeed(
+      snapshot.success as unknown as NativeLifecycleIngressRequest
+    )
+}
+
+/**
+ * Opaque native child lifecycle projection prepared for parent ingress.
+ *
+ * **Details**
+ *
+ * This value proves only deterministic validation and transition preparation.
+ * A durable relation authority must still atomically deduplicate the source
+ * fact, append `lifecycle.event` at `expectedPreviousSequence`, and apply or
+ * enqueue `command` against the matching parent execution.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export interface PreparedNativeLifecycleIngress {
+  readonly preparedVersion: typeof PreparedLifecycleIngressVersion
+  readonly bindingArtifactDigest: Wire.ArtifactDigest
+  readonly expectedPreviousSequence: number
+  readonly locator?: NativeBackendLocator
+  readonly lifecycle: ChildWorkflowLifecycleV3.PreparedLifecycleEvent
+  readonly command: BpmnCallActivityV3.ApplyChildEventCommand
+}
+
+const preparedNativeLifecycleIngress = new WeakSet<object>()
+
+/**
+ * Tests whether a value is the exact capability returned by
+ * {@link prepareNativeLifecycleIngress}.
+ *
+ * @category guards
+ * @since 4.0.0
+ */
+export const isPreparedNativeLifecycleIngress = (
+  value: unknown
+): value is PreparedNativeLifecycleIngress =>
+  typeof value === "object" &&
+  value !== null &&
+  preparedNativeLifecycleIngress.has(value)
+
+/**
+ * Prepares one authoritative native child lifecycle fact for parent ingress.
+ *
+ * **Details**
+ *
+ * The exact prepared backend binding must reproduce the relation's complete
+ * child target. When a locator is required, its deterministic execution ID is
+ * recomputed from the relation's tenant and child run before any command is
+ * returned. The function neither persists nor applies the command.
+ *
+ * `ChildStartFailed` remains a start-authority decision after permanent
+ * rejection or retry exhaustion. It is the only lifecycle fact accepted
+ * without a native locator.
+ *
+ * @category constructors
+ * @since 4.0.0
+ */
+export const prepareNativeLifecycleIngress = Effect.fnUntraced(function*(
+  binding: EffectWorkflowBackendV3.PreparedBinding,
+  state: ChildWorkflowStateV3.ChildWorkflowState,
+  requestInput: unknown
+) {
+  const request = yield* Effect.fromResult(
+    validateNativeLifecycleIngressRequest(requestInput)
+  )
+  const lifecycle = yield* Effect.fromResult(
+    ChildWorkflowLifecycleV3.prepareLifecycleEvent(
+      state,
+      request.lifecycle
+    )
+  )
+  yield* Effect.fromResult(
+    EffectWorkflowBackendV3.validateChildTargetBinding(
+      binding,
+      lifecycle.nextState.relation.target
+    )
+  )
+  if (request.locator !== undefined) {
+    const expectedExecutionId = yield* EffectWorkflowBackendV3.executionIdForRun(binding, {
+      tenantId: lifecycle.nextState.tenantId,
+      runId: lifecycle.nextState.relation.childRunId
+    })
+    if (request.locator.executionId !== expectedExecutionId) {
+      return yield* Effect.fail(adapterError(
+        ErrorCodes.NativeExecutionAddressMismatch,
+        "The lifecycle source locator addresses a different native child run",
+        lifecycle.event.eventId
+      ))
+    }
+  }
+  const command = yield* Effect.fromResult(
+    BpmnCallActivityV3.validateApplyChildEventCommand({
+      commandVersion: BpmnCallActivityV3.ApplyChildEventCommandVersion,
+      executionProtocolVersion: ChildWorkflowProtocolV3.ExecutionProtocolVersion,
+      callFrameId: lifecycle.nextState.callId,
+      event: lifecycle.event,
+      ...(request.locator === undefined
+        ? undefined
+        : { backendLocator: request.locator })
+    })
+  )
+  const prepared: PreparedNativeLifecycleIngress = Object.freeze({
+    preparedVersion: PreparedLifecycleIngressVersion,
+    bindingArtifactDigest: binding.artifactDigest,
+    expectedPreviousSequence: lifecycle.expectedPreviousSequence,
+    ...(request.locator === undefined
+      ? undefined
+      : { locator: request.locator }),
+    lifecycle,
+    command
+  })
+  preparedNativeLifecycleIngress.add(prepared)
+  return prepared
+})
 
 const validateServiceResult = <A>(
   schema: Schema.Codec<A, Schema.Json>,

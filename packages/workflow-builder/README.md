@@ -174,6 +174,19 @@ Today the package provides:
   start, cancellation, or termination. The host still supplies the
   transactional relation authority, outbox relay, cooperating child lifecycle
   reporter, authenticated ingress, and persistent/cluster conformance evidence;
+- a strict `ChildWorkflowLifecycleV3` preparation boundary for authoritative
+  child-start, cancellation-acceptance, success, failure, and cancellation
+  facts. Source order and occurrence time remain in the immutable source fact,
+  while the serialized parent authority supplies the monotonic projection time
+  and compare-and-set relation sequence. Canonical event identity, causation,
+  relation coordinates, contracts, and lifecycle are proved through the
+  protocol-v3 reducer before an opaque preparation capability is returned. The
+  native CallActivity adapter additionally checks the exact prepared artifact
+  binding and deterministic child locator before returning an
+  `ApplyChildEvent` command. Neither module persists or applies that command:
+  source deduplication, first-write timestamp allocation, transactional inbox/
+  outbox, authenticated delivery, and replay/conflict receipts remain host
+  authority responsibilities;
 - an explicitly bounded protocol-v3 Task/Boundary Error execution slice.
   Immutable task bindings and exact failure-identity-to-Error mappings are part
   of the executable fingerprint. `resolveTask` routes exact success normally,
@@ -561,13 +574,16 @@ BPMN Error, Cancel, or success.
 This is portable parent/child semantics plus an optional native dispatch
 adapter, not a complete backend implementation. The package still supplies no
 persistent relation store, scheduler, outbox relay, inbox/transport,
-authoritative child lifecycle reporter, or cluster/failover authority. A host
-must atomically coordinate the committed parent transition and egress command,
-then deliver authoritative child events. The native adapter delegates
-deterministic start and safe interruption to Effect Workflow without deriving
-semantic facts from operational acknowledgements. Persistent crash/restart and
-multi-worker evidence remains pending, and the package makes no full BPMN
-Process Execution Conformance claim.
+authoritative lifecycle source outbox, or cluster/failover authority. The
+package prepares strict child-source facts and their exact parent projection,
+but a host must first-write and deduplicate each source fact, atomically
+coordinate the committed parent transition and egress command, then deliver
+the canonical fact. In particular, replay must reuse the first allocated
+source sequence and occurrence time. The native adapter delegates deterministic
+start and safe interruption to Effect Workflow without deriving semantic facts
+from operational acknowledgements. Persistent crash/restart and multi-worker
+evidence remains pending, and the package makes no full BPMN Process Execution
+Conformance claim.
 
 See the runnable [typed DAG example](./examples/basic.ts),
 [BPMN XML execution example](./examples/bpmn-executable.ts), and detailed

@@ -147,6 +147,11 @@ export * as BpmnXmlAst from "./BpmnXmlAst.ts"
 /**
  * @since 4.0.0
  */
+export * as ChildWorkflowLifecycleV3 from "./ChildWorkflowLifecycleV3.ts"
+
+/**
+ * @since 4.0.0
+ */
 export * as ChildWorkflowProtocolV3 from "./ChildWorkflowProtocolV3.ts"
 
 /**

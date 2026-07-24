@@ -7,7 +7,9 @@ import * as Result from "effect/Result"
 import { WorkflowEngine } from "effect/unstable/workflow"
 import { createHash } from "node:crypto"
 import * as CallActivity from "../src/BpmnCallActivityV3.ts"
-import type * as ChildProtocol from "../src/ChildWorkflowProtocolV3.ts"
+import * as ChildLifecycle from "../src/ChildWorkflowLifecycleV3.ts"
+import * as ChildProtocol from "../src/ChildWorkflowProtocolV3.ts"
+import * as ChildState from "../src/ChildWorkflowStateV3.ts"
 import * as Child from "../src/ChildWorkflowV3.ts"
 import * as CompilerV2 from "../src/CompilerV2.ts"
 import * as DigestV3 from "../src/DigestV3.ts"
@@ -19,6 +21,10 @@ import * as Registry from "../src/Registry.ts"
 import * as Workflow from "../src/Workflow.ts"
 
 const digest = (character: string): `sha256:${string}` => `sha256:${character.repeat(64)}`
+
+const timestamp = (
+  second: number
+): string => `2026-07-24T10:00:${String(second).padStart(2, "0")}.000Z`
 
 const crypto = Crypto.make({
   randomBytes: (size) => new Uint8Array(size),
@@ -213,6 +219,65 @@ const makeSchedule = (
     "parent-call-activated"
   ))
 
+const makeScheduledState = (
+  relation: Child.ChildRelation
+): ChildState.ChildWorkflowState =>
+  success(ChildState.fold([
+    success(CallActivity.makeScheduledEvent(
+      relation,
+      {
+        _tag: "Inline",
+        value: { invoiceId: "invoice-1" }
+      },
+      timestamp(0),
+      "parent-call-activated"
+    ))
+  ]))
+
+const makeStartAcceptedIngress = (
+  relation: Child.ChildRelation,
+  locator?: NativeCallActivity.NativeBackendLocator
+) => ({
+  requestVersion: NativeCallActivity.LifecycleIngressRequestVersion,
+  lifecycle: {
+    requestVersion: ChildLifecycle.PreparationRequestVersion,
+    recordedAt: timestamp(1),
+    fact: {
+      _tag: "ChildStartAccepted" as const,
+      factVersion: ChildLifecycle.LifecycleFactVersion,
+      childRunId: relation.childRunId,
+      sourceSequence: 1,
+      occurredAt: timestamp(1),
+      childRunStartedEventId: "native-child-run-started"
+    }
+  },
+  ...(locator === undefined ? {} : { locator })
+})
+
+const makeStartFailedIngress = (
+  relation: Child.ChildRelation,
+  locator?: NativeCallActivity.NativeBackendLocator
+) => ({
+  requestVersion: NativeCallActivity.LifecycleIngressRequestVersion,
+  lifecycle: {
+    requestVersion: ChildLifecycle.PreparationRequestVersion,
+    recordedAt: timestamp(1),
+    fact: {
+      _tag: "ChildStartFailed" as const,
+      factVersion: ChildLifecycle.LifecycleFactVersion,
+      childRunId: relation.childRunId,
+      startRequestId: relation.startRequestId,
+      decidedAt: timestamp(1),
+      failureKind: "Rejected" as const,
+      failure: {
+        _tag: "Inline" as const,
+        value: { code: "ChildStartRejected" }
+      }
+    }
+  },
+  ...(locator === undefined ? {} : { locator })
+})
+
 const invocationFor = (
   command: ChildProtocol.Command,
   relation: Child.ChildRelation
@@ -324,6 +389,196 @@ const nativeLayer = (
 }
 
 describe("EffectWorkflowBpmnCallActivityV3", () => {
+  it.effect("prepares an exact opaque start-accepted lifecycle ingress command", () =>
+    Effect.gen(function*() {
+      const verified = yield* makeVerified()
+      const binding = success(Backend.prepare(verified))
+      const relation = makeRelation(makeTarget(verified))
+      const state = makeScheduledState(relation)
+      const executionId = yield* Backend.executionIdForRun(binding, {
+        tenantId: relation.parent.tenantId,
+        runId: relation.childRunId
+      })
+      const locator = nativeLocator(executionId)
+
+      const prepared = yield* NativeCallActivity.prepareNativeLifecycleIngress(
+        binding,
+        state,
+        makeStartAcceptedIngress(relation, locator)
+      )
+
+      assert.isTrue(
+        NativeCallActivity.isPreparedNativeLifecycleIngress(prepared)
+      )
+      assert.isFalse(
+        NativeCallActivity.isPreparedNativeLifecycleIngress({
+          ...prepared
+        })
+      )
+      assert.isTrue(Object.isFrozen(prepared))
+      assert.strictEqual(
+        prepared.preparedVersion,
+        NativeCallActivity.PreparedLifecycleIngressVersion
+      )
+      assert.strictEqual(
+        prepared.bindingArtifactDigest,
+        binding.artifactDigest
+      )
+      assert.strictEqual(prepared.expectedPreviousSequence, 0)
+      assert.deepStrictEqual(prepared.locator, locator)
+      assert.strictEqual(prepared.lifecycle.event.sequence, 1)
+      assert.strictEqual(
+        prepared.lifecycle.event.eventId,
+        ChildProtocol.childStartProjectionEventId(
+          relation.parent.tenantId,
+          relation.parent.parentRunId,
+          relation.parent.callId,
+          "native-child-run-started"
+        )
+      )
+      assert.strictEqual(
+        prepared.lifecycle.event.causationId,
+        "native-child-run-started"
+      )
+      assert.deepStrictEqual(prepared.lifecycle.event.payload, {
+        _tag: "ChildStartAccepted",
+        childRunId: relation.childRunId,
+        startRequestId: relation.startRequestId,
+        childRunStartedEventId: "native-child-run-started"
+      })
+      assert.deepStrictEqual(prepared.command, {
+        commandVersion: CallActivity.ApplyChildEventCommandVersion,
+        executionProtocolVersion: ChildProtocol.ExecutionProtocolVersion,
+        callFrameId: relation.parent.callId,
+        event: prepared.lifecycle.event,
+        backendLocator: locator
+      })
+    }).pipe(provideCrypto))
+
+  it.effect("rejects a lifecycle locator for a different native child run", () =>
+    Effect.gen(function*() {
+      const verified = yield* makeVerified()
+      const binding = success(Backend.prepare(verified))
+      const relation = makeRelation(makeTarget(verified))
+      const state = makeScheduledState(relation)
+      const foreignExecutionId = yield* Backend.executionIdForRun(binding, {
+        tenantId: relation.parent.tenantId,
+        runId: `${relation.childRunId}-foreign`
+      })
+
+      const failure = yield* NativeCallActivity.prepareNativeLifecycleIngress(
+        binding,
+        state,
+        makeStartAcceptedIngress(
+          relation,
+          nativeLocator(foreignExecutionId)
+        )
+      ).pipe(Effect.flip)
+
+      assert.strictEqual(
+        failure.code,
+        NativeCallActivity.ErrorCodes.NativeExecutionAddressMismatch
+      )
+    }).pipe(provideCrypto))
+
+  it.effect("accepts start failure without a locator and rejects one that claims an address", () =>
+    Effect.gen(function*() {
+      const verified = yield* makeVerified()
+      const binding = success(Backend.prepare(verified))
+      const relation = makeRelation(makeTarget(verified))
+      const state = makeScheduledState(relation)
+      const executionId = yield* Backend.executionIdForRun(binding, {
+        tenantId: relation.parent.tenantId,
+        runId: relation.childRunId
+      })
+
+      const prepared = yield* NativeCallActivity.prepareNativeLifecycleIngress(
+        binding,
+        state,
+        makeStartFailedIngress(relation)
+      )
+      assert.strictEqual(
+        prepared.lifecycle.event.payload._tag,
+        "ChildStartFailed"
+      )
+      assert.isFalse("locator" in prepared)
+      assert.isFalse("backendLocator" in prepared.command)
+
+      const failure = yield* NativeCallActivity.prepareNativeLifecycleIngress(
+        binding,
+        state,
+        makeStartFailedIngress(
+          relation,
+          nativeLocator(executionId)
+        )
+      ).pipe(Effect.flip)
+      assert.strictEqual(
+        failure.code,
+        NativeCallActivity.ErrorCodes.InvalidLifecycleIngressRequest
+      )
+    }).pipe(provideCrypto))
+
+  it.effect("rejects a child-origin lifecycle fact without its native locator", () =>
+    Effect.gen(function*() {
+      const verified = yield* makeVerified()
+      const binding = success(Backend.prepare(verified))
+      const relation = makeRelation(makeTarget(verified))
+      const failure = yield* NativeCallActivity.prepareNativeLifecycleIngress(
+        binding,
+        makeScheduledState(relation),
+        makeStartAcceptedIngress(relation)
+      ).pipe(Effect.flip)
+
+      assert.strictEqual(
+        failure.code,
+        NativeCallActivity.ErrorCodes.InvalidLifecycleIngressRequest
+      )
+    }).pipe(provideCrypto))
+
+  it.effect("rejects lifecycle ingress through a binding for another target", () =>
+    Effect.gen(function*() {
+      const first = yield* makeVerified(1)
+      const second = yield* makeVerified(2)
+      const firstBinding = success(Backend.prepare(first))
+      const relation = makeRelation(makeTarget(second))
+
+      const failure = yield* NativeCallActivity.prepareNativeLifecycleIngress(
+        firstBinding,
+        makeScheduledState(relation),
+        makeStartAcceptedIngress(
+          relation,
+          nativeLocator("native-child-address")
+        )
+      ).pipe(Effect.flip)
+
+      assert.strictEqual(
+        failure.code,
+        Backend.ErrorCodes.ChildTargetMismatch
+      )
+    }).pipe(provideCrypto))
+
+  it.effect("rejects a structural copy of a prepared lifecycle binding", () =>
+    Effect.gen(function*() {
+      const verified = yield* makeVerified()
+      const binding = success(Backend.prepare(verified))
+      const relation = makeRelation(makeTarget(verified))
+      const executionId = yield* Backend.executionIdForRun(binding, {
+        tenantId: relation.parent.tenantId,
+        runId: relation.childRunId
+      })
+
+      const failure = yield* NativeCallActivity.prepareNativeLifecycleIngress(
+        { ...binding },
+        makeScheduledState(relation),
+        makeStartAcceptedIngress(
+          relation,
+          nativeLocator(executionId)
+        )
+      ).pipe(Effect.flip)
+
+      assert.strictEqual(failure.code, Backend.ErrorCodes.UnpreparedBinding)
+    }).pipe(provideCrypto))
+
   it.effect("submits the exact child address without manufacturing a semantic event", () =>
     Effect.gen(function*() {
       const verified = yield* makeVerified()
