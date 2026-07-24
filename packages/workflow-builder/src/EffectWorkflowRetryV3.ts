@@ -813,6 +813,40 @@ const retryError = (
     })
   })
 
+/**
+ * Recovers the exact occurrence retained for a prepared retry invocation.
+ *
+ * **Details**
+ *
+ * This is a process-local admission accessor for semantic bridges, not a
+ * caller-supplied durable pin. Only the exact object returned by
+ * {@link prepare} is admitted; structural copies, proxies, and unknown values
+ * fail without inspecting any invocation fields.
+ *
+ * @category accessors
+ * @since 4.0.0
+ */
+export const preparedOccurrence = (
+  invocation: unknown
+): Result.Result<
+  SemanticOccurrenceV3.PreparedOccurrence,
+  EffectWorkflowRetryError
+> => {
+  if (typeof invocation !== "object" || invocation === null) {
+    return Result.fail(retryError(
+      ErrorCodes.InvalidInvocation,
+      "Prepared occurrence access requires the exact PreparedRetryInvocation returned by prepare"
+    ))
+  }
+  const state = invocationStates.get(invocation)
+  return state === undefined
+    ? Result.fail(retryError(
+      ErrorCodes.InvalidInvocation,
+      "Prepared occurrence access requires the exact PreparedRetryInvocation returned by prepare"
+    ))
+    : Result.succeed(state.occurrence)
+}
+
 const capturePrepareOptions = (
   input: unknown
 ): Result.Result<CapturedPrepareOptions, EffectWorkflowRetryError> => {

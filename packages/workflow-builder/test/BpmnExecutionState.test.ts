@@ -164,6 +164,12 @@ const model = (): BpmnModel.BpmnModel => ({
       taskKind: "generic",
       incomingSequenceFlowIds: [],
       outgoingSequenceFlowIds: [],
+      loopCharacteristics: {
+        _tag: "StandardLoopCharacteristics",
+        testBefore: true,
+        condition: expression("continuePackingItems"),
+        loopMaximum: 3
+      },
       extensionElements: []
     },
     {
@@ -394,18 +400,34 @@ const state = (): BpmnExecutionState.BpmnExecutionState => ({
       enteredAt: "2026-07-23T10:00:02.000Z"
     }
   ],
-  tokens: [{
-    tokenId: "token-main",
-    processId: "process-main",
-    scopeInstanceId: "scope-root",
-    invocation: {
-      activationId: "activation-1",
-      generation: 1
+  tokens: [
+    {
+      tokenId: "token-main",
+      processId: "process-main",
+      scopeInstanceId: "scope-root",
+      invocation: {
+        activationId: "activation-1",
+        generation: 1
+      },
+      status: "active",
+      position: { _tag: "AtNode", nodeId: "gateway-main" },
+      createdAt: "2026-07-23T10:00:03.000Z"
     },
-    status: "active",
-    position: { _tag: "AtNode", nodeId: "gateway-main" },
-    createdAt: "2026-07-23T10:00:03.000Z"
-  }],
+    {
+      tokenId: "token-loop",
+      processId: "process-main",
+      scopeInstanceId: "scope-sub-pack",
+      invocation: {
+        activationId: "activation-1",
+        branchId: "frame-loop",
+        loopIteration: 0,
+        generation: 1
+      },
+      status: "active",
+      position: { _tag: "AtNode", nodeId: "activity-pack" },
+      createdAt: "2026-07-23T10:00:03.000Z"
+    }
+  ],
   activityResolutions: [],
   gatewayFrames: [{
     frameId: "frame-gateway",
@@ -420,12 +442,15 @@ const state = (): BpmnExecutionState.BpmnExecutionState => ({
   }],
   loopFrames: [{
     frameId: "frame-loop",
-    activityId: "sub-pack",
+    activityId: "activity-pack",
     processId: "process-main",
     scopeInstanceId: "scope-sub-pack",
-    iteration: 0,
+    activation: 0,
+    completedIterations: 0,
+    activeIteration: 0,
     mode: "standard",
-    status: "active"
+    status: "active",
+    openedAt: "2026-07-23T10:00:02.000Z"
   }],
   multiInstanceGroups: [{
     groupId: "group-review",
@@ -504,10 +529,61 @@ const state = (): BpmnExecutionState.BpmnExecutionState => ({
   }]
 })
 
+const completedStandardLoopState = (): BpmnExecutionState.BpmnExecutionState => {
+  const input = state()
+  const frame = input.loopFrames[0]!
+  const tokenTemplate = input.tokens.find((token) => token.invocation.branchId === frame.frameId)!
+  input.tokens = input.tokens.filter((token) => token !== tokenTemplate)
+  frame.completedIterations = 3
+  delete frame.activeIteration
+  frame.status = "completed"
+  frame.closedAt = "2026-07-23T10:00:04.000Z"
+
+  const timestamps = [
+    ["2026-07-23T10:00:02.100Z", "2026-07-23T10:00:02.200Z"],
+    ["2026-07-23T10:00:02.300Z", "2026-07-23T10:00:02.400Z"],
+    ["2026-07-23T10:00:02.500Z", "2026-07-23T10:00:02.600Z"]
+  ] as const
+  for (let iteration = 0; iteration < timestamps.length; iteration++) {
+    const history = structuredClone(tokenTemplate)
+    history.tokenId = `token-loop-history-${iteration}`
+    history.invocation.loopIteration = iteration
+    history.status = "consumed"
+    history.createdAt = timestamps[iteration]![0]
+    history.consumedAt = timestamps[iteration]![1]
+    input.tokens.push(history)
+  }
+  return input
+}
+
+const assertDiagnostic = (
+  result: ReturnType<typeof BpmnExecutionState.validate>,
+  code: BpmnExecutionState.ExecutionStateCode,
+  options?: {
+    readonly path?: string
+    readonly message?: string
+  }
+): void => {
+  assert(Result.isFailure(result))
+  if (Result.isSuccess(result)) {
+    throw new Error("expected validation failure")
+  }
+  assert(
+    result.failure.diagnostics.some((diagnostic) =>
+      diagnostic.code === code &&
+      (options?.path === undefined || diagnostic.path.join("/") === options.path) &&
+      (options?.message === undefined || diagnostic.message.includes(options.message))
+    ),
+    `expected ${code}${options?.path === undefined ? "" : ` at ${options.path}`}`
+  )
+}
+
 describe("BpmnExecutionState", () => {
   it("admits a durable BPMN execution-state snapshot against a validated model", () => {
     const result = BpmnExecutionState.validate(model(), state())
 
+    assert.strictEqual(BpmnExecutionState.BpmnExecutionStateVersion, 4)
+    assert.strictEqual(BpmnExecutionState.BpmnKernelSemanticVersion, "3")
     assert.isTrue(Result.isSuccess(result))
     if (Result.isFailure(result)) {
       throw result.failure
@@ -519,6 +595,388 @@ describe("BpmnExecutionState", () => {
     const content = result.success.extensionElements[0]!.content as Readonly<Record<string, unknown>>
     assert.deepStrictEqual(content["__proto__"], { polluted: true })
     assert.strictEqual(({} as { readonly polluted?: boolean }).polluted, undefined)
+  })
+
+  it("admits advanced and terminal standard loops while leaving multi-instance token authority for later", () => {
+    const advanced = state()
+    const advancedFrame = advanced.loopFrames[0]!
+    const currentIteration = advanced.tokens.find((token) => token.invocation.branchId === advancedFrame.frameId)!
+    const previousIteration = structuredClone(currentIteration)
+    previousIteration.tokenId = "token-loop-history-0"
+    previousIteration.status = "consumed"
+    previousIteration.createdAt = "2026-07-23T10:00:02.500Z"
+    previousIteration.consumedAt = "2026-07-23T10:00:03.100Z"
+    advanced.tokens.push(previousIteration)
+    currentIteration.invocation.loopIteration = 1
+    currentIteration.createdAt = "2026-07-23T10:00:03.200Z"
+    advancedFrame.completedIterations = 1
+    advancedFrame.activeIteration = 1
+
+    assert(Result.isSuccess(BpmnExecutionState.validate(model(), advanced)))
+
+    const terminal = completedStandardLoopState()
+    assert(Result.isSuccess(BpmnExecutionState.validate(model(), terminal)))
+
+    const cancelled = state()
+    const cancelledFrame = cancelled.loopFrames[0]!
+    const withdrawn = cancelled.tokens.find((token) => token.invocation.branchId === cancelledFrame.frameId)!
+    const completed = structuredClone(withdrawn)
+    completed.tokenId = "token-loop-completed-before-cancel"
+    completed.status = "consumed"
+    completed.consumedAt = "2026-07-23T10:00:03.200Z"
+    cancelled.tokens.push(completed)
+    withdrawn.tokenId = "token-loop-cancelled-iteration"
+    withdrawn.invocation.loopIteration = 1
+    withdrawn.status = "withdrawn"
+    withdrawn.createdAt = "2026-07-23T10:00:03.300Z"
+    withdrawn.consumedAt = "2026-07-23T10:00:04.000Z"
+    cancelledFrame.completedIterations = 1
+    delete cancelledFrame.activeIteration
+    cancelledFrame.status = "cancelled"
+    cancelledFrame.closedAt = withdrawn.consumedAt
+
+    assert(Result.isSuccess(BpmnExecutionState.validate(model(), cancelled)))
+
+    const withMultiInstanceFrame = state()
+    withMultiInstanceFrame.loopFrames.push({
+      frameId: "frame-review-mi",
+      activityId: "task-review",
+      processId: "process-main",
+      scopeInstanceId: "scope-root",
+      activation: 0,
+      completedIterations: 0,
+      activeIteration: 0,
+      mode: "multi-instance",
+      status: "active",
+      openedAt: "2026-07-23T10:00:03.000Z"
+    })
+
+    assert(Result.isSuccess(BpmnExecutionState.validate(model(), withMultiInstanceFrame)))
+  })
+
+  it("cross-validates consumed and withdrawn standard-loop token history", () => {
+    const impossibleCompletedIteration = completedStandardLoopState()
+    impossibleCompletedIteration.tokens[3]!.invocation.loopIteration = 3
+    assertDiagnostic(
+      BpmnExecutionState.validate(model(), impossibleCompletedIteration),
+      BpmnExecutionState.Codes.InvalidTokenInvocation,
+      {
+        path: "tokens/3/invocation/loopIteration",
+        message: "iteration completed"
+      }
+    )
+
+    const lateHistory = completedStandardLoopState()
+    lateHistory.tokens[1]!.consumedAt = "2026-07-23T10:00:05.000Z"
+    assertDiagnostic(
+      BpmnExecutionState.validate(model(), lateHistory),
+      BpmnExecutionState.Codes.InvalidTokenInvocation,
+      {
+        path: "tokens/1/consumedAt",
+        message: "after frame"
+      }
+    )
+
+    const earlyHistory = completedStandardLoopState()
+    earlyHistory.tokens[1]!.createdAt = "2026-07-23T10:00:01.500Z"
+    earlyHistory.tokens[1]!.consumedAt = "2026-07-23T10:00:01.600Z"
+    assertDiagnostic(
+      BpmnExecutionState.validate(model(), earlyHistory),
+      BpmnExecutionState.Codes.InvalidTokenInvocation,
+      {
+        path: "tokens/1/createdAt",
+        message: "before frame"
+      }
+    )
+
+    const withdrawnWithoutCancellation = completedStandardLoopState()
+    withdrawnWithoutCancellation.tokens[3]!.status = "withdrawn"
+    withdrawnWithoutCancellation.tokens[3]!.invocation.loopIteration = 3
+    assertDiagnostic(
+      BpmnExecutionState.validate(model(), withdrawnWithoutCancellation),
+      BpmnExecutionState.Codes.InvalidTokenInvocation,
+      {
+        path: "tokens/3/status",
+        message: "requires cancelled"
+      }
+    )
+
+    const wrongCancelledIteration = completedStandardLoopState()
+    wrongCancelledIteration.loopFrames[0]!.status = "cancelled"
+    wrongCancelledIteration.tokens[3]!.status = "withdrawn"
+    assertDiagnostic(
+      BpmnExecutionState.validate(model(), wrongCancelledIteration),
+      BpmnExecutionState.Codes.InvalidTokenInvocation,
+      {
+        path: "tokens/3/invocation/loopIteration",
+        message: "iteration cancelled"
+      }
+    )
+  })
+
+  it("rejects duplicate standard-loop activation authority", () => {
+    const duplicate = state()
+    duplicate.loopFrames.push({
+      frameId: "frame-loop-duplicate",
+      activityId: "activity-pack",
+      processId: "process-main",
+      scopeInstanceId: "scope-sub-pack",
+      activation: 0,
+      completedIterations: 1,
+      mode: "standard",
+      status: "completed",
+      openedAt: "2026-07-23T10:00:02.000Z",
+      closedAt: "2026-07-23T10:00:04.000Z"
+    })
+
+    assertDiagnostic(
+      BpmnExecutionState.validate(model(), duplicate),
+      BpmnExecutionState.Codes.InvalidLoopFrame,
+      {
+        path: "loopFrames/1/activation",
+        message: "more than one frame for activation"
+      }
+    )
+  })
+
+  it("rejects loop frames with incoherent process, scope, or activity ownership", () => {
+    const wrongProcess = state()
+    wrongProcess.loopFrames[0]!.processId = "process-child"
+    assertDiagnostic(
+      BpmnExecutionState.validate(model(), wrongProcess),
+      BpmnExecutionState.Codes.InvalidLoopFrame,
+      {
+        path: "loopFrames/0/processId",
+        message: "does not match activity process"
+      }
+    )
+
+    const wrongScope = state()
+    wrongScope.loopFrames[0]!.scopeInstanceId = "scope-root"
+    assertDiagnostic(
+      BpmnExecutionState.validate(model(), wrongScope),
+      BpmnExecutionState.Codes.InvalidLoopFrame,
+      {
+        path: "loopFrames/0/scopeInstanceId",
+        message: "does not own activity"
+      }
+    )
+
+    const wrongOwner = state()
+    wrongOwner.loopFrames[0]!.activityId = "sub-pack"
+    assertDiagnostic(
+      BpmnExecutionState.validate(model(), wrongOwner),
+      BpmnExecutionState.Codes.InvalidLoopFrame,
+      {
+        path: "loopFrames/0/scopeInstanceId",
+        message: "does not own activity"
+      }
+    )
+
+    const wrongMode = state()
+    wrongMode.loopFrames[0]!.mode = "multi-instance"
+    assertDiagnostic(
+      BpmnExecutionState.validate(model(), wrongMode),
+      BpmnExecutionState.Codes.InvalidLoopFrame,
+      {
+        path: "loopFrames/0/mode",
+        message: "does not match activity"
+      }
+    )
+  })
+
+  it("enforces loop-frame timestamps and active versus terminal status fields", () => {
+    const beforeExecution = state()
+    beforeExecution.loopFrames[0]!.openedAt = "2026-07-23T09:59:59.000Z"
+    assertDiagnostic(
+      BpmnExecutionState.validate(model(), beforeExecution),
+      BpmnExecutionState.Codes.InvalidLoopFrame,
+      { path: "loopFrames/0/openedAt", message: "execution started" }
+    )
+
+    const beforeScope = state()
+    beforeScope.loopFrames[0]!.openedAt = "2026-07-23T10:00:00.500Z"
+    assertDiagnostic(
+      BpmnExecutionState.validate(model(), beforeScope),
+      BpmnExecutionState.Codes.InvalidLoopFrame,
+      { path: "loopFrames/0/openedAt", message: "scope instance entered" }
+    )
+
+    const missingActiveIteration = state()
+    delete missingActiveIteration.loopFrames[0]!.activeIteration
+    assertDiagnostic(
+      BpmnExecutionState.validate(model(), missingActiveIteration),
+      BpmnExecutionState.Codes.InvalidLoopFrame,
+      { path: "loopFrames/0/activeIteration", message: "must record activeIteration" }
+    )
+
+    const mismatchedActiveIteration = state()
+    mismatchedActiveIteration.loopFrames[0]!.activeIteration = 1
+    assertDiagnostic(
+      BpmnExecutionState.validate(model(), mismatchedActiveIteration),
+      BpmnExecutionState.Codes.InvalidLoopFrame,
+      { path: "loopFrames/0/activeIteration", message: "must equal completedIterations" }
+    )
+
+    const closedWhileActive = state()
+    closedWhileActive.loopFrames[0]!.closedAt = "2026-07-23T10:00:04.000Z"
+    assertDiagnostic(
+      BpmnExecutionState.validate(model(), closedWhileActive),
+      BpmnExecutionState.Codes.InvalidLoopFrame,
+      { path: "loopFrames/0/closedAt", message: "cannot record closedAt" }
+    )
+
+    const activeInTerminalScope = state()
+    activeInTerminalScope.scopeInstances[1]!.status = "completed"
+    activeInTerminalScope.scopeInstances[1]!.exitedAt = "2026-07-23T10:00:05.000Z"
+    assertDiagnostic(
+      BpmnExecutionState.validate(model(), activeInTerminalScope),
+      BpmnExecutionState.Codes.InvalidLoopFrame,
+      { path: "loopFrames/0/scopeInstanceId", message: "terminal scope" }
+    )
+
+    const terminalWithoutClose = state()
+    terminalWithoutClose.tokens = terminalWithoutClose.tokens.filter((token) =>
+      token.invocation.branchId !== "frame-loop"
+    )
+    terminalWithoutClose.loopFrames[0]!.status = "completed"
+    delete terminalWithoutClose.loopFrames[0]!.activeIteration
+    assertDiagnostic(
+      BpmnExecutionState.validate(model(), terminalWithoutClose),
+      BpmnExecutionState.Codes.InvalidLoopFrame,
+      { path: "loopFrames/0/closedAt", message: "must record closedAt" }
+    )
+
+    const terminalWithActiveIteration = structuredClone(terminalWithoutClose)
+    terminalWithActiveIteration.loopFrames[0]!.activeIteration = 0
+    terminalWithActiveIteration.loopFrames[0]!.closedAt = "2026-07-23T10:00:04.000Z"
+    assertDiagnostic(
+      BpmnExecutionState.validate(model(), terminalWithActiveIteration),
+      BpmnExecutionState.Codes.InvalidLoopFrame,
+      { path: "loopFrames/0/activeIteration", message: "cannot record activeIteration" }
+    )
+
+    const terminalBeforeOpen = structuredClone(terminalWithoutClose)
+    terminalBeforeOpen.loopFrames[0]!.status = "cancelled"
+    terminalBeforeOpen.loopFrames[0]!.closedAt = "2026-07-23T10:00:01.000Z"
+    assertDiagnostic(
+      BpmnExecutionState.validate(model(), terminalBeforeOpen),
+      BpmnExecutionState.Codes.InvalidLoopFrame,
+      { path: "loopFrames/0/closedAt", message: "closed before it opened" }
+    )
+
+    const afterTerminalScope = structuredClone(terminalWithoutClose)
+    afterTerminalScope.scopeInstances[1]!.status = "completed"
+    afterTerminalScope.scopeInstances[1]!.exitedAt = "2026-07-23T10:00:04.000Z"
+    afterTerminalScope.loopFrames[0]!.closedAt = "2026-07-23T10:00:05.000Z"
+    assertDiagnostic(
+      BpmnExecutionState.validate(model(), afterTerminalScope),
+      BpmnExecutionState.Codes.InvalidLoopFrame,
+      { path: "loopFrames/0/closedAt", message: "scope instance exited" }
+    )
+
+    const openedAfterTerminalScope = structuredClone(terminalWithoutClose)
+    openedAfterTerminalScope.scopeInstances[1]!.status = "completed"
+    openedAfterTerminalScope.scopeInstances[1]!.exitedAt = "2026-07-23T10:00:01.500Z"
+    openedAfterTerminalScope.loopFrames[0]!.closedAt = "2026-07-23T10:00:02.500Z"
+    assertDiagnostic(
+      BpmnExecutionState.validate(model(), openedAfterTerminalScope),
+      BpmnExecutionState.Codes.InvalidLoopFrame,
+      { path: "loopFrames/0/openedAt", message: "scope instance exited" }
+    )
+  })
+
+  it("enforces the Standard Loop loopMaximum boundary", () => {
+    const tooManyCompleted = state()
+    tooManyCompleted.tokens = tooManyCompleted.tokens.filter((token) => token.invocation.branchId !== "frame-loop")
+    tooManyCompleted.loopFrames[0]!.completedIterations = 4
+    delete tooManyCompleted.loopFrames[0]!.activeIteration
+    tooManyCompleted.loopFrames[0]!.status = "completed"
+    tooManyCompleted.loopFrames[0]!.closedAt = "2026-07-23T10:00:04.000Z"
+    assertDiagnostic(
+      BpmnExecutionState.validate(model(), tooManyCompleted),
+      BpmnExecutionState.Codes.InvalidLoopFrame,
+      {
+        path: "loopFrames/0/completedIterations",
+        message: "cannot exceed loopMaximum"
+      }
+    )
+
+    const noRemainingIteration = state()
+    noRemainingIteration.loopFrames[0]!.completedIterations = 3
+    noRemainingIteration.loopFrames[0]!.activeIteration = 3
+    assertDiagnostic(
+      BpmnExecutionState.validate(model(), noRemainingIteration),
+      BpmnExecutionState.Codes.InvalidLoopFrame,
+      {
+        path: "loopFrames/0/activeIteration",
+        message: "less than loopMaximum"
+      }
+    )
+  })
+
+  it("requires exactly one active AtNode token for an active standard loop frame", () => {
+    const missing = state()
+    missing.tokens = missing.tokens.filter((token) => token.invocation.branchId !== "frame-loop")
+    assertDiagnostic(
+      BpmnExecutionState.validate(model(), missing),
+      BpmnExecutionState.Codes.InvalidLoopFrame,
+      {
+        path: "loopFrames/0/frameId",
+        message: "exactly one active AtNode token"
+      }
+    )
+
+    const duplicated = state()
+    const duplicateToken = structuredClone(duplicated.tokens[1]!)
+    duplicateToken.tokenId = "token-loop-duplicate"
+    duplicated.tokens.push(duplicateToken)
+    assertDiagnostic(
+      BpmnExecutionState.validate(model(), duplicated),
+      BpmnExecutionState.Codes.InvalidLoopFrame,
+      {
+        path: "loopFrames/0/frameId",
+        message: "exactly one active AtNode token"
+      }
+    )
+  })
+
+  it("rejects a forged token claiming a standard-loop frame invocation", () => {
+    const forged = state()
+    const loopToken = forged.tokens[1]!
+    loopToken.processId = "process-child"
+    loopToken.scopeInstanceId = "scope-root"
+    loopToken.invocation.activationId = "activation-forged"
+    loopToken.invocation.loopIteration = 1
+    loopToken.invocation.multiInstanceItemKey = "item-forged"
+    loopToken.invocation.generation = 2
+    loopToken.status = "consumed"
+    loopToken.position = { _tag: "AtNode", nodeId: "gateway-main" }
+    loopToken.consumedAt = "2026-07-23T10:00:04.000Z"
+
+    const result = BpmnExecutionState.validate(model(), forged)
+    for (
+      const path of [
+        "tokens/1/processId",
+        "tokens/1/scopeInstanceId",
+        "tokens/1/position",
+        "tokens/1/invocation/loopIteration",
+        "tokens/1/invocation/activationId",
+        "tokens/1/invocation/generation",
+        "tokens/1/invocation/multiInstanceItemKey"
+      ]
+    ) {
+      assertDiagnostic(
+        result,
+        BpmnExecutionState.Codes.InvalidTokenInvocation,
+        { path }
+      )
+    }
+    assertDiagnostic(
+      result,
+      BpmnExecutionState.Codes.InvalidLoopFrame,
+      { path: "loopFrames/0/frameId" }
+    )
   })
 
   it("resolves reusable event-definition references and admits boundary-event subscriptions", () => {
@@ -757,6 +1215,12 @@ describe("BpmnExecutionState", () => {
         extra: true
       })
     )
+    assert.throws(() =>
+      Schema.decodeUnknownSync(BpmnExecutionState.LoopFrame)({
+        ...state().loopFrames[0],
+        iteration: 0
+      })
+    )
   })
 
   it("aggregates dangling and type-mismatch diagnostics across durable runtime structures", () => {
@@ -804,9 +1268,12 @@ describe("BpmnExecutionState", () => {
       activityId: "gateway-main",
       processId: "process-main",
       scopeInstanceId: "scope-root",
-      iteration: 0,
+      activation: 0,
+      completedIterations: 0,
+      activeIteration: 0,
       mode: "standard",
-      status: "active"
+      status: "active",
+      openedAt: "2026-07-23T10:00:03.000Z"
     })
     invalidState.multiInstanceGroups.push({
       groupId: "group-bad",

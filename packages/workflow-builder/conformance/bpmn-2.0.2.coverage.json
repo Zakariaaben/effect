@@ -1,10 +1,10 @@
 {
   "formatVersion": 1,
   "catalogId": "effect-workflow-builder-bpmn-2.0.2",
-  "catalogRevision": 7,
+  "catalogRevision": 8,
   "implementation": "@effect/workflow-builder",
   "implementationVersion": "4.0.0-beta.100",
-  "reviewedAt": "2026-07-23",
+  "reviewedAt": "2026-07-24",
   "entries": [
     {
       "requirementId": "BPMN-FOUNDATION-SEMANTIC-MODEL",
@@ -77,7 +77,7 @@
     {
       "requirementId": "BPMN-EXECUTION-BASIC-TOKEN-KERNEL",
       "supportLevel": "executable",
-      "summary": "A deliberately bounded executable subset covers root and embedded subprocess scopes, none start/end events, generic tasks, normal/conditional/default sequence flows, exclusive routing, parallel split/join epochs, deterministic journals, and causal replay; all unsupported execution-affecting constructs are rejected at compile time.",
+      "summary": "A deliberately bounded executable subset covers root and embedded subprocess scopes, none start/end events, generic tasks, normal/conditional/default sequence flows, exclusive routing, parallel split/join epochs, and Standard Loops on generic Tasks. Standard Loop execution persists exact iteration and condition evidence, honors pre-test or post-test behavior, and enforces a mandatory positive loopMaximum. Combined pre/post-test loops, SubProcess loops, arbitrary cycles, and multi-instance activities are rejected. Deterministic journals and causal replay cover the admitted subset.",
       "evidence": [
         {
           "kind": "source",
@@ -93,6 +93,16 @@
           "kind": "replay-test",
           "path": "test/BpmnKernel.test.ts",
           "testName": "replays an ordered transition journal into the exact durable marking"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/BpmnKernel.test.ts",
+          "testName": "executes test-after at least once and enforces loopMaximum without another evaluation"
+        },
+        {
+          "kind": "replay-test",
+          "path": "test/BpmnKernel.test.ts",
+          "testName": "persists exact test-before iterations, replays them, and makes old completion idempotent"
         }
       ]
     },
@@ -156,7 +166,7 @@
     {
       "requirementId": "BPMN-EXECUTION-CORE-PROCESS-XML-SLICE",
       "supportLevel": "executable",
-      "summary": "A strict facade composes the named XML profile with the bounded token kernel without projection or inference, and proves conditional/default routing, parallel split/join, ordinary subprocess execution, exact journal replay, canonical export, re-import, recompilation, and replay equivalence.",
+      "summary": "A strict facade composes named profile bpmn-2.0.2-core-process-di-v3 with the bounded token kernel without projection or inference. The intersection includes conditional/default routing, parallel split/join, ordinary subprocesses, and the bounded generic-Task Standard Loop subset with version-bound formal conditions and mandatory loopMaximum. Explicit external taskBindings may be supplied through CompileXmlOptions and are fingerprinted; they are not read from BPMN XML. Exact journal replay, canonical export, re-import, recompilation, and replay equivalence remain part of the boundary.",
       "evidence": [
         {
           "kind": "source",
@@ -177,6 +187,21 @@
           "kind": "roundtrip-test",
           "path": "test/BpmnExecutable.test.ts",
           "testName": "round-trips and replays the executable XML subset through its conditional branch"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/BpmnExecutable.test.ts",
+          "testName": "imports, binds, executes, and replays a bounded Standard Loop through the Effect runtime"
+        },
+        {
+          "kind": "replay-test",
+          "path": "test/BpmnExecutable.test.ts",
+          "testName": "imports, binds, executes, and replays a bounded Standard Loop through the Effect runtime"
+        },
+        {
+          "kind": "roundtrip-test",
+          "path": "test/BpmnExecutable.test.ts",
+          "testName": "imports, binds, executes, and replays a bounded Standard Loop through the Effect runtime"
         }
       ]
     },
@@ -205,7 +230,7 @@
     {
       "requirementId": "BPMN-INTERCHANGE-CORE-PROCESS-XML-SLICE",
       "supportLevel": "modeled",
-      "summary": "Named profile bpmn-2.0.2-core-process-di-v2 performs fail-closed namespace-expanded import, validation, canonical-prefix export, and normalized round-trip for its explicitly bounded process/control-flow slice. Modeled records implementation maturity here because normative XSD validation and an OMG conformance subclass are not claimed.",
+      "summary": "Named profile bpmn-2.0.2-core-process-di-v3 performs fail-closed namespace-expanded import, validation, canonical-prefix export, and normalized round-trip for its explicitly bounded process/control-flow slice, including Standard Loop characteristics on generic Tasks. It requires a version-bound formal loopCondition and positive loopMaximum while materializing the testBefore=false default. BPMN's broader optional maximum and tExpression condition forms remain outside this profile. Modeled records implementation maturity here because normative XSD validation, general Standard Loop or multi-instance mapping, and an OMG conformance subclass are not claimed.",
       "evidence": [
         {
           "kind": "source",
@@ -338,7 +363,7 @@
     {
       "requirementId": "WFP-CONTROL-FLOW-CATALOG",
       "supportLevel": "unsupported",
-      "summary": "The control-flow family is analyzed in prose, while only separately listed atomic patterns have executable evidence.",
+      "summary": "The control-flow family is analyzed in prose, while only five separately listed atomic patterns have executable evidence.",
       "evidence": [
         {
           "kind": "specification",
@@ -432,6 +457,53 @@
           "kind": "replay-test",
           "path": "test/BpmnKernel.test.ts",
           "testName": "replays an ordered transition journal into the exact durable marking"
+        }
+      ]
+    },
+    {
+      "requirementId": "WFP-WCP21-STRUCTURED-LOOP",
+      "supportLevel": "executable",
+      "summary": "The admitted WCP21 slice executes while-style pre-test and BPMN post-tested Standard Loops on one generic Task. It records exact iteration and version-bound condition evidence, interprets a true condition as continue, materializes BPMN's testBefore=false default at XML import, and enforces a mandatory positive loopMaximum. Combined pre/post-test loops, Standard Loops on SubProcesses, arbitrary cycles, and multi-instance activities remain unsupported.",
+      "evidence": [
+        {
+          "kind": "source",
+          "path": "src/BpmnKernel.ts",
+          "symbol": "StandardLoopEvaluationContext"
+        },
+        {
+          "kind": "source",
+          "path": "src/BpmnExpressionRuntime.ts",
+          "symbol": "completeTask"
+        },
+        {
+          "kind": "source",
+          "path": "src/BpmnXml.ts",
+          "symbol": "importXml"
+        },
+        {
+          "kind": "source",
+          "path": "src/BpmnXml.ts",
+          "symbol": "exportXml"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/BpmnKernel.test.ts",
+          "testName": "executes test-after at least once and enforces loopMaximum without another evaluation"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/BpmnExpressionRuntime.test.ts",
+          "testName": "resolves a protocol-v3 loop task through an asynchronous after condition"
+        },
+        {
+          "kind": "transition-test",
+          "path": "test/BpmnExecutable.test.ts",
+          "testName": "imports, binds, executes, and replays a bounded Standard Loop through the Effect runtime"
+        },
+        {
+          "kind": "replay-test",
+          "path": "test/BpmnKernel.test.ts",
+          "testName": "persists exact test-before iterations, replays them, and makes old completion idempotent"
         }
       ]
     },
@@ -546,7 +618,7 @@
     {
       "requirementId": "WFP-ATOMIC-CATALOG-COMPLETE",
       "supportLevel": "unsupported",
-      "summary": "Family-level traceability and four executable atomic control patterns exist; the complete per-pattern requirement catalogue remains intentionally incomplete.",
+      "summary": "Family-level traceability and five executable atomic control patterns exist; the complete per-pattern requirement catalogue remains intentionally incomplete.",
       "evidence": [
         {
           "kind": "specification",

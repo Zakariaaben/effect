@@ -110,7 +110,7 @@ const codeError = (
  * @category constants
  * @since 4.0.0
  */
-export const BpmnExecutionStateVersion = 3 as const
+export const BpmnExecutionStateVersion = 4 as const
 
 /**
  * Version of the executable BPMN fingerprint preimage.
@@ -126,7 +126,7 @@ export const BpmnExecutableFingerprintVersion = 2 as const
  * @category constants
  * @since 4.0.0
  */
-export const BpmnKernelSemanticVersion = "2" as const
+export const BpmnKernelSemanticVersion = "3" as const
 
 /**
  * Execution snapshot identity pinned to one BPMN semantic model version.
@@ -300,9 +300,13 @@ export const LoopFrame = Schema.Struct({
   activityId: Identifier,
   processId: Identifier,
   scopeInstanceId: Identifier,
-  iteration: NonNegativeInt,
+  activation: NonNegativeInt,
+  completedIterations: NonNegativeInt,
+  activeIteration: Schema.optionalKey(NonNegativeInt),
   mode: Schema.Literals(["standard", "multi-instance"]),
-  status: Schema.Literals(["active", "completed", "cancelled"])
+  status: Schema.Literals(["active", "completed", "cancelled"]),
+  openedAt: ProtocolV2Wire.Timestamp,
+  closedAt: Schema.optionalKey(ProtocolV2Wire.Timestamp)
 }).annotate({
   identifier: "WorkflowBpmnLoopFrame",
   parseOptions: strictParseOptions
@@ -1034,6 +1038,139 @@ export const validate = (
         ))
       }
     }
+    const loopFrame = token.invocation.branchId === undefined
+      ? undefined
+      : loopFrames.get(token.invocation.branchId)
+    if (loopFrame?.mode === "standard") {
+      const loopScope = scopeInstances.get(loopFrame.scopeInstanceId)
+      if (token.processId !== loopFrame.processId) {
+        diagnostics.push(codeError(
+          Codes.InvalidTokenInvocation,
+          `Loop token '${token.tokenId}' process must match standard loop frame '${loopFrame.frameId}'`,
+          ["tokens", index, "processId"]
+        ))
+      }
+      if (token.scopeInstanceId !== loopFrame.scopeInstanceId) {
+        diagnostics.push(codeError(
+          Codes.InvalidTokenInvocation,
+          `Loop token '${token.tokenId}' scope instance must match standard loop frame '${loopFrame.frameId}'`,
+          ["tokens", index, "scopeInstanceId"]
+        ))
+      }
+      if (
+        token.position._tag !== "AtNode" ||
+        token.position.nodeId !== loopFrame.activityId
+      ) {
+        diagnostics.push(codeError(
+          Codes.InvalidTokenInvocation,
+          `Loop token '${token.tokenId}' must wait AtNode on standard loop activity '${loopFrame.activityId}'`,
+          ["tokens", index, "position"]
+        ))
+      }
+      if (
+        loopScope !== undefined &&
+        token.invocation.activationId !== loopScope.invocation.activationId
+      ) {
+        diagnostics.push(codeError(
+          Codes.InvalidTokenInvocation,
+          `Loop token '${token.tokenId}' activationId must be inherited from standard loop frame scope '${loopScope.scopeInstanceId}'`,
+          ["tokens", index, "invocation", "activationId"]
+        ))
+      }
+      if (
+        loopScope !== undefined &&
+        token.invocation.generation !== loopScope.invocation.generation
+      ) {
+        diagnostics.push(codeError(
+          Codes.InvalidTokenInvocation,
+          `Loop token '${token.tokenId}' generation must be inherited from standard loop frame scope '${loopScope.scopeInstanceId}'`,
+          ["tokens", index, "invocation", "generation"]
+        ))
+      }
+      if (token.invocation.multiInstanceItemKey !== undefined) {
+        diagnostics.push(codeError(
+          Codes.InvalidTokenInvocation,
+          `Standard loop token '${token.tokenId}' cannot record multiInstanceItemKey`,
+          ["tokens", index, "invocation", "multiInstanceItemKey"]
+        ))
+      }
+      if (token.createdAt < loopFrame.openedAt) {
+        diagnostics.push(codeError(
+          Codes.InvalidTokenInvocation,
+          `Standard loop token '${token.tokenId}' was created before frame '${loopFrame.frameId}' opened`,
+          ["tokens", index, "createdAt"]
+        ))
+      }
+      if (
+        loopFrame.closedAt !== undefined &&
+        token.createdAt > loopFrame.closedAt
+      ) {
+        diagnostics.push(codeError(
+          Codes.InvalidTokenInvocation,
+          `Standard loop token '${token.tokenId}' was created after frame '${loopFrame.frameId}' closed`,
+          ["tokens", index, "createdAt"]
+        ))
+      }
+      if (
+        loopFrame.closedAt !== undefined &&
+        token.consumedAt !== undefined &&
+        token.consumedAt > loopFrame.closedAt
+      ) {
+        diagnostics.push(codeError(
+          Codes.InvalidTokenInvocation,
+          `Standard loop token '${token.tokenId}' became terminal after frame '${loopFrame.frameId}' closed`,
+          ["tokens", index, "consumedAt"]
+        ))
+      }
+      if (token.status === "active") {
+        if (loopFrame.status !== "active") {
+          diagnostics.push(codeError(
+            Codes.InvalidTokenInvocation,
+            `Active loop token '${token.tokenId}' cannot reference terminal standard loop frame '${loopFrame.frameId}'`,
+            ["tokens", index, "invocation", "branchId"]
+          ))
+        }
+        if (
+          loopFrame.activeIteration === undefined ||
+          token.invocation.loopIteration !== loopFrame.activeIteration
+        ) {
+          diagnostics.push(codeError(
+            Codes.InvalidTokenInvocation,
+            `Active loop token '${token.tokenId}' loopIteration must match standard loop frame '${loopFrame.frameId}' activeIteration`,
+            ["tokens", index, "invocation", "loopIteration"]
+          ))
+        }
+      } else if (token.status === "consumed") {
+        if (
+          token.invocation.loopIteration === undefined ||
+          token.invocation.loopIteration >= loopFrame.completedIterations
+        ) {
+          diagnostics.push(codeError(
+            Codes.InvalidTokenInvocation,
+            `Consumed loop token '${token.tokenId}' loopIteration must identify an iteration completed by standard loop frame '${loopFrame.frameId}'`,
+            ["tokens", index, "invocation", "loopIteration"]
+          ))
+        }
+      } else {
+        if (loopFrame.status !== "cancelled") {
+          diagnostics.push(codeError(
+            Codes.InvalidTokenInvocation,
+            `Withdrawn loop token '${token.tokenId}' requires cancelled standard loop frame '${loopFrame.frameId}'`,
+            ["tokens", index, "status"]
+          ))
+        }
+        if (
+          token.invocation.loopIteration === undefined ||
+          token.invocation.loopIteration !== loopFrame.completedIterations
+        ) {
+          diagnostics.push(codeError(
+            Codes.InvalidTokenInvocation,
+            `Withdrawn loop token '${token.tokenId}' loopIteration must identify the iteration cancelled by standard loop frame '${loopFrame.frameId}'`,
+            ["tokens", index, "invocation", "loopIteration"]
+          ))
+        }
+      }
+    }
     if (token.status === "active" && token.consumedAt !== undefined) {
       diagnostics.push(codeError(
         Codes.InvalidTokenPosition,
@@ -1285,9 +1422,26 @@ export const validate = (
     }
   }
 
+  const loopActivationKeys = new Set<string>()
   for (let index = 0; index < state.loopFrames.length; index++) {
     const frame = state.loopFrames[index]!
     registerId(seenStateIds, diagnostics, frame.frameId, ["loopFrames", index, "frameId"])
+    const activationKey = JSON.stringify([
+      frame.processId,
+      frame.scopeInstanceId,
+      frame.activityId,
+      frame.activation
+    ])
+    if (loopActivationKeys.has(activationKey)) {
+      diagnostics.push(codeError(
+        Codes.InvalidLoopFrame,
+        `Loop activity '${frame.activityId}' has more than one frame for activation '${frame.activation}' in scope '${frame.scopeInstanceId}'`,
+        ["loopFrames", index, "activation"]
+      ))
+    } else {
+      loopActivationKeys.add(activationKey)
+    }
+
     const node = nodeById.get(frame.activityId)
     if (node === undefined) {
       diagnostics.push(codeError(
@@ -1295,33 +1449,193 @@ export const validate = (
         `Loop frame '${frame.frameId}' references unknown activity '${frame.activityId}'`,
         ["loopFrames", index, "activityId"]
       ))
-      continue
-    }
-    if (!activityLikeTags.has(node._tag)) {
+    } else if (!activityLikeTags.has(node._tag)) {
       diagnostics.push(codeError(
         Codes.InvalidLoopFrame,
         `Loop frame '${frame.frameId}' must reference an activity-like node`,
         ["loopFrames", index, "activityId"]
       ))
-      continue
-    }
-    if (!("loopCharacteristics" in node) || node.loopCharacteristics === undefined) {
+    } else if (!("loopCharacteristics" in node) || node.loopCharacteristics === undefined) {
       diagnostics.push(codeError(
         Codes.InvalidLoopFrame,
         `Loop frame '${frame.frameId}' requires loop characteristics on activity '${frame.activityId}'`,
         ["loopFrames", index, "activityId"]
       ))
-      continue
+    } else {
+      if (
+        frame.mode === "standard" && node.loopCharacteristics._tag !== "StandardLoopCharacteristics" ||
+        frame.mode === "multi-instance" && node.loopCharacteristics._tag !== "MultiInstanceCharacteristics"
+      ) {
+        diagnostics.push(codeError(
+          Codes.InvalidLoopFrame,
+          `Loop frame '${frame.frameId}' mode '${frame.mode}' does not match activity '${frame.activityId}'`,
+          ["loopFrames", index, "mode"]
+        ))
+      }
+      if (node.processId !== frame.processId) {
+        diagnostics.push(codeError(
+          Codes.InvalidLoopFrame,
+          `Loop frame '${frame.frameId}' process '${frame.processId}' does not match activity process '${node.processId}'`,
+          ["loopFrames", index, "processId"]
+        ))
+      }
+      if (
+        frame.mode === "standard" &&
+        node.loopCharacteristics._tag === "StandardLoopCharacteristics" &&
+        node.loopCharacteristics.loopMaximum !== undefined
+      ) {
+        const loopMaximum = node.loopCharacteristics.loopMaximum
+        if (frame.completedIterations > loopMaximum) {
+          diagnostics.push(codeError(
+            Codes.InvalidLoopFrame,
+            `Standard loop frame '${frame.frameId}' completedIterations cannot exceed loopMaximum '${loopMaximum}'`,
+            ["loopFrames", index, "completedIterations"]
+          ))
+        }
+        if (
+          frame.activeIteration !== undefined &&
+          frame.activeIteration >= loopMaximum
+        ) {
+          diagnostics.push(codeError(
+            Codes.InvalidLoopFrame,
+            `Standard loop frame '${frame.frameId}' activeIteration must be less than loopMaximum '${loopMaximum}'`,
+            ["loopFrames", index, "activeIteration"]
+          ))
+        }
+      }
     }
-    if (
-      frame.mode === "standard" && node.loopCharacteristics._tag !== "StandardLoopCharacteristics" ||
-      frame.mode === "multi-instance" && node.loopCharacteristics._tag !== "MultiInstanceCharacteristics"
-    ) {
+
+    const scope = scopeInstances.get(frame.scopeInstanceId)
+    if (scope === undefined) {
+      diagnostics.push(codeError(
+        Codes.UnknownParentScopeInstanceRef,
+        `Loop frame '${frame.frameId}' references unknown scope instance '${frame.scopeInstanceId}'`,
+        ["loopFrames", index, "scopeInstanceId"]
+      ))
+    } else {
+      if (scope.processId !== frame.processId) {
+        diagnostics.push(codeError(
+          Codes.InvalidLoopFrame,
+          `Loop frame '${frame.frameId}' process must match its scope instance`,
+          ["loopFrames", index, "processId"]
+        ))
+      }
+      if (node !== undefined && scope.definitionId !== node.parentScopeId) {
+        diagnostics.push(codeError(
+          Codes.InvalidLoopFrame,
+          `Loop frame '${frame.frameId}' scope definition '${scope.definitionId}' does not own activity '${node.id}'`,
+          ["loopFrames", index, "scopeInstanceId"]
+        ))
+      }
+      if (frame.openedAt < scope.enteredAt) {
+        diagnostics.push(codeError(
+          Codes.InvalidLoopFrame,
+          `Loop frame '${frame.frameId}' opened before its scope instance entered`,
+          ["loopFrames", index, "openedAt"]
+        ))
+      }
+      if (scope.exitedAt !== undefined && frame.openedAt > scope.exitedAt) {
+        diagnostics.push(codeError(
+          Codes.InvalidLoopFrame,
+          `Loop frame '${frame.frameId}' opened after its scope instance exited`,
+          ["loopFrames", index, "openedAt"]
+        ))
+      }
+      if (frame.status === "active" && scope.status !== "active") {
+        diagnostics.push(codeError(
+          Codes.InvalidLoopFrame,
+          `Active loop frame '${frame.frameId}' cannot belong to terminal scope '${scope.scopeInstanceId}'`,
+          ["loopFrames", index, "scopeInstanceId"]
+        ))
+      }
+      if (
+        frame.status !== "active" &&
+        frame.closedAt !== undefined &&
+        scope.status !== "active" &&
+        scope.exitedAt !== undefined &&
+        frame.closedAt > scope.exitedAt
+      ) {
+        diagnostics.push(codeError(
+          Codes.InvalidLoopFrame,
+          `Terminal loop frame '${frame.frameId}' closed after its scope instance exited`,
+          ["loopFrames", index, "closedAt"]
+        ))
+      }
+    }
+
+    if (frame.openedAt < state.startedAt) {
       diagnostics.push(codeError(
         Codes.InvalidLoopFrame,
-        `Loop frame '${frame.frameId}' mode '${frame.mode}' does not match activity '${frame.activityId}'`,
-        ["loopFrames", index, "mode"]
+        `Loop frame '${frame.frameId}' opened before the execution started`,
+        ["loopFrames", index, "openedAt"]
       ))
+    }
+    if (frame.status === "active") {
+      if (frame.activeIteration === undefined) {
+        diagnostics.push(codeError(
+          Codes.InvalidLoopFrame,
+          `Active loop frame '${frame.frameId}' must record activeIteration`,
+          ["loopFrames", index, "activeIteration"]
+        ))
+      } else if (frame.activeIteration !== frame.completedIterations) {
+        diagnostics.push(codeError(
+          Codes.InvalidLoopFrame,
+          `Active loop frame '${frame.frameId}' activeIteration must equal completedIterations`,
+          ["loopFrames", index, "activeIteration"]
+        ))
+      }
+      if (frame.closedAt !== undefined) {
+        diagnostics.push(codeError(
+          Codes.InvalidLoopFrame,
+          `Active loop frame '${frame.frameId}' cannot record closedAt`,
+          ["loopFrames", index, "closedAt"]
+        ))
+      }
+    } else {
+      if (frame.activeIteration !== undefined) {
+        diagnostics.push(codeError(
+          Codes.InvalidLoopFrame,
+          `Terminal loop frame '${frame.frameId}' cannot record activeIteration`,
+          ["loopFrames", index, "activeIteration"]
+        ))
+      }
+      if (frame.closedAt === undefined) {
+        diagnostics.push(codeError(
+          Codes.InvalidLoopFrame,
+          `Terminal loop frame '${frame.frameId}' must record closedAt`,
+          ["loopFrames", index, "closedAt"]
+        ))
+      } else if (frame.closedAt < frame.openedAt) {
+        diagnostics.push(codeError(
+          Codes.InvalidLoopFrame,
+          `Terminal loop frame '${frame.frameId}' closed before it opened`,
+          ["loopFrames", index, "closedAt"]
+        ))
+      }
+    }
+
+    if (frame.mode === "standard" && frame.status === "active") {
+      const activeLoopTokens = scope === undefined || frame.activeIteration === undefined
+        ? []
+        : state.tokens.filter((token) =>
+          token.status === "active" &&
+          token.processId === frame.processId &&
+          token.scopeInstanceId === frame.scopeInstanceId &&
+          token.position._tag === "AtNode" &&
+          token.position.nodeId === frame.activityId &&
+          token.invocation.branchId === frame.frameId &&
+          token.invocation.loopIteration === frame.activeIteration &&
+          token.invocation.activationId === scope.invocation.activationId &&
+          token.invocation.generation === scope.invocation.generation &&
+          token.invocation.multiInstanceItemKey === undefined
+        )
+      if (activeLoopTokens.length !== 1) {
+        diagnostics.push(codeError(
+          Codes.InvalidLoopFrame,
+          `Active standard loop frame '${frame.frameId}' must own exactly one active AtNode token for its current iteration`,
+          ["loopFrames", index, "frameId"]
+        ))
+      }
     }
   }
 

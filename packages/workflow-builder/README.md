@@ -53,19 +53,26 @@ Today the package provides:
 - a durable BPMN execution-state foundation with token positions, scope and
   invocation identity, gateway/loop/multi-instance/call frames, subscriptions,
   timers, work items, compensation registrations, and cancellation regions,
-  whose state version `3` carries a version `2` executable fingerprint
+  whose state version `4` carries a version `2` executable fingerprint
   reference and exact protocol-v3 task-resolution records;
 - a normalized BPMN data/IO/interface slice and BPMNDI/DI/DC representation
   with aggregate reference, geometry, and semantic-kind validation;
 - a resource-bounded namespace-aware XML infoset plus strict named profile
-  `bpmn-2.0.2-core-process-di-v2` for fail-closed import, canonical export, and
+  `bpmn-2.0.2-core-process-di-v3` for fail-closed import, canonical export, and
   normalized round-trip of its explicitly bounded process/control-flow and DI
   surface, including source-level `callActivity` references as
-  namespace-expanded QNames;
+  namespace-expanded QNames and Standard Loop characteristics on generic Tasks.
+  The loop condition must be a formal expression with an exact language-version
+  binding, `testBefore` selects pre-test or post-test behavior, and a positive
+  `loopMaximum` is mandatory;
 - a bounded replayable BPMN token kernel for none start/end events, generic
-  tasks, ordinary subprocesses, conditional/default flows, and
-  exclusive/parallel gateways, together with machine-readable coverage gates
-  that still declare no formal BPMN conformance claim;
+  tasks, bounded Standard Loop Tasks, ordinary subprocesses,
+  conditional/default flows, and exclusive/parallel gateways. Standard Loop
+  execution persists iteration identity and condition evidence, honors
+  `testBefore`, and stops at the required `loopMaximum`; it does not admit the
+  combined pre/post-test variant, loops on SubProcesses, or multi-instance
+  activities. Machine-readable coverage gates still declare no formal BPMN
+  conformance claim;
 - an explicitly bounded protocol-v3 Task/Boundary Error execution slice.
   Immutable task bindings and exact failure-identity-to-Error mappings are part
   of the executable fingerprint. `resolveTask` routes exact success normally,
@@ -76,15 +83,17 @@ Today the package provides:
   returns a strict portable `resolveTask` command plus the raw retry outcome.
   Attempt and schedule-to-close timeouts, defects, interruption, and adapter
   failures remain outside BPMN Error routing. Durable resolutions are
-  idempotent and causally replayed. This does not yet cover the complete BPMN
-  Activity lifecycle,
-  parent-scope Error propagation, timers, BPMN Cancel, non-interrupting
-  boundaries, event subprocesses, or task-binding admission through the XML
-  executable facade;
+  idempotent and causally replayed. `BpmnExecutable.compileXml` accepts task
+  bindings explicitly as external compile options and commits them to the
+  executable fingerprint; they are not inferred from BPMN XML. This does not
+  yet cover the complete BPMN Activity lifecycle, parent-scope Error
+  propagation, timers, BPMN Cancel, non-interrupting boundaries, or event
+  subprocesses;
 - a strict BPMN executable facade proving the named XML profile can be imported,
   compiled directly to that token kernel, executed through conditional/default
-  and parallel/subprocess paths, replayed, canonically exported, re-imported,
-  recompiled, and replayed to the same marking without DAG lowering;
+  parallel/subprocess, and bounded Standard Loop paths, replayed, canonically
+  exported, re-imported, recompiled, and replayed to the same marking without
+  DAG lowering;
 - Effectful BPMN kernel preparation that SHA-256 fingerprints the complete
   normalized semantic model, selected root, kernel semantics, limits, mapping
   profile, and exact evaluator-build manifest; state and journal replay reject
@@ -312,13 +321,17 @@ future authenticated distributed queue.
 
 The BPMN model, named XML/DI mapping slice, durable marking, and bounded token
 kernel are likewise not a BPMN conformance claim. Mapping outside
-`bpmn-2.0.2-core-process-di-v2`, normative XSD validation, complete Common
+`bpmn-2.0.2-core-process-di-v3`, normative XSD validation, complete Common
 Executable and Activity lifecycle semantics, a complete atomic normative
 catalogue, persistent storage, authenticated history anchoring, official
 fixtures, and published conformance evidence remain required. The package
 provides no built-in FEEL, XPath, or other expression implementation; an
 application must install an exact build-pinned evaluator, and strong CPU/heap
-isolation requires a worker, process, or sandbox adapter. A BPMN
+isolation requires a worker, process, or sandbox adapter. BPMN 2.0.2 itself
+allows `loopMaximum` to be omitted and `loopCondition` to use the more
+permissive `tExpression` form. Profile `v3` deliberately fails closed unless a
+generic Task has a positive maximum and a version-bound formal condition; it
+does not claim general Standard Loop or multi-instance support. A BPMN
 `callActivity` can be represented and round-tripped. Its protocol-v3 relation
 and replay semantics are modeled, but executable admission still rejects it
 until source QNames resolve through a trusted compiler-semantic-version-2

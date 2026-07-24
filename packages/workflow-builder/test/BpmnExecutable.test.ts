@@ -4,12 +4,16 @@ import * as Effect from "effect/Effect"
 import * as Result from "effect/Result"
 import * as Schema from "effect/Schema"
 import { createHash } from "node:crypto"
+import * as BpmnActivityV3 from "../src/BpmnActivityV3.ts"
 import * as BpmnExecutable from "../src/BpmnExecutable.ts"
 import type * as BpmnExecutionState from "../src/BpmnExecutionState.ts"
+import * as BpmnExpressionEvaluator from "../src/BpmnExpressionEvaluator.ts"
+import * as BpmnExpressionRuntime from "../src/BpmnExpressionRuntime.ts"
 import * as BpmnKernel from "../src/BpmnKernel.ts"
 import * as BpmnXml from "../src/BpmnXml.ts"
 import type * as Diagnostic from "../src/Diagnostic.ts"
 import * as ProtocolV2Wire from "../src/ProtocolV2Wire.ts"
+import * as ProtocolV3Wire from "../src/ProtocolV3Wire.ts"
 
 const modelNamespace = "http://www.omg.org/spec/BPMN/20100524/MODEL"
 const bpmnDiNamespace = "http://www.omg.org/spec/BPMN/20100524/DI"
@@ -24,13 +28,27 @@ const now = "2026-07-23T10:00:00.000Z" as const
 const evaluatorBuildDigest = Schema.decodeUnknownSync(
   ProtocolV2Wire.BuildDigest
 )(`sha256:${"2".repeat(64)}`)
+const loopArtifactDigest = Schema.decodeUnknownSync(
+  ProtocolV3Wire.ArtifactDigest
+)(`sha256:${"3".repeat(64)}`)
+
+const occurrenceDigest = (
+  character: string
+): ProtocolV3Wire.OccurrenceDigest =>
+  Schema.decodeUnknownSync(ProtocolV3Wire.OccurrenceDigest)(
+    `sha256:${character.repeat(64)}`
+  )
+
+const operationDigest = (
+  character: string
+): ProtocolV3Wire.OperationDigest =>
+  Schema.decodeUnknownSync(ProtocolV3Wire.OperationDigest)(
+    `sha256:${character.repeat(64)}`
+  )
 
 const testCrypto = Crypto.make({
   randomBytes: (size) => new Uint8Array(size),
-  digest: (_algorithm, data) =>
-    Effect.sync(() =>
-      new Uint8Array(createHash("sha256").update(data).digest())
-    )
+  digest: (_algorithm, data) => Effect.sync(() => new Uint8Array(createHash("sha256").update(data).digest()))
 })
 
 const options: BpmnExecutable.CompileXmlOptions = {
@@ -120,6 +138,47 @@ const xml = `<?xml version="1.0" encoding="UTF-8"?>
   </bpmndi:BPMNDiagram>
 </bpmn:definitions>`
 
+const loopXml = `<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions
+  xmlns:bpmn="${modelNamespace}"
+  xmlns:xsi="${xsiNamespace}"
+  targetNamespace="urn:workflow:executable-loop"
+  expressionLanguage="${expressionLanguage}">
+  <bpmn:process id="${rootProcessId}" isExecutable="true">
+    <bpmn:startEvent id="loop_start"/>
+    <bpmn:task id="loop_task">
+      <bpmn:standardLoopCharacteristics testBefore="false" loopMaximum="3">
+        <bpmn:loopCondition xsi:type="bpmn:tFormalExpression"><![CDATA[repeat]]></bpmn:loopCondition>
+      </bpmn:standardLoopCharacteristics>
+    </bpmn:task>
+    <bpmn:endEvent id="loop_end"/>
+    <bpmn:sequenceFlow id="flow_loop_start" sourceRef="loop_start" targetRef="loop_task"/>
+    <bpmn:sequenceFlow id="flow_loop_end" sourceRef="loop_task" targetRef="loop_end"/>
+  </bpmn:process>
+</bpmn:definitions>`
+
+const loopTaskBinding: BpmnActivityV3.TaskBinding = {
+  bindingVersion: BpmnActivityV3.BindingVersion,
+  executionProtocolVersion: 3,
+  taskNodeId: "loop_task",
+  artifactDigest: loopArtifactDigest,
+  semanticNodeId: "semantic_loop_task",
+  errorMappings: []
+}
+
+const loopOutcome = (
+  iteration: 0 | 1
+): BpmnActivityV3.TaskSucceeded => ({
+  _tag: "Succeeded",
+  outcomeVersion: BpmnActivityV3.OutcomeVersion,
+  artifactDigest: loopArtifactDigest,
+  semanticNodeId: loopTaskBinding.semanticNodeId,
+  occurrenceDigest: occurrenceDigest(iteration === 0 ? "4" : "5"),
+  firstActivityDigest: operationDigest(iteration === 0 ? "6" : "7"),
+  attempt: 1,
+  completedActivityDigest: operationDigest(iteration === 0 ? "8" : "9")
+})
+
 const success = <A>(
   result: Result.Result<A, Diagnostic.CompilationError>
 ): A => {
@@ -172,8 +231,7 @@ const services = (approved: boolean): BpmnKernel.Services => ({
   evaluateCondition: ({ expression }) =>
     Result.succeed(
       {
-        result:
-          expression.language === expressionLanguage &&
+        result: expression.language === expressionLanguage &&
           expression.version === expressionVersion &&
           expression.source.trim() === "approved" &&
           approved,
@@ -288,6 +346,188 @@ describe("BpmnExecutable", () => {
     )
   })
 
+  it.effect("imports, binds, executes, and replays a bounded Standard Loop through the Effect runtime", () =>
+    Effect.gen(function*() {
+      const compileOptions: BpmnExecutable.CompileXmlOptions = {
+        ...options,
+        taskBindings: [loopTaskBinding]
+      }
+      const compiled = success(compileXml(
+        loopXml,
+        compileOptions
+      ))
+      assert.deepStrictEqual(
+        compiled.kernel.taskBindings,
+        [loopTaskBinding]
+      )
+
+      const evaluatorBinding = options.evaluatorBindings[0]!
+      const decisions = [true, false] as const
+      const requests: Array<string> = []
+      const registry = yield* BpmnExpressionEvaluator.makeMemory([
+        BpmnExpressionEvaluator.makeDefinition({
+          binding: evaluatorBinding,
+          evaluate: (request) =>
+            Effect.gen(function*() {
+              requests.push(request.source)
+              const decision = decisions[requests.length - 1]
+              yield* Effect.yieldNow
+              if (decision === undefined) {
+                return yield* Effect.die(
+                  "Unexpected duplicate Standard Loop evaluation"
+                )
+              }
+              return {
+                result: decision,
+                steps: requests.length
+              }
+            })
+        })
+      ])
+      const provideRegistry = Effect.provideService(
+        BpmnExpressionEvaluator.EvaluatorRegistry,
+        registry
+      )
+      const initialized = yield* BpmnExpressionRuntime.initialize(
+        compiled.kernel,
+        { now }
+      ).pipe(provideRegistry)
+      assert.deepStrictEqual(requests, [])
+      const firstToken = initialized.state.tokens.find((token) =>
+        token.status === "active" &&
+        token.position._tag === "AtNode" &&
+        token.position.nodeId === "loop_task"
+      )
+      if (firstToken === undefined) {
+        return yield* Effect.die(
+          "Expected the first Standard Loop iteration"
+        )
+      }
+      assert.strictEqual(firstToken.invocation.loopIteration, 0)
+      const firstTarget = {
+        scopeInstanceId: firstToken.scopeInstanceId,
+        taskNodeId: "loop_task",
+        tokenId: firstToken.tokenId
+      }
+      const firstOccurrence = success(BpmnKernel.taskOccurrence(
+        compiled.kernel,
+        initialized.state,
+        firstTarget
+      ))
+      assert.strictEqual(firstOccurrence.activation, 0)
+
+      const first = yield* BpmnExpressionRuntime.resolveTask(
+        compiled.kernel,
+        initialized.state,
+        {
+          commandVersion: BpmnActivityV3.CommandVersion,
+          ...firstTarget,
+          outcome: loopOutcome(0)
+        },
+        { now }
+      ).pipe(provideRegistry)
+      const secondToken = first.state.tokens.find((token) =>
+        token.status === "active" &&
+        token.position._tag === "AtNode" &&
+        token.position.nodeId === "loop_task"
+      )
+      if (secondToken === undefined) {
+        return yield* Effect.die(
+          "Expected the second Standard Loop iteration"
+        )
+      }
+      assert.strictEqual(secondToken.invocation.loopIteration, 1)
+      assert.strictEqual(
+        secondToken.invocation.branchId,
+        firstToken.invocation.branchId
+      )
+      const secondTarget = {
+        scopeInstanceId: secondToken.scopeInstanceId,
+        taskNodeId: "loop_task",
+        tokenId: secondToken.tokenId
+      }
+      const secondOccurrence = success(BpmnKernel.taskOccurrence(
+        compiled.kernel,
+        first.state,
+        secondTarget
+      ))
+      assert.strictEqual(secondOccurrence.activation, 1)
+
+      const completed = yield* BpmnExpressionRuntime.resolveTask(
+        compiled.kernel,
+        first.state,
+        {
+          commandVersion: BpmnActivityV3.CommandVersion,
+          ...secondTarget,
+          outcome: loopOutcome(1)
+        },
+        { now }
+      ).pipe(provideRegistry)
+
+      assert.deepStrictEqual(requests, ["repeat", "repeat"])
+      assert.strictEqual(completed.state.status, "completed")
+      assert.deepStrictEqual(
+        completed.state.loopFrames.map((frame) => ({
+          completedIterations: frame.completedIterations,
+          activeIteration: frame.activeIteration,
+          status: frame.status
+        })),
+        [{
+          completedIterations: 2,
+          activeIteration: undefined,
+          status: "completed"
+        }]
+      )
+      assert.deepStrictEqual(
+        [...first.events, ...completed.events]
+          .filter((event) => event._tag === "LoopConditionEvaluated")
+          .map((event) =>
+            event._tag === "LoopConditionEvaluated"
+              ? {
+                phase: event.phase,
+                iteration: event.iteration,
+                result: event.result
+              }
+              : undefined
+          ),
+        [
+          { phase: "after", iteration: 0, result: true },
+          { phase: "after", iteration: 1, result: false }
+        ]
+      )
+
+      const journal: ReadonlyArray<BpmnKernel.TransitionEvent> = [
+        ...initialized.events,
+        ...first.events,
+        ...completed.events
+      ]
+      assert.strictEqual(
+        journal.filter((event) => event._tag === "TaskOutcomeAccepted").length,
+        2
+      )
+      assert.deepStrictEqual(
+        success(BpmnKernel.replay(compiled.kernel, journal)),
+        completed.state
+      )
+
+      const canonical = success(BpmnXml.exportXml(
+        compiled.interchange,
+        { format: "compact" }
+      ))
+      const recompiled = success(compileXml(
+        canonical,
+        compileOptions
+      ))
+      assert.strictEqual(
+        recompiled.kernel.modelReference.executableFingerprint,
+        compiled.kernel.modelReference.executableFingerprint
+      )
+      assert.deepStrictEqual(
+        success(BpmnKernel.replay(recompiled.kernel, journal)),
+        completed.state
+      )
+    }))
+
   it("uses the exclusive gateway's explicit default when its condition is false", () => {
     const compiled = success(compileXml(xml))
     const initialized = success(BpmnKernel.initialize(compiled.kernel, services(false)))
@@ -342,9 +582,7 @@ describe("BpmnExecutable", () => {
 
     for (const rejected of [missing, duplicate]) {
       assert(
-        rejected.diagnostics.some((diagnostic) =>
-          diagnostic.code === BpmnKernel.Codes.InvalidKernelProfile
-        )
+        rejected.diagnostics.some((diagnostic) => diagnostic.code === BpmnKernel.Codes.InvalidKernelProfile)
       )
     }
   })

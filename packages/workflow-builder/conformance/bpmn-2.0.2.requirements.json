@@ -1,7 +1,7 @@
 {
   "formatVersion": 1,
   "catalogId": "effect-workflow-builder-bpmn-2.0.2",
-  "catalogRevision": 7,
+  "catalogRevision": 8,
   "standard": {
     "name": "Business Process Model and Notation",
     "version": "2.0.2",
@@ -77,7 +77,8 @@
       },
       "dependsOn": [
         "BPMN-FOUNDATION-DURABLE-MARKING"
-      ]
+      ],
+      "notes": "The executable Standard Loop portion is deliberately bounded to one generic Task with an explicit version-bound formal condition and a mandatory positive loopMaximum. testBefore selects pre-test or post-test evaluation. Combined pre/post-test loops, Standard Loops on SubProcesses, arbitrary cycles, and multi-instance activities remain outside this kernel subset."
     },
     {
       "id": "BPMN-EXECUTION-TASK-BOUNDARY-ERROR-SLICE",
@@ -92,7 +93,7 @@
       "dependsOn": [
         "BPMN-EXECUTION-BASIC-TOKEN-KERNEL"
       ],
-      "notes": "This atomic slice admits an immutable protocol-v3 binding on a directly prepared generic Task, one-execution translation from a native managed-retry result, exact application-failure-to-BPMN-Error promotion, and at most one interrupting Boundary Error. Schedule-to-close timeout remains operational and is not treated as a BPMN Error or Boundary Timer. Task-binding admission is not yet integrated into the XML executable facade. This is not evidence for the complete Activity lifecycle, generic event propagation, BPMN Cancel, timers, non-interrupting boundaries, or event subprocesses."
+      "notes": "This atomic slice admits an immutable protocol-v3 binding on a generic Task, one-execution translation from a native managed-retry result, exact application-failure-to-BPMN-Error promotion, and at most one interrupting Boundary Error. The XML executable facade accepts task bindings explicitly through CompileXmlOptions and commits them to the executable fingerprint; bindings remain external executable inputs and are not inferred from BPMN XML. Schedule-to-close timeout remains operational and is not treated as a BPMN Error or Boundary Timer. This is not evidence for the complete Activity lifecycle, generic event propagation, BPMN Cancel, timers, non-interrupting boundaries, or event subprocesses."
     },
     {
       "id": "BPMN-EXECUTION-CORE-PROCESS-XML-SLICE",
@@ -108,7 +109,7 @@
         "BPMN-EXECUTION-BASIC-TOKEN-KERNEL",
         "BPMN-INTERCHANGE-CORE-PROCESS-XML-SLICE"
       ],
-      "notes": "This is a deliberately narrower executable admission profile, not Process Execution Conformance. It rejects rather than infers unsupported process, gateway, event, activity, and implicit-activation semantics."
+      "notes": "This is a deliberately narrower executable admission profile, not Process Execution Conformance. Profile bpmn-2.0.2-core-process-di-v3 admits while-style pre-test and BPMN post-tested Standard Loops only on a generic Task with an exact version-bound formal condition whose true result means continue and a mandatory positive loopMaximum. It rejects rather than infers unsupported process, gateway, event, activity, combined-loop, SubProcess-loop, multi-instance, and implicit-activation semantics."
     },
     {
       "id": "BPMN-INTERCHANGE-BOUNDED-XML-INFOSET",
@@ -128,7 +129,7 @@
       "source": {
         "authority": "OMG",
         "document": "BPMN20.xsd and Semantic.xsd",
-        "section": "tDefinitions, tProcess, flow nodes, and tSequenceFlow",
+        "section": "tDefinitions, tProcess, tActivity, tStandardLoopCharacteristics, flow nodes, and tSequenceFlow",
         "url": "https://www.omg.org/spec/BPMN/2.0.2"
       },
       "dependsOn": [
@@ -136,7 +137,7 @@
         "BPMN-FOUNDATION-SEMANTIC-VALIDATION",
         "BPMN-INTERCHANGE-BOUNDED-XML-INFOSET"
       ],
-      "notes": "Profile bpmn-2.0.2-core-process-di-v2 covers ordinary processes and recursive subprocesses, generic tasks, source-level callActivity callable-element QNames, none start/end events, exclusive/parallel gateways, sequence flows, conditions, defaults, definitions metadata, and explicit expression-version bindings. Call activities are interchange-only until immutable child-target resolution and durable parent/child execution exist. This is a fail-closed implementation slice, not an OMG conformance subclass or complete semantic mapping."
+      "notes": "Profile bpmn-2.0.2-core-process-di-v3 covers ordinary processes and recursive subprocesses, generic tasks, source-level callActivity callable-element QNames, none start/end events, exclusive/parallel gateways, sequence flows, conditions, defaults, definitions metadata, explicit expression-version bindings, and Standard Loop characteristics on generic Tasks. Its loop mapping requires one version-bound tFormalExpression loopCondition, materializes the BPMN testBefore=false default, and requires a positive loopMaximum. BPMN 2.0.2 permits loopMaximum to be absent and loopCondition to be absent or use the more permissive tExpression form; v3 rejects those broader forms instead of inventing executable behavior. Call activities are interchange-only until immutable child-target resolution and durable parent/child execution exist. This is a fail-closed implementation slice, not an OMG conformance subclass, complete semantic mapping, general Standard Loop profile, or multi-instance profile."
     },
     {
       "id": "BPMN-INTERCHANGE-SEMANTIC-MAPPING",
@@ -191,7 +192,7 @@
         "BPMN-DI-SEMANTIC-MODEL",
         "BPMN-INTERCHANGE-CORE-PROCESS-XML-SLICE"
       ],
-      "notes": "Profile bpmn-2.0.2-core-process-di-v2 maps the package's complete current normalized DI slice with global XML-ID and semantic reference-kind checks. It is not the complete BPMN DI interchange surface and has no normative XSD evidence yet."
+      "notes": "Profile bpmn-2.0.2-core-process-di-v3 maps the package's complete current normalized DI slice with global XML-ID and semantic reference-kind checks. It is not the complete BPMN DI interchange surface and has no normative XSD evidence yet."
     },
     {
       "id": "BPMN-DI-XML-ROUNDTRIP",
@@ -325,6 +326,23 @@
         "WFP-CONTROL-FLOW-CATALOG",
         "BPMN-EXECUTION-BASIC-TOKEN-KERNEL"
       ]
+    },
+    {
+      "id": "WFP-WCP21-STRUCTURED-LOOP",
+      "title": "WCP21 Structured Loop - bounded generic Task subset",
+      "facet": "execution",
+      "source": {
+        "authority": "WorkflowPatterns",
+        "document": "Workflow Patterns: The Definitive Guide",
+        "section": "4.4",
+        "pages": "149-150"
+      },
+      "dependsOn": [
+        "WFP-CONTROL-FLOW-CATALOG",
+        "BPMN-EXECUTION-BASIC-TOKEN-KERNEL",
+        "BPMN-EXECUTION-CORE-PROCESS-XML-SLICE"
+      ],
+      "notes": "This atomic requirement is scoped to executable while-style pre-test and BPMN post-tested behavior for one generic Task, with durable iteration identity, exact condition evidence whose true result means continue, and a mandatory positive iteration cap. It does not claim WCP21's combined pre/post-test variant, Standard Loops on SubProcesses, arbitrary cycles, or any multi-instance pattern. BPMN 2.0.2 section 13.3.6 explicitly maps Structured Loop to WCP-21; section 10.3.8 and Table 10.28 define the Standard Loop condition, testBefore default, and loopMaximum cap."
     },
     {
       "id": "WFP-DATA-CATALOG",

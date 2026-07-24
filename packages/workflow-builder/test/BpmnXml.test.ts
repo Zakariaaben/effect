@@ -116,6 +116,47 @@ const xml = (
   </${prefixes.bpmnDi}:BPMNDiagram>
 </${prefixes.model}:definitions>`
 
+const standardLoopOptions: BpmnXml.ImportOptions = {
+  importId: "standard-loop",
+  expressionLanguageBindings: [{
+    language: "urn:expression:loop",
+    version: "1.4.0"
+  }]
+}
+
+const standardLoopXml = (
+  prefixes: {
+    readonly model: string
+    readonly xsi: string
+  } = {
+    model: "loop",
+    xsi: "types"
+  }
+): string =>
+  `<${prefixes.model}:definitions
+  xmlns:${prefixes.model}="${modelNamespace}"
+  xmlns:${prefixes.xsi}="${xsiNamespace}"
+  targetNamespace="urn:workflow:loop"
+  expressionLanguage="urn:expression:loop">
+  <${prefixes.model}:process id="loop_process" isExecutable="true">
+    <${prefixes.model}:startEvent id="start">
+      <${prefixes.model}:outgoing>to_repeat</${prefixes.model}:outgoing>
+    </${prefixes.model}:startEvent>
+    <${prefixes.model}:task id="repeat">
+      <${prefixes.model}:incoming>to_repeat</${prefixes.model}:incoming>
+      <${prefixes.model}:outgoing>to_end</${prefixes.model}:outgoing>
+      <${prefixes.model}:standardLoopCharacteristics testBefore="true" loopMaximum="3">
+        <${prefixes.model}:loopCondition ${prefixes.xsi}:type="${prefixes.model}:tFormalExpression">attempt &lt; limit</${prefixes.model}:loopCondition>
+      </${prefixes.model}:standardLoopCharacteristics>
+    </${prefixes.model}:task>
+    <${prefixes.model}:endEvent id="end">
+      <${prefixes.model}:incoming>to_end</${prefixes.model}:incoming>
+    </${prefixes.model}:endEvent>
+    <${prefixes.model}:sequenceFlow id="to_repeat" sourceRef="start" targetRef="repeat"/>
+    <${prefixes.model}:sequenceFlow id="to_end" sourceRef="repeat" targetRef="end"/>
+  </${prefixes.model}:process>
+</${prefixes.model}:definitions>`
+
 describe("BpmnXml", () => {
   it("imports the complete named semantic and DI slice independent of prefix spelling", () => {
     const first = success(BpmnXml.importXml(xml(), options))
@@ -176,6 +217,373 @@ describe("BpmnXml", () => {
         expressionLanguageBindings: []
       })),
       BpmnXml.Codes.MissingExpressionBinding
+    )
+  })
+
+  it("imports exact StandardLoop semantics with alternate prefixes and the BPMN testBefore default", () => {
+    const explicit = success(BpmnXml.importXml(
+      standardLoopXml({ model: "workflow", xsi: "schema" }),
+      standardLoopOptions
+    ))
+    assert.strictEqual(
+      explicit.profileId,
+      "bpmn-2.0.2-core-process-di-v3"
+    )
+    const explicitTask = explicit.model.flowNodes[1]!
+    assert.strictEqual(explicitTask._tag, "Task")
+    if (
+      explicitTask._tag !== "Task" ||
+      explicitTask.loopCharacteristics?._tag !==
+        "StandardLoopCharacteristics"
+    ) {
+      throw new Error("expected an imported standard loop")
+    }
+    assert.deepStrictEqual(explicitTask.loopCharacteristics, {
+      _tag: "StandardLoopCharacteristics",
+      testBefore: true,
+      condition: {
+        language: "urn:expression:loop",
+        version: "1.4.0",
+        source: "attempt < limit"
+      },
+      loopMaximum: 3
+    })
+
+    const defaulted = success(BpmnXml.importXml(
+      standardLoopXml().replace(` testBefore="true"`, ""),
+      standardLoopOptions
+    ))
+    const defaultedTask = defaulted.model.flowNodes[1]!
+    assert.strictEqual(
+      defaultedTask._tag === "Task" &&
+        defaultedTask.loopCharacteristics?._tag ===
+          "StandardLoopCharacteristics"
+        ? defaultedTask.loopCharacteristics.testBefore
+        : undefined,
+      false
+    )
+    assert.isTrue(
+      defaulted.mappingReport.defaultsApplied.some(
+        (entry) => entry.code === "StandardLoopTestBeforeDefault"
+      )
+    )
+    const defaultedExport = success(BpmnXml.exportXml(defaulted, {
+      format: "compact"
+    }))
+    assert.include(defaultedExport, `testBefore="false"`)
+    assert.deepStrictEqual(
+      success(BpmnXml.importXml(
+        defaultedExport,
+        standardLoopOptions
+      )).model,
+      defaulted.model
+    )
+
+    const normalizedMaximum = success(BpmnXml.importXml(
+      standardLoopXml().replace(`loopMaximum="3"`, `loopMaximum="+0003"`),
+      standardLoopOptions
+    ))
+    const normalizedTask = normalizedMaximum.model.flowNodes[1]!
+    assert.strictEqual(
+      normalizedTask._tag === "Task" &&
+        normalizedTask.loopCharacteristics?._tag ===
+          "StandardLoopCharacteristics"
+        ? normalizedTask.loopCharacteristics.loopMaximum
+        : undefined,
+      3
+    )
+    assert.isTrue(
+      normalizedMaximum.mappingReport.lexicalNonPreservation.some(
+        (entry) => entry.code === "IntegerLexicalForm"
+      )
+    )
+  })
+
+  it("exports StandardLoop after flow references and reaches compact and pretty fixed points", () => {
+    const imported = success(BpmnXml.importXml(
+      standardLoopXml({ model: "alternate", xsi: "instance" }),
+      standardLoopOptions
+    ))
+
+    for (const format of ["compact", "pretty"] as const) {
+      const serialized = success(BpmnXml.exportXml(imported, { format }))
+      assert.include(
+        serialized,
+        `<bpmn:standardLoopCharacteristics testBefore="true" loopMaximum="3">`
+      )
+      assert.include(
+        serialized,
+        `<bpmn:loopCondition xsi:type="bpmn:tFormalExpression">attempt &lt; limit</bpmn:loopCondition>`
+      )
+      const incomingIndex = serialized.indexOf(
+        "<bpmn:incoming>tns:to_repeat</bpmn:incoming>"
+      )
+      const outgoingIndex = serialized.indexOf(
+        "<bpmn:outgoing>tns:to_end</bpmn:outgoing>"
+      )
+      const loopIndex = serialized.indexOf(
+        "<bpmn:standardLoopCharacteristics"
+      )
+      assert.isAtLeast(incomingIndex, 0)
+      assert.isAbove(outgoingIndex, incomingIndex)
+      assert.isAbove(loopIndex, outgoingIndex)
+
+      const reimported = success(BpmnXml.importXml(
+        serialized,
+        standardLoopOptions
+      ))
+      assert.deepStrictEqual(reimported.model, imported.model)
+      assert.strictEqual(
+        success(BpmnXml.exportXml(reimported, { format })),
+        serialized
+      )
+    }
+  })
+
+  it("rejects duplicate loops or conditions, wrong XSD order, and non-Task ownership", () => {
+    const valid = standardLoopXml()
+    const condition =
+      `        <loop:loopCondition types:type="loop:tFormalExpression">attempt &lt; limit</loop:loopCondition>`
+    const loop = `      <loop:standardLoopCharacteristics testBefore="true" loopMaximum="3">
+${condition}
+      </loop:standardLoopCharacteristics>`
+    const incoming = `      <loop:incoming>to_repeat</loop:incoming>`
+    const outgoing = `      <loop:outgoing>to_end</loop:outgoing>`
+
+    const duplicateCondition = valid.replace(
+      condition,
+      `${condition}\n${condition}`
+    )
+    const duplicateLoop = valid.replace(loop, `${loop}\n${loop}`)
+    const wrongOrder = valid
+      .replace(`${outgoing}\n`, "")
+      .replace(loop, `${loop}\n${outgoing}`)
+    const incomingAfterLoop = valid
+      .replace(`${incoming}\n`, "")
+      .replace(loop, `${loop}\n${incoming}`)
+    const callActivity = valid
+      .replace(`<loop:task id="repeat">`, `<loop:callActivity id="repeat">`)
+      .replace(`</loop:task>`, `</loop:callActivity>`)
+    const subProcess = valid
+      .replace(`<loop:task id="repeat">`, `<loop:subProcess id="repeat">`)
+      .replace(`</loop:task>`, `</loop:subProcess>`)
+
+    for (
+      const candidate of [
+        duplicateCondition,
+        duplicateLoop,
+        wrongOrder,
+        incomingAfterLoop
+      ]
+    ) {
+      assert.include(
+        failureCodes(BpmnXml.importXml(candidate, standardLoopOptions)),
+        BpmnXml.Codes.InvalidStructure
+      )
+    }
+    for (const candidate of [callActivity, subProcess]) {
+      assert.include(
+        failureCodes(BpmnXml.importXml(candidate, standardLoopOptions)),
+        BpmnXml.Codes.UnsupportedElement
+      )
+    }
+  })
+
+  it("rejects wrong namespaces, qualified loop attributes, formal types, and bindings", () => {
+    const valid = standardLoopXml()
+    const withForeignNamespace = valid.replace(
+      `xmlns:types="${xsiNamespace}"`,
+      `xmlns:types="${xsiNamespace}" xmlns:foreign="urn:foreign"`
+    )
+    const wrongLoopNamespace = withForeignNamespace.replaceAll(
+      "loop:standardLoopCharacteristics",
+      "foreign:standardLoopCharacteristics"
+    )
+    const wrongConditionNamespace = withForeignNamespace.replaceAll(
+      "loop:loopCondition",
+      "foreign:loopCondition"
+    )
+    const qualifiedTestBefore = valid.replace(
+      ` testBefore="true"`,
+      ` loop:testBefore="true"`
+    )
+    const qualifiedMaximum = valid.replace(
+      ` loopMaximum="3"`,
+      ` loop:loopMaximum="3"`
+    )
+    const invalidTestBefore = valid.replace(
+      `testBefore="true"`,
+      `testBefore="yes"`
+    )
+    const missingFormalType = valid.replace(
+      ` types:type="loop:tFormalExpression"`,
+      ""
+    )
+    const wrongFormalType = withForeignNamespace.replace(
+      `types:type="loop:tFormalExpression"`,
+      `types:type="foreign:tFormalExpression"`
+    )
+
+    assert.include(
+      failureCodes(BpmnXml.importXml(
+        wrongLoopNamespace,
+        standardLoopOptions
+      )),
+      BpmnXml.Codes.UnsupportedNamespace
+    )
+    assert.include(
+      failureCodes(BpmnXml.importXml(
+        wrongConditionNamespace,
+        standardLoopOptions
+      )),
+      BpmnXml.Codes.UnsupportedNamespace
+    )
+    for (const candidate of [qualifiedTestBefore, qualifiedMaximum]) {
+      assert.include(
+        failureCodes(BpmnXml.importXml(candidate, standardLoopOptions)),
+        BpmnXml.Codes.UnsupportedNamespace
+      )
+    }
+    for (const candidate of [missingFormalType, wrongFormalType]) {
+      assert.include(
+        failureCodes(BpmnXml.importXml(candidate, standardLoopOptions)),
+        BpmnXml.Codes.InvalidStructure
+      )
+    }
+    assert.include(
+      failureCodes(BpmnXml.importXml(
+        invalidTestBefore,
+        standardLoopOptions
+      )),
+      BpmnXml.Codes.InvalidLexicalValue
+    )
+    assert.include(
+      failureCodes(BpmnXml.importXml(standardLoopXml(), {
+        importId: "missing-loop-binding",
+        expressionLanguageBindings: []
+      })),
+      BpmnXml.Codes.MissingExpressionBinding
+    )
+  })
+
+  it("requires one formal condition and a positive safe loopMaximum", () => {
+    const valid = standardLoopXml()
+    const condition =
+      `        <loop:loopCondition types:type="loop:tFormalExpression">attempt &lt; limit</loop:loopCondition>`
+    const missingCondition = valid.replace(`${condition}\n`, "")
+    const emptyCondition = valid.replace(
+      `>attempt &lt; limit</loop:loopCondition>`,
+      `></loop:loopCondition>`
+    )
+    const missingMaximum = valid.replace(` loopMaximum="3"`, "")
+
+    for (
+      const candidate of [
+        missingCondition,
+        emptyCondition,
+        missingMaximum
+      ]
+    ) {
+      assert.include(
+        failureCodes(BpmnXml.importXml(candidate, standardLoopOptions)),
+        BpmnXml.Codes.InvalidStructure
+      )
+    }
+
+    for (const maximum of ["0", "-1"]) {
+      assert.include(
+        failureCodes(BpmnXml.importXml(
+          valid.replace(`loopMaximum="3"`, `loopMaximum="${maximum}"`),
+          standardLoopOptions
+        )),
+        BpmnXml.Codes.UnsupportedModel
+      )
+    }
+    for (const maximum of ["1.5", "1e2"]) {
+      assert.include(
+        failureCodes(BpmnXml.importXml(
+          valid.replace(`loopMaximum="3"`, `loopMaximum="${maximum}"`),
+          standardLoopOptions
+        )),
+        BpmnXml.Codes.InvalidLexicalValue
+      )
+    }
+    assert.include(
+      failureCodes(BpmnXml.importXml(
+        valid.replace(
+          `loopMaximum="3"`,
+          `loopMaximum="9007199254740992"`
+        ),
+        standardLoopOptions
+      )),
+      BpmnXml.Codes.UnsupportedModel
+    )
+  })
+
+  it("validates only complete StandardLoop characteristics on normalized Task models", () => {
+    const imported = success(BpmnXml.importXml(
+      standardLoopXml(),
+      standardLoopOptions
+    ))
+    const task = imported.model.flowNodes[1]!
+    if (
+      task._tag !== "Task" ||
+      task.loopCharacteristics?._tag !== "StandardLoopCharacteristics"
+    ) {
+      throw new Error("expected a normalized StandardLoop task")
+    }
+    const loop = task.loopCharacteristics
+    const withoutCondition = Object.fromEntries(
+      Object.entries(loop).filter(([key]) => key !== "condition")
+    )
+    const withoutMaximum = Object.fromEntries(
+      Object.entries(loop).filter(([key]) => key !== "loopMaximum")
+    )
+    const activity = Object.fromEntries(
+      Object.entries(task).filter(([key]) => key !== "taskKind")
+    )
+    const withNode = (replacement: unknown): unknown => ({
+      ...imported,
+      model: {
+        ...imported.model,
+        flowNodes: imported.model.flowNodes.map((node) => node.id === task.id ? replacement : node)
+      }
+    })
+
+    for (
+      const candidate of [
+        withNode({ ...task, loopCharacteristics: withoutCondition }),
+        withNode({ ...task, loopCharacteristics: withoutMaximum }),
+        withNode({
+          ...task,
+          loopCharacteristics: {
+            _tag: "MultiInstanceCharacteristics",
+            mode: "sequential"
+          }
+        }),
+        withNode({ ...activity, _tag: "CallActivity" }),
+        withNode({ ...activity, _tag: "SubProcess" })
+      ]
+    ) {
+      assert.include(
+        failureCodes(BpmnXml.validate(candidate)),
+        BpmnXml.Codes.UnsupportedModel
+      )
+    }
+
+    const staleBinding = withNode({
+      ...task,
+      loopCharacteristics: {
+        ...loop,
+        condition: {
+          ...loop.condition!,
+          version: "stale"
+        }
+      }
+    })
+    assert.include(
+      failureCodes(BpmnXml.validate(staleBinding)),
+      BpmnXml.Codes.ExpressionVersionMismatch
     )
   })
 

@@ -34,6 +34,7 @@ import * as LinkPolicy from "../src/LinkPolicy.ts"
 import * as Node from "../src/Node.ts"
 import * as PlanStoreV3 from "../src/PlanStoreV3.ts"
 import * as Port from "../src/Port.ts"
+import type * as WireV2 from "../src/ProtocolV2Wire.ts"
 import type * as Wire from "../src/ProtocolV3Wire.ts"
 import * as Registry from "../src/Registry.ts"
 import * as Executables from "../src/SemanticExecutableRegistryV3.ts"
@@ -608,11 +609,13 @@ const detailedRetryExecution = (
 
 const bridgeRetryExecution = (
   kernel: BpmnKernel.CompiledKernel,
+  stateInput: unknown,
   invocation: Retry.PreparedRetryInvocation,
   target: EffectWorkflowBpmnV3.TaskResolutionTarget
 ) =>
   EffectWorkflowBpmnV3.executeTask(
     kernel,
+    stateInput,
     invocation,
     target,
     {
@@ -789,6 +792,7 @@ const businessFailure = (
 const bpmnNow = "2026-07-23T10:00:00.000Z" as const
 const bpmnProcessId = "retry-bridge-process"
 const bpmnTaskNodeId = "retry-bridge-task"
+const bpmnEvaluatorBuildDigest = digest("9") as WireV2.BuildDigest
 
 const bpmnServices = (): BpmnKernel.Services => ({
   now: bpmnNow,
@@ -800,7 +804,8 @@ const bpmnServices = (): BpmnKernel.Services => ({
 })
 
 const bridgeBpmnModel = (
-  errorRef?: string | null
+  errorRef?: string | null,
+  standardLoop = false
 ): BpmnModel.BpmnModel => {
   const hasBoundary = errorRef !== undefined
   const taskSuccessFlowId = "flow-task-success"
@@ -837,6 +842,20 @@ const bridgeBpmnModel = (
         taskKind: "generic",
         incomingSequenceFlowIds: ["flow-start-task"],
         outgoingSequenceFlowIds: [taskSuccessFlowId],
+        ...(standardLoop
+          ? {
+            loopCharacteristics: {
+              _tag: "StandardLoopCharacteristics" as const,
+              testBefore: false,
+              condition: {
+                language: "feel",
+                version: "1.0",
+                source: "repeat"
+              },
+              loopMaximum: 3
+            }
+          }
+          : {}),
         extensionElements: []
       },
       ...(hasBoundary
@@ -935,6 +954,7 @@ const prepareBridgeKernel = (
     readonly artifactDigest?: Wire.ArtifactDigest
     readonly semanticNodeId?: Wire.AtomicIdentifier
     readonly catchAllBoundary?: boolean
+    readonly standardLoop?: boolean
   } = {}
 ) =>
   Effect.gen(function*() {
@@ -961,7 +981,8 @@ const prepareBridgeKernel = (
       bridgeBpmnModel(
         bindingOverrides.catchAllBoundary
           ? null
-          : errorMapping?.errorRef
+          : errorMapping?.errorRef,
+        bindingOverrides.standardLoop === true
       ),
       {
         profileId: "retry-bridge-profile-v1",
@@ -969,7 +990,24 @@ const prepareBridgeKernel = (
         limits: {
           maxAutomaticTransitions: 100
         },
-        evaluatorBindings: [],
+        evaluatorBindings: bindingOverrides.standardLoop === true
+          ? [{
+            language: "feel",
+            languageVersion: "1.0",
+            build: {
+              id: "bridge-feel",
+              version: "1.0.0",
+              deploymentId: "bridge-feel-deployment",
+              buildDigest: bpmnEvaluatorBuildDigest
+            },
+            limits: {
+              maxSourceUtf8Bytes: 4_096,
+              maxContextCanonicalBytes: 1_048_576,
+              maxSteps: 100,
+              timeoutMillis: 1_000
+            }
+          }]
+          : [],
         taskBindings: [binding]
       }
     ).pipe(Effect.orDie)
@@ -1204,6 +1242,106 @@ describe("EffectWorkflowRetryV3 contracts", () => {
       )
     }).pipe(provideCrypto))
 
+  it.effect("recovers the exact occurrence retained by a prepared invocation", () =>
+    Effect.gen(function*() {
+      const fixture = yield* makeFixture()
+      const retainedOccurrence = yield* occurrence(
+        fixture,
+        "prepared-occurrence-access"
+      )
+      const invocation = yield* Retry.prepare({
+        artifact: fixture.resolved,
+        occurrence: retainedOccurrence,
+        input: {
+          _tag: "Inline",
+          value: {}
+        }
+      })
+
+      const recovered = Retry.preparedOccurrence(invocation)
+      assert(Result.isSuccess(recovered))
+      assert.strictEqual(recovered.success, retainedOccurrence)
+    }).pipe(provideCrypto))
+
+  it.effect("rejects copied and proxied prepared invocations without reading them", () =>
+    Effect.gen(function*() {
+      const fixture = yield* makeFixture()
+      const retainedOccurrence = yield* occurrence(
+        fixture,
+        "copied-occurrence-access"
+      )
+      const invocation = yield* Retry.prepare({
+        artifact: fixture.resolved,
+        occurrence: retainedOccurrence,
+        input: {
+          _tag: "Inline",
+          value: {}
+        }
+      })
+
+      const copied = Retry.preparedOccurrence({ ...invocation })
+      assert(Result.isFailure(copied))
+      assert.strictEqual(
+        copied.failure.code,
+        Retry.ErrorCodes.InvalidInvocation
+      )
+
+      let proxyReads = 0
+      const proxied = new Proxy(invocation, {
+        get(target, property, receiver) {
+          proxyReads++
+          return Reflect.get(target, property, receiver)
+        }
+      })
+      const proxyFailure = Retry.preparedOccurrence(proxied)
+      assert(Result.isFailure(proxyFailure))
+      assert.strictEqual(
+        proxyFailure.failure.code,
+        Retry.ErrorCodes.InvalidInvocation
+      )
+      assert.strictEqual(proxyReads, 0)
+
+      const unknown = Retry.preparedOccurrence("not-an-invocation")
+      assert(Result.isFailure(unknown))
+      assert.strictEqual(
+        unknown.failure.code,
+        Retry.ErrorCodes.InvalidInvocation
+      )
+    }).pipe(provideCrypto))
+
+  it("rejects accessor-backed invocations without invoking getters", () => {
+    let getterReads = 0
+    const accessorInvocation: Record<string, unknown> = {}
+    for (
+      const property of [
+        "invocationVersion",
+        "artifactDigest",
+        "occurrenceDigest",
+        "nodeId",
+        "firstActivityDigest",
+        "firstScheduleToStartTimerDigest",
+        "firstStartToCloseTimerDigest",
+        "scheduleToCloseControllerDigest"
+      ]
+    ) {
+      Object.defineProperty(accessorInvocation, property, {
+        enumerable: true,
+        get() {
+          getterReads++
+          throw new Error("preparedOccurrence must not read invocation fields")
+        }
+      })
+    }
+
+    const failure = Retry.preparedOccurrence(accessorInvocation)
+    assert(Result.isFailure(failure))
+    assert.strictEqual(
+      failure.failure.code,
+      Retry.ErrorCodes.InvalidInvocation
+    )
+    assert.strictEqual(getterReads, 0)
+  })
+
   it.effect("prepares independent schedule-to-start and start-to-close timers", () =>
     Effect.gen(function*() {
       for (
@@ -1347,6 +1485,7 @@ describe("EffectWorkflowRetryV3 BPMN bridge integration", () => {
       const registration = BridgeWorkflow.toLayer(() =>
         bridgeRetryExecution(
           authority.kernel,
+          authority.initialized.state,
           invocation,
           authority.target
         )
@@ -1432,6 +1571,142 @@ describe("EffectWorkflowRetryV3 BPMN bridge integration", () => {
       }])
     }).pipe(provideCrypto))
 
+  it.effect("executes a Standard Loop iteration only with replay-derived occurrence coordinates", () =>
+    Effect.gen(function*() {
+      let handlerRuns = 0
+      const fixture = yield* makeFixture({
+        handler: (() =>
+          Effect.sync(() => {
+            handlerRuns++
+            return { value: 42 }
+          })) as Node.Handler<typeof retryNode>
+      })
+      const bootstrapOccurrence = yield* occurrence(
+        fixture,
+        "bridge-loop-success-bootstrap"
+      )
+      const bootstrapInvocation = yield* Retry.prepare({
+        artifact: fixture.resolved,
+        occurrence: bootstrapOccurrence,
+        input: { _tag: "Inline", value: {} }
+      })
+      const authority = yield* prepareBridgeKernel(
+        bootstrapInvocation,
+        undefined,
+        { standardLoop: true }
+      )
+      const coordinates = BpmnKernel.taskOccurrence(
+        authority.kernel,
+        authority.initialized.state,
+        authority.target
+      )
+      if (Result.isFailure(coordinates)) {
+        return yield* Effect.die(coordinates.failure)
+      }
+      assert.deepStrictEqual(coordinates.success, {
+        nodeId: "retry-step",
+        scopePath: [{
+          scopeActivationVersion: 1,
+          scopeId: "retry-step",
+          activation: 0
+        }],
+        activation: 0
+      })
+      const preparedOccurrence = yield* Occurrence.prepare({
+        occurrenceVersion: Occurrence.OccurrenceVersion,
+        executionProtocolVersion: Occurrence.ExecutionProtocolVersion,
+        tenantId: "tenant-retry-contract",
+        runId: "bridge-loop-success",
+        artifactDigest: fixture.verified.artifactDigest,
+        ...coordinates.success
+      })
+      const invocation = yield* Retry.prepare({
+        artifact: fixture.resolved,
+        occurrence: preparedOccurrence,
+        input: { _tag: "Inline", value: {} }
+      })
+      const registration = BridgeWorkflow.toLayer(() =>
+        bridgeRetryExecution(
+          authority.kernel,
+          authority.initialized.state,
+          invocation,
+          authority.target
+        )
+      )
+
+      const receipt = yield* Effect.gen(function*() {
+        const executionId = yield* BridgeWorkflow.execute(
+          { id: "bridge-loop-success" },
+          { discard: true }
+        )
+        const terminal = yield* pollUntilComplete(
+          BridgeWorkflow,
+          executionId
+        )
+        if (Exit.isFailure(terminal.exit)) {
+          return yield* Effect.die(terminal.exit.cause)
+        }
+        return terminal.exit.value
+      }).pipe(
+        Effect.provide(
+          registration.pipe(
+            Layer.provideMerge(WorkflowEngine.layerMemory)
+          )
+        )
+      )
+
+      assert.strictEqual(handlerRuns, 1)
+      assert.strictEqual(
+        receipt.command.outcome.occurrenceDigest,
+        preparedOccurrence.occurrenceDigest
+      )
+      const resolved = BpmnKernel.resolveTask(
+        authority.kernel,
+        authority.initialized.state,
+        receipt.command,
+        bpmnServices()
+      )
+      if (Result.isFailure(resolved)) {
+        return yield* Effect.die(resolved.failure)
+      }
+      assert.strictEqual(resolved.success.state.status, "completed")
+      assert.deepStrictEqual(
+        resolved.success.state.loopFrames.map((frame) => ({
+          completedIterations: frame.completedIterations,
+          activeIteration: frame.activeIteration,
+          status: frame.status
+        })),
+        [{
+          completedIterations: 1,
+          activeIteration: undefined,
+          status: "completed"
+        }]
+      )
+      assert(
+        resolved.success.events.some((event) =>
+          event._tag === "LoopIterationCompleted" &&
+          event.iteration === 0
+        )
+      )
+      assert(
+        resolved.success.events.some((event) =>
+          event._tag === "LoopCompleted" &&
+          event.completedIterations === 1
+        )
+      )
+      const replayed = BpmnKernel.replay(authority.kernel, [
+        ...authority.initialized.events,
+        ...resolved.success.events
+      ])
+      if (Result.isFailure(replayed)) {
+        return yield* Effect.die(replayed.failure)
+      }
+      assert.deepStrictEqual(
+        replayed.success,
+        resolved.success.state
+      )
+    }).pipe(provideCrypto))
+
   it.effect("promotes an exact policy override into the mapped interrupting Boundary Error", () =>
     Effect.gen(function*() {
       let handlerRuns = 0
@@ -1478,6 +1753,7 @@ describe("EffectWorkflowRetryV3 BPMN bridge integration", () => {
       const registration = BridgeWorkflow.toLayer(() =>
         bridgeRetryExecution(
           authority.kernel,
+          authority.initialized.state,
           invocation,
           authority.target
         )
@@ -1610,6 +1886,7 @@ describe("EffectWorkflowRetryV3 BPMN bridge integration", () => {
       const registration = BridgeWorkflow.toLayer(() =>
         bridgeRetryExecution(
           authority.kernel,
+          authority.initialized.state,
           invocation,
           authority.target
         )
@@ -1691,6 +1968,69 @@ describe("EffectWorkflowRetryV3 BPMN bridge integration", () => {
       )
     }).pipe(provideCrypto))
 
+  it.effect("rejects a static occurrence for a Standard Loop before the handler runs", () =>
+    Effect.gen(function*() {
+      let handlerRuns = 0
+      const fixture = yield* makeFixture({
+        handler: (() =>
+          Effect.sync(() => {
+            handlerRuns++
+            return { value: 43 }
+          })) as Node.Handler<typeof retryNode>
+      })
+      const preparedOccurrence = yield* occurrence(
+        fixture,
+        "bridge-loop-occurrence-mismatch"
+      )
+      const invocation = yield* Retry.prepare({
+        artifact: fixture.resolved,
+        occurrence: preparedOccurrence,
+        input: { _tag: "Inline", value: {} }
+      })
+      const authority = yield* prepareBridgeKernel(
+        invocation,
+        undefined,
+        { standardLoop: true }
+      )
+      const registration = BridgeWorkflow.toLayer(() =>
+        bridgeRetryExecution(
+          authority.kernel,
+          authority.initialized.state,
+          invocation,
+          authority.target
+        )
+      )
+
+      yield* Effect.gen(function*() {
+        const executionId = yield* BridgeWorkflow.execute(
+          { id: "bridge-loop-occurrence-mismatch" },
+          { discard: true }
+        )
+        const terminal = yield* pollUntilComplete(
+          BridgeWorkflow,
+          executionId
+        )
+        const failure = failReason(terminal.exit)
+        assert.instanceOf(
+          failure,
+          EffectWorkflowBpmnV3.EffectWorkflowBpmnError
+        )
+        assert.strictEqual(
+          (failure as EffectWorkflowBpmnV3.EffectWorkflowBpmnError)
+            .code,
+          EffectWorkflowBpmnV3.ErrorCodes
+            .InvocationOccurrenceMismatch
+        )
+        assert.strictEqual(handlerRuns, 0)
+      }).pipe(
+        Effect.provide(
+          registration.pipe(
+            Layer.provideMerge(WorkflowEngine.layerMemory)
+          )
+        )
+      )
+    }).pipe(provideCrypto))
+
   it.effect("rejects copied invocation provenance before the bridge handler runs", () =>
     Effect.gen(function*() {
       let handlerRuns = 0
@@ -1717,6 +2057,7 @@ describe("EffectWorkflowRetryV3 BPMN bridge integration", () => {
       const registration = BridgeWorkflow.toLayer(() =>
         bridgeRetryExecution(
           authority.kernel,
+          authority.initialized.state,
           copied,
           authority.target
         )
@@ -1780,6 +2121,7 @@ describe("EffectWorkflowRetryV3 BPMN bridge integration", () => {
       const registration = BridgeWorkflow.toLayer(() =>
         bridgeRetryExecution(
           authority.kernel,
+          authority.initialized.state,
           invocation,
           authority.target
         )
@@ -1850,6 +2192,7 @@ describe("EffectWorkflowRetryV3 BPMN bridge integration", () => {
       const registration = BridgeWorkflow.toLayer(() =>
         bridgeRetryExecution(
           authority.kernel,
+          authority.initialized.state,
           invocation,
           target as unknown as EffectWorkflowBpmnV3.TaskResolutionTarget
         )
@@ -1936,6 +2279,7 @@ describe("EffectWorkflowRetryV3 BPMN bridge integration", () => {
       const registration = BridgeWorkflow.toLayer(() =>
         bridgeRetryExecution(
           authority.kernel,
+          authority.initialized.state,
           invocation,
           authority.target
         )
@@ -2032,6 +2376,7 @@ describe("EffectWorkflowRetryV3 BPMN bridge integration", () => {
       const registration = BridgeWorkflow.toLayer(() =>
         bridgeRetryExecution(
           authority.kernel,
+          authority.initialized.state,
           invocation,
           authority.target
         )

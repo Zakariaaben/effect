@@ -8,12 +8,14 @@ import * as Result from "effect/Result"
 import * as Schema from "effect/Schema"
 import * as TestClock from "effect/testing/TestClock"
 import { createHash } from "node:crypto"
+import * as BpmnActivityV3 from "../src/BpmnActivityV3.ts"
 import type * as BpmnExpression from "../src/BpmnExpression.ts"
 import * as Evaluator from "../src/BpmnExpressionEvaluator.ts"
 import * as Runtime from "../src/BpmnExpressionRuntime.ts"
 import * as BpmnKernel from "../src/BpmnKernel.ts"
 import * as BpmnModel from "../src/BpmnModel.ts"
 import * as ProtocolV2Wire from "../src/ProtocolV2Wire.ts"
+import * as ProtocolV3Wire from "../src/ProtocolV3Wire.ts"
 
 const processId = "process-main"
 const now = "2026-07-23T10:00:00.000Z" as const
@@ -27,6 +29,26 @@ const testCrypto = Crypto.make({
 const buildDigest = Schema.decodeUnknownSync(
   ProtocolV2Wire.BuildDigest
 )(`sha256:${"1".repeat(64)}`)
+
+const artifactDigest = Schema.decodeUnknownSync(
+  ProtocolV3Wire.ArtifactDigest
+)(`sha256:${"a".repeat(64)}`)
+
+const occurrenceDigest = Schema.decodeUnknownSync(
+  ProtocolV3Wire.OccurrenceDigest
+)(`sha256:${"b".repeat(64)}`)
+
+const firstActivityDigest = Schema.decodeUnknownSync(
+  ProtocolV3Wire.OperationDigest
+)(`sha256:${"c".repeat(64)}`)
+
+const completedActivityDigest = Schema.decodeUnknownSync(
+  ProtocolV3Wire.OperationDigest
+)(`sha256:${"d".repeat(64)}`)
+
+const semanticNodeId = Schema.decodeUnknownSync(
+  ProtocolV3Wire.AtomicIdentifier
+)("semantic-loop")
 
 const binding = (
   overrides: {
@@ -50,6 +72,30 @@ const binding = (
     timeoutMillis: overrides.timeoutMillis ?? 1_000
   }
 })
+
+const taskBinding = (
+  taskNodeId: string
+): BpmnActivityV3.TaskBinding =>
+  Schema.decodeUnknownSync(BpmnActivityV3.TaskBinding)({
+    bindingVersion: BpmnActivityV3.BindingVersion,
+    executionProtocolVersion: 3,
+    taskNodeId,
+    artifactDigest,
+    semanticNodeId,
+    errorMappings: []
+  })
+
+const succeededOutcome = (): BpmnActivityV3.TaskSucceeded =>
+  Schema.decodeUnknownSync(BpmnActivityV3.TaskSucceeded)({
+    _tag: "Succeeded",
+    outcomeVersion: BpmnActivityV3.OutcomeVersion,
+    artifactDigest,
+    semanticNodeId,
+    occurrenceDigest,
+    firstActivityDigest,
+    attempt: 1,
+    completedActivityDigest
+  })
 
 const expression = (source: string): BpmnModel.Expression => ({
   language: "feel",
@@ -214,17 +260,84 @@ const straightModel = (): BpmnModel.BpmnModel =>
     ]
   )
 
+const standardLoopModel = (
+  testBefore: boolean
+): BpmnModel.BpmnModel =>
+  makeModel(
+    [
+      start(["flow-start"]),
+      {
+        ...task("loop", ["flow-start"], ["flow-end"]),
+        loopCharacteristics: {
+          _tag: "StandardLoopCharacteristics",
+          testBefore,
+          condition: expression("repeat"),
+          loopMaximum: 3
+        }
+      },
+      end(["flow-end"])
+    ],
+    [
+      flow("flow-start", "start", "loop", "normal"),
+      flow("flow-end", "loop", "end", "normal")
+    ]
+  )
+
+const routedStandardLoopModel = (): BpmnModel.BpmnModel =>
+  makeModel(
+    [
+      start(["flow-start"]),
+      {
+        ...task(
+          "loop",
+          ["flow-start"],
+          ["flow-route", "flow-default"],
+          "flow-default"
+        ),
+        loopCharacteristics: {
+          _tag: "StandardLoopCharacteristics",
+          testBefore: true,
+          condition: expression("repeat"),
+          loopMaximum: 3
+        }
+      },
+      task("task-selected", ["flow-route"], ["flow-selected-end"]),
+      task("task-default", ["flow-default"], ["flow-default-end"]),
+      end(["flow-selected-end", "flow-default-end"])
+    ],
+    [
+      flow("flow-start", "start", "loop", "normal"),
+      flow(
+        "flow-route",
+        "loop",
+        "task-selected",
+        "conditional",
+        expression("route")
+      ),
+      flow("flow-default", "loop", "task-default", "default"),
+      flow("flow-selected-end", "task-selected", "end", "normal"),
+      flow("flow-default-end", "task-default", "end", "normal")
+    ]
+  )
+
 const prepare = (
   model: BpmnModel.BpmnModel,
-  evaluatorBinding: BpmnExpression.EvaluatorBinding
+  evaluatorBinding: BpmnExpression.EvaluatorBinding,
+  taskBindings: ReadonlyArray<BpmnActivityV3.TaskBinding> = []
 ): Effect.Effect<BpmnKernel.CompiledKernel, unknown> =>
   BpmnKernel.prepare(model, {
     profileId: "runtime-test-v1",
     rootProcessId: processId,
     limits: { maxAutomaticTransitions: 1_000 },
-    evaluatorBindings: model.sequenceFlows.some((candidate) => candidate.condition !== undefined)
+    evaluatorBindings: model.sequenceFlows.some((candidate) => candidate.condition !== undefined) ||
+        model.flowNodes.some((candidate) =>
+          candidate._tag === "Task" &&
+          candidate.loopCharacteristics?._tag === "StandardLoopCharacteristics" &&
+          candidate.loopCharacteristics.condition !== undefined
+        )
       ? [evaluatorBinding]
-      : []
+      : [],
+    ...(taskBindings.length === 0 ? undefined : { taskBindings })
   }).pipe(Effect.provideService(Crypto.Crypto, testCrypto))
 
 const activeNodeIds = (
@@ -240,6 +353,42 @@ const provideRegistry = <A, E>(
 ): Effect.Effect<A, E> => Effect.provideService(effect, Evaluator.EvaluatorRegistry, registry)
 
 describe("BpmnExpressionRuntime", () => {
+  it("admits only exclusive complete runtime-error decision coordinates", () => {
+    const decode = Schema.decodeUnknownResult(Runtime.RuntimeError)
+    const base = {
+      _tag: "BpmnExpressionRuntimeError",
+      operation: "initialize",
+      code: Runtime.Codes.EvaluatorFailed,
+      ordinal: 0
+    } as const
+    assert.isTrue(Result.isSuccess(decode({
+      ...base,
+      sequenceFlowId: "flow-one"
+    })))
+    assert.isTrue(Result.isSuccess(decode({
+      ...base,
+      loopActivityId: "loop",
+      loopFrameId: "loop-frame:1",
+      loopActivation: 0,
+      loopPhase: "before",
+      loopIteration: 0
+    })))
+    assert.isTrue(Result.isFailure(decode({
+      ...base,
+      sequenceFlowId: "flow-one",
+      loopActivityId: "loop",
+      loopFrameId: "loop-frame:1",
+      loopActivation: 0,
+      loopPhase: "before",
+      loopIteration: 0
+    })))
+    assert.isTrue(Result.isFailure(decode({
+      ...base,
+      loopActivityId: "loop",
+      loopFrameId: "loop-frame:1"
+    })))
+  })
+
   it.effect("resolves the exact binding and evaluates an asynchronous condition", () =>
     Effect.gen(function*() {
       const exactBinding = binding()
@@ -278,6 +427,208 @@ describe("BpmnExpressionRuntime", () => {
       assert.strictEqual(
         waiting?._tag === "TaskWaiting" ? waiting.enteredAt : undefined,
         now
+      )
+    }))
+
+  it.effect("keeps a standard-loop decision stable across asynchronous reruns", () =>
+    Effect.gen(function*() {
+      const exactBinding = binding({ deploymentId: "loop-reruns" })
+      const kernel = yield* prepare(routedStandardLoopModel(), exactBinding)
+      const calls: Array<string> = []
+      const registry = yield* Evaluator.makeMemory([
+        Evaluator.makeDefinition({
+          binding: exactBinding,
+          evaluate: (request) =>
+            Effect.gen(function*() {
+              calls.push(request.source)
+              yield* Effect.yieldNow
+              return {
+                result: request.source === "route",
+                steps: calls.length
+              }
+            })
+        })
+      ])
+      const batch = yield* provideRegistry(
+        Runtime.initialize(kernel, { now }),
+        registry
+      )
+
+      assert.deepStrictEqual(calls, ["repeat", "route"])
+      assert.deepStrictEqual(activeNodeIds(batch), ["task-selected"])
+      const loopEvaluations = batch.events.filter(
+        (event) => event._tag === "LoopConditionEvaluated"
+      )
+      assert.strictEqual(loopEvaluations.length, 1)
+      const evaluated = loopEvaluations[0]
+      assert.strictEqual(evaluated?._tag, "LoopConditionEvaluated")
+      if (evaluated?._tag === "LoopConditionEvaluated") {
+        assert.strictEqual(evaluated.frameId, "loop-frame:1")
+        assert.strictEqual(evaluated.activityId, "loop")
+        assert.strictEqual(evaluated.activation, 0)
+        assert.strictEqual(evaluated.phase, "before")
+        assert.strictEqual(evaluated.iteration, 0)
+        assert.isFalse(evaluated.result)
+      }
+      assert.strictEqual(
+        batch.events.filter((event) => event._tag === "ConditionEvaluated")
+          .length,
+        1
+      )
+    }))
+
+  it.effect("resolves a protocol-v3 loop task through an asynchronous after condition", () =>
+    Effect.gen(function*() {
+      const exactBinding = binding({ deploymentId: "loop-resolve-task" })
+      const kernel = yield* prepare(
+        standardLoopModel(false),
+        exactBinding,
+        [taskBinding("loop")]
+      )
+      let calls = 0
+      const registry = yield* Evaluator.makeMemory([
+        Evaluator.makeDefinition({
+          binding: exactBinding,
+          evaluate: () =>
+            Effect.gen(function*() {
+              calls++
+              yield* Effect.yieldNow
+              return { result: false, steps: 2 }
+            })
+        })
+      ])
+      const initialized = yield* provideRegistry(
+        Runtime.initialize(kernel, { now }),
+        registry
+      )
+      assert.strictEqual(calls, 0)
+      const token = initialized.state.tokens.find((candidate) =>
+        candidate.status === "active" &&
+        candidate.position._tag === "AtNode" &&
+        candidate.position.nodeId === "loop"
+      )
+      if (token === undefined) {
+        throw new Error("expected protocol-v3 loop task token")
+      }
+      const outcome = succeededOutcome()
+      const resolved = yield* provideRegistry(
+        Runtime.resolveTask(
+          kernel,
+          initialized.state,
+          {
+            commandVersion: BpmnActivityV3.CommandVersion,
+            scopeInstanceId: token.scopeInstanceId,
+            taskNodeId: "loop",
+            tokenId: token.tokenId,
+            outcome
+          },
+          { now }
+        ),
+        registry
+      )
+
+      assert.strictEqual(calls, 1)
+      assert.strictEqual(resolved.state.status, "completed")
+      assert.deepStrictEqual(
+        resolved.state.activityResolutions[0]?.outcome,
+        outcome
+      )
+      assert.strictEqual(
+        resolved.events.filter((event) => event._tag === "TaskOutcomeAccepted")
+          .length,
+        1
+      )
+      const evaluated = resolved.events.find(
+        (event) => event._tag === "LoopConditionEvaluated"
+      )
+      assert.strictEqual(evaluated?._tag, "LoopConditionEvaluated")
+      if (evaluated?._tag === "LoopConditionEvaluated") {
+        assert.strictEqual(evaluated.frameId, "loop-frame:1")
+        assert.strictEqual(evaluated.activityId, "loop")
+        assert.strictEqual(evaluated.activation, 0)
+        assert.strictEqual(evaluated.phase, "after")
+        assert.strictEqual(evaluated.iteration, 0)
+        assert.isFalse(evaluated.result)
+      }
+    }))
+
+  it.effect("reports complete standard-loop coordinates for evaluator errors and timeouts", () =>
+    Effect.gen(function*() {
+      const assertLoopFailure = (
+        failure: Runtime.RuntimeError,
+        code: Runtime.Code
+      ): void => {
+        assert.strictEqual(failure.operation, "initialize")
+        assert.strictEqual(failure.code, code)
+        assert.strictEqual(failure.ordinal, 0)
+        assert.isFalse(
+          Object.prototype.hasOwnProperty.call(failure, "sequenceFlowId")
+        )
+        assert.strictEqual(failure.loopActivityId, "loop")
+        assert.strictEqual(failure.loopFrameId, "loop-frame:1")
+        assert.strictEqual(failure.loopActivation, 0)
+        assert.strictEqual(failure.loopPhase, "before")
+        assert.strictEqual(failure.loopIteration, 0)
+      }
+
+      const failedBinding = binding({ deploymentId: "loop-failure" })
+      const failedKernel = yield* prepare(
+        standardLoopModel(true),
+        failedBinding
+      )
+      const failedRegistry = yield* Evaluator.makeMemory([
+        Evaluator.makeDefinition({
+          binding: failedBinding,
+          evaluate: () => Effect.fail({ private: "not-portable" })
+        })
+      ])
+      const failedResult = yield* provideRegistry(
+        Runtime.initialize(failedKernel, { now }),
+        failedRegistry
+      ).pipe(Effect.result)
+      assert.isTrue(Result.isFailure(failedResult))
+      if (Result.isSuccess(failedResult)) {
+        throw new Error("expected loop evaluator failure")
+      }
+      assert.instanceOf(failedResult.failure, Runtime.RuntimeError)
+      if (!(failedResult.failure instanceof Runtime.RuntimeError)) {
+        throw new Error("expected expression runtime error")
+      }
+      assertLoopFailure(failedResult.failure, Runtime.Codes.EvaluatorFailed)
+      assert.notInclude(JSON.stringify(failedResult.failure), "not-portable")
+
+      const timeoutBinding = binding({
+        deploymentId: "loop-timeout",
+        timeoutMillis: 10
+      })
+      const timeoutKernel = yield* prepare(
+        standardLoopModel(true),
+        timeoutBinding
+      )
+      const timeoutRegistry = yield* Evaluator.makeMemory([
+        Evaluator.makeDefinition({
+          binding: timeoutBinding,
+          evaluate: () => Effect.never
+        })
+      ])
+      const fiber = yield* provideRegistry(
+        Runtime.initialize(timeoutKernel, { now }),
+        timeoutRegistry
+      ).pipe(Effect.result, Effect.forkChild)
+      yield* Effect.yieldNow
+      yield* TestClock.adjust(10)
+      const timeoutResult = yield* Fiber.join(fiber)
+      assert.isTrue(Result.isFailure(timeoutResult))
+      if (Result.isSuccess(timeoutResult)) {
+        throw new Error("expected loop evaluator timeout")
+      }
+      assert.instanceOf(timeoutResult.failure, Runtime.RuntimeError)
+      if (!(timeoutResult.failure instanceof Runtime.RuntimeError)) {
+        throw new Error("expected expression runtime error")
+      }
+      assertLoopFailure(
+        timeoutResult.failure,
+        Runtime.Codes.EvaluationTimedOut
       )
     }))
 

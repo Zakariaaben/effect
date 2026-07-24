@@ -25,6 +25,7 @@ import * as BpmnKernel from "./BpmnKernel.ts"
 import * as EffectWorkflowRetryV3 from "./EffectWorkflowRetryV3.ts"
 import type * as EffectWorkflowSemanticV3 from "./EffectWorkflowSemanticV3.ts"
 import * as Json from "./internal/json.ts"
+import type * as SemanticOccurrenceV3 from "./SemanticOccurrenceV3.ts"
 
 const strictParseOptions = {
   errors: "all",
@@ -137,8 +138,10 @@ export const ErrorCodes = {
   InvalidTaskTarget: "InvalidTaskTarget",
   InvalidKernelAuthority: "InvalidKernelAuthority",
   TaskBindingUnavailable: "TaskBindingUnavailable",
+  TaskOccurrenceUnavailable: "TaskOccurrenceUnavailable",
   InvalidInvocation: "InvalidInvocation",
   InvocationBindingMismatch: "InvocationBindingMismatch",
+  InvocationOccurrenceMismatch: "InvocationOccurrenceMismatch",
   InvalidResolutionReceipt: "InvalidResolutionReceipt"
 } as const
 
@@ -154,8 +157,10 @@ const ErrorCode = Schema.Literals([
   ErrorCodes.InvalidTaskTarget,
   ErrorCodes.InvalidKernelAuthority,
   ErrorCodes.TaskBindingUnavailable,
+  ErrorCodes.TaskOccurrenceUnavailable,
   ErrorCodes.InvalidInvocation,
   ErrorCodes.InvocationBindingMismatch,
+  ErrorCodes.InvocationOccurrenceMismatch,
   ErrorCodes.InvalidResolutionReceipt
 ])
 
@@ -246,6 +251,50 @@ const lookupBinding = (
   ))
 }
 
+const lookupOccurrence = (
+  kernel: BpmnKernel.CompiledKernel,
+  stateInput: unknown,
+  target: TaskResolutionTarget
+): Result.Result<
+  BpmnKernel.TaskOccurrenceCoordinates,
+  EffectWorkflowBpmnError
+> => {
+  const occurrence = BpmnKernel.taskOccurrence(
+    kernel,
+    stateInput,
+    target
+  )
+  if (Result.isSuccess(occurrence)) {
+    return Result.succeed(occurrence.success)
+  }
+  const diagnostic = occurrence.failure.diagnostics[0]
+  return Result.fail(bridgeError(
+    diagnostic.code === BpmnKernel.Codes.InvalidKernel
+      ? ErrorCodes.InvalidKernelAuthority
+      : ErrorCodes.TaskOccurrenceUnavailable,
+    diagnostic.message,
+    target
+  ))
+}
+
+const sameOccurrenceCoordinates = (
+  expected: BpmnKernel.TaskOccurrenceCoordinates,
+  actual: EffectWorkflowRetryV3.PreparedRetryInvocation,
+  occurrence: SemanticOccurrenceV3.PreparedOccurrence
+): boolean =>
+  actual.occurrenceDigest === occurrence.occurrenceDigest &&
+  expected.nodeId === occurrence.document.nodeId &&
+  expected.activation === occurrence.document.activation &&
+  expected.scopePath.length === occurrence.document.scopePath.length &&
+  expected.scopePath.every((activation, index) => {
+    const candidate = occurrence.document.scopePath[index]
+    return candidate !== undefined &&
+      activation.scopeActivationVersion ===
+        candidate.scopeActivationVersion &&
+      activation.scopeId === candidate.scopeId &&
+      activation.activation === candidate.activation
+  })
+
 const succeededOutcome = (
   invocation: EffectWorkflowRetryV3.PreparedRetryInvocation,
   outcome: EffectWorkflowRetryV3.NodeAttemptSucceeded
@@ -334,11 +383,16 @@ const resolutionReceipt = (
  *
  * **Details**
  *
- * The exact compiled kernel is consulted before execution, so a structural
- * kernel copy, unbound task, or artifact/node mismatch cannot dispatch the
- * first handler. The returned command is not applied automatically: its
- * optimistic token coordinates must still be checked by
- * {@link BpmnKernel.resolveTask} in the caller's durable state transaction.
+ * The exact compiled kernel and replay-derived execution state are consulted
+ * before execution, so a structural kernel copy, unbound task, stale token,
+ * artifact/node mismatch, or forged loop/scope activation cannot dispatch the
+ * first handler. `stateInput` must be the coordinator's authoritative state
+ * snapshot for `targetInput`; the retained prepared invocation must carry the
+ * exact occurrence coordinates derived by {@link BpmnKernel.taskOccurrence}.
+ *
+ * The returned command is not applied automatically: its optimistic token
+ * coordinates must still be checked by {@link BpmnKernel.resolveTask} in the
+ * caller's durable state transaction.
  *
  * The native retry loop runs exactly once. Business terminal failures are
  * preserved as values long enough to become `BusinessFailed`; attempt and
@@ -350,6 +404,7 @@ const resolutionReceipt = (
  */
 export const executeTask = (
   kernel: BpmnKernel.CompiledKernel,
+  stateInput: unknown,
   invocation: EffectWorkflowRetryV3.PreparedRetryInvocation,
   targetInput: unknown,
   options: EffectWorkflowRetryV3.ExecutionOptions
@@ -375,6 +430,12 @@ export const executeTask = (
         target
       ))
     }
+    const occurrence = yield* Effect.fromResult(
+      EffectWorkflowRetryV3.preparedOccurrence(invocation)
+    )
+    const expectedOccurrence = yield* Effect.fromResult(
+      lookupOccurrence(kernel, stateInput, target)
+    )
     if (
       binding.artifactDigest !== invocation.artifactDigest ||
       binding.semanticNodeId !== invocation.nodeId
@@ -382,6 +443,21 @@ export const executeTask = (
       return yield* Effect.fail(bridgeError(
         ErrorCodes.InvocationBindingMismatch,
         `Prepared retry invocation does not match BPMN Task binding '${target.taskNodeId}'`,
+        target
+      ))
+    }
+    if (
+      occurrence.document.artifactDigest !== invocation.artifactDigest ||
+      occurrence.document.nodeId !== invocation.nodeId ||
+      !sameOccurrenceCoordinates(
+        expectedOccurrence,
+        invocation,
+        occurrence
+      )
+    ) {
+      return yield* Effect.fail(bridgeError(
+        ErrorCodes.InvocationOccurrenceMismatch,
+        `Prepared retry invocation does not match replay-derived BPMN Task occurrence '${target.tokenId}'`,
         target
       ))
     }

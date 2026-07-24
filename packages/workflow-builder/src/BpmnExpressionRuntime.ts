@@ -29,7 +29,8 @@ const strictParseOptions = {
 const Operation = Schema.Literals([
   "initialize",
   "advance",
-  "completeTask"
+  "completeTask",
+  "resolveTask"
 ])
 
 /**
@@ -70,6 +71,36 @@ const Code = Schema.Literals([
   Codes.DecisionIdentityUnavailable
 ])
 
+const RuntimeErrorFields = Schema.Struct({
+  operation: Operation,
+  code: Code,
+  ordinal: Schema.optionalKey(ProtocolV2Wire.NonNegativeSafeInt),
+  sequenceFlowId: Schema.optionalKey(Schema.NonEmptyString),
+  loopActivityId: Schema.optionalKey(Schema.NonEmptyString),
+  loopFrameId: Schema.optionalKey(Schema.NonEmptyString),
+  loopActivation: Schema.optionalKey(ProtocolV2Wire.NonNegativeSafeInt),
+  loopPhase: Schema.optionalKey(Schema.Literals(["before", "after"])),
+  loopIteration: Schema.optionalKey(ProtocolV2Wire.NonNegativeSafeInt)
+}).check(
+  Schema.makeFilter((fields) => {
+    const loopCoordinates = [
+      fields.loopActivityId,
+      fields.loopFrameId,
+      fields.loopActivation,
+      fields.loopPhase,
+      fields.loopIteration
+    ]
+    const loopCoordinateCount = loopCoordinates.filter(
+      (coordinate) => coordinate !== undefined
+    ).length
+    return fields.sequenceFlowId === undefined
+      ? loopCoordinateCount === 0 || loopCoordinateCount === loopCoordinates.length
+      : loopCoordinateCount === 0
+  }, {
+    expected: "no decision coordinates, one sequenceFlowId, or one complete standard-loop coordinate tuple"
+  })
+)
+
 /**
  * Stable failure produced while driving an effectful BPMN expression.
  *
@@ -84,12 +115,11 @@ const Code = Schema.Literals([
  */
 export class RuntimeError extends Schema.TaggedErrorClass<RuntimeError>(
   "@effect/workflow-builder/BpmnExpressionRuntime/RuntimeError"
-)("BpmnExpressionRuntimeError", {
-  operation: Operation,
-  code: Code,
-  ordinal: Schema.optionalKey(ProtocolV2Wire.NonNegativeSafeInt),
-  sequenceFlowId: Schema.optionalKey(Schema.NonEmptyString)
-}, { parseOptions: strictParseOptions }) {}
+)(
+  "BpmnExpressionRuntimeError",
+  RuntimeErrorFields,
+  { parseOptions: strictParseOptions }
+) {}
 
 /**
  * Machine-readable guarantees enforced by this runtime boundary.
@@ -124,8 +154,24 @@ interface CachedDecision {
   readonly result: BpmnExpressionEvaluator.EvaluationResult
 }
 
+type DecisionCoordinates =
+  | {
+    readonly _tag: "SequenceFlowCondition"
+    readonly sourceNodeId: string
+    readonly sequenceFlowId: string
+  }
+  | {
+    readonly _tag: "StandardLoopCondition"
+    readonly loopActivityId: string
+    readonly loopFrameId: string
+    readonly loopActivation: number
+    readonly loopPhase: "before" | "after"
+    readonly loopIteration: number
+  }
+
 interface PendingEvaluation {
   readonly context: BpmnKernel.EvaluationContext
+  readonly coordinates: DecisionCoordinates
   readonly identity: string
   readonly ordinal: number
 }
@@ -143,35 +189,89 @@ const runtimeError = (
   operation: Operation,
   code: Code,
   ordinal?: number,
-  sequenceFlowId?: string
+  coordinates?: DecisionCoordinates
 ): RuntimeError =>
   new RuntimeError({
     operation,
     code,
     ...(ordinal === undefined ? undefined : { ordinal }),
-    ...(sequenceFlowId === undefined ? undefined : { sequenceFlowId })
+    ...(coordinates === undefined
+      ? undefined
+      : coordinates._tag === "SequenceFlowCondition"
+      ? { sequenceFlowId: coordinates.sequenceFlowId }
+      : {
+        loopActivityId: coordinates.loopActivityId,
+        loopFrameId: coordinates.loopFrameId,
+        loopActivation: coordinates.loopActivation,
+        loopPhase: coordinates.loopPhase,
+        loopIteration: coordinates.loopIteration
+      })
   })
 
+const decisionCoordinates = (
+  context: BpmnKernel.EvaluationContext
+): DecisionCoordinates =>
+  context._tag === "SequenceFlowCondition"
+    ? {
+      _tag: context._tag,
+      sourceNodeId: context.sourceNode.id,
+      sequenceFlowId: context.sequenceFlow.id
+    }
+    : {
+      _tag: context._tag,
+      loopActivityId: context.activity.id,
+      loopFrameId: context.loopFrame.frameId,
+      loopActivation: context.loopFrame.activation,
+      loopPhase: context.phase,
+      loopIteration: context.iteration
+    }
+
 const evaluationFailure = (
-  sequenceFlowId: string
-): Diagnostic.CompilationError =>
-  new Diagnostic.CompilationError({
+  coordinates: DecisionCoordinates
+): Diagnostic.CompilationError => {
+  const isSequenceFlow = coordinates._tag === "SequenceFlowCondition"
+  const details: Schema.Json = isSequenceFlow
+    ? { sequenceFlowId: coordinates.sequenceFlowId }
+    : {
+      loopActivityId: coordinates.loopActivityId,
+      loopFrameId: coordinates.loopFrameId,
+      loopActivation: coordinates.loopActivation,
+      loopPhase: coordinates.loopPhase,
+      loopIteration: coordinates.loopIteration
+    }
+  return new Diagnostic.CompilationError({
     diagnostics: [
       Diagnostic.error(
         BpmnKernel.Codes.EvaluationRequired,
-        `Effectful evaluation is required for sequence flow '${sequenceFlowId}'`,
-        ["sequenceFlows"],
-        { sequenceFlowId }
+        isSequenceFlow
+          ? `Effectful evaluation is required for sequence flow '${coordinates.sequenceFlowId}'`
+          : `Effectful evaluation is required for standard loop on activity '${coordinates.loopActivityId}'`,
+        isSequenceFlow ? ["sequenceFlows"] : ["flowNodes"],
+        details
       )
     ]
   })
+}
 
 const decisionIdentity = (
   operation: Operation,
   kernel: BpmnKernel.CompiledKernel,
   context: BpmnKernel.EvaluationContext,
+  coordinates: DecisionCoordinates,
   ordinal: number
 ): Result.Result<string, RuntimeError> => {
+  const target = coordinates._tag === "SequenceFlowCondition"
+    ? {
+      sourceNodeId: coordinates.sourceNodeId,
+      sequenceFlowId: coordinates.sequenceFlowId
+    }
+    : {
+      loopActivityId: coordinates.loopActivityId,
+      loopFrameId: coordinates.loopFrameId,
+      loopActivation: coordinates.loopActivation,
+      loopPhase: coordinates.loopPhase,
+      loopIteration: coordinates.loopIteration
+    }
   const snapshot = Json.snapshot({
     decisionIdentityVersion: Requirements.decisionIdentityVersion,
     ordinal,
@@ -182,8 +282,7 @@ const decisionIdentity = (
       processId: context.scopeInstance.processId,
       invocation: context.scopeInstance.invocation
     },
-    sourceNodeId: context.sourceNode.id,
-    sequenceFlowId: context.sequenceFlow.id,
+    ...target,
     expression: context.expression,
     evaluatorBinding: context.evaluatorBinding,
     request: context.request
@@ -193,7 +292,7 @@ const decisionIdentity = (
       operation,
       Codes.DecisionIdentityUnavailable,
       ordinal,
-      context.sequenceFlow.id
+      coordinates
     ))
   }
   try {
@@ -203,7 +302,7 @@ const decisionIdentity = (
       operation,
       Codes.DecisionIdentityUnavailable,
       ordinal,
-      context.sequenceFlow.id
+      coordinates
     ))
   }
 }
@@ -225,7 +324,7 @@ const evaluate = (
           operation,
           Codes.EvaluatorResolutionFailed,
           pending.ordinal,
-          pending.context.sequenceFlow.id
+          pending.coordinates
         )
       )
     )
@@ -236,7 +335,7 @@ const evaluate = (
           operation,
           Codes.EvaluatorFailed,
           pending.ordinal,
-          pending.context.sequenceFlow.id
+          pending.coordinates
         )
       ),
       Effect.timeoutOrElse({
@@ -246,7 +345,7 @@ const evaluate = (
             operation,
             Codes.EvaluationTimedOut,
             pending.ordinal,
-            pending.context.sequenceFlow.id
+            pending.coordinates
           ))
       }),
       Effect.matchCauseEffect({
@@ -262,7 +361,7 @@ const evaluate = (
             operation,
             Codes.EvaluatorDefect,
             pending.ordinal,
-            pending.context.sequenceFlow.id
+            pending.coordinates
           ))
         },
         onSuccess: Effect.succeed
@@ -275,7 +374,7 @@ const evaluate = (
         operation,
         Codes.InvalidEvaluationResult,
         pending.ordinal,
-        pending.context.sequenceFlow.id
+        pending.coordinates
       ))
     }
     const decoded = decodeEvaluationResult(snapshot.success)
@@ -284,7 +383,7 @@ const evaluate = (
         operation,
         Codes.InvalidEvaluationResult,
         pending.ordinal,
-        pending.context.sequenceFlow.id
+        pending.coordinates
       ))
     }
     const result = decoded.success
@@ -293,7 +392,7 @@ const evaluate = (
         operation,
         Codes.EvaluationStepLimitExceeded,
         pending.ordinal,
-        pending.context.sequenceFlow.id
+        pending.coordinates
       ))
     }
     return Object.freeze({ ...result })
@@ -327,20 +426,17 @@ const drive = (
         BpmnKernel.Services["evaluateCondition"]
       > = (context) => {
         const currentOrdinal = ordinal++
+        const coordinates = decisionCoordinates(context)
         const identity = decisionIdentity(
           operation,
           kernel,
           context,
+          coordinates,
           currentOrdinal
         )
         if (Result.isFailure(identity)) {
-          callbackFailure = runtimeError(
-            operation,
-            identity.failure.code,
-            currentOrdinal,
-            context.sequenceFlow.id
-          )
-          return Result.fail(evaluationFailure(context.sequenceFlow.id))
+          callbackFailure = identity.failure
+          return Result.fail(evaluationFailure(coordinates))
         }
         const cached = decisions[currentOrdinal]
         if (cached !== undefined) {
@@ -349,18 +445,19 @@ const drive = (
               operation,
               Codes.DecisionIdentityMismatch,
               currentOrdinal,
-              context.sequenceFlow.id
+              coordinates
             )
-            return Result.fail(evaluationFailure(context.sequenceFlow.id))
+            return Result.fail(evaluationFailure(coordinates))
           }
           return Result.succeed(cached.result)
         }
         pending = {
           context,
+          coordinates,
           identity: identity.success,
           ordinal: currentOrdinal
         }
-        return Result.fail(evaluationFailure(context.sequenceFlow.id))
+        return Result.fail(evaluationFailure(coordinates))
       }
 
       const batch = run(evaluateCondition)
@@ -487,6 +584,40 @@ export const completeTask = (
       kernel,
       (evaluateCondition) =>
         BpmnKernel.completeTask(
+          kernel,
+          state,
+          command,
+          runtimeServices(now, evaluateCondition)
+        )
+    )
+  })
+
+/**
+ * Resolves a protocol-v3 BPMN task outcome with exact Effect-native condition
+ * evaluation.
+ *
+ * @category constructors
+ * @since 4.0.0
+ */
+export const resolveTask = (
+  kernel: BpmnKernel.CompiledKernel,
+  stateInput: unknown,
+  commandInput: unknown,
+  services: BpmnKernel.Services
+): Effect.Effect<
+  BpmnKernel.TransitionBatch,
+  Diagnostic.CompilationError | RuntimeError,
+  BpmnExpressionEvaluator.EvaluatorRegistry
+> =>
+  Effect.suspend(() => {
+    const now = captureNow(services)
+    const state = snapshotInput(stateInput)
+    const command = snapshotInput(commandInput)
+    return drive(
+      "resolveTask",
+      kernel,
+      (evaluateCondition) =>
+        BpmnKernel.resolveTask(
           kernel,
           state,
           command,

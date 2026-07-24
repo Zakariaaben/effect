@@ -156,6 +156,20 @@ const evaluatorBindings = (
       )
     }
   }
+  for (const node of value.flowNodes) {
+    if (
+      node._tag === "Task" &&
+      node.loopCharacteristics?._tag === "StandardLoopCharacteristics" &&
+      node.loopCharacteristics.condition !== undefined &&
+      node.loopCharacteristics.loopMaximum !== undefined
+    ) {
+      const condition = node.loopCharacteristics.condition
+      unique.set(
+        JSON.stringify([condition.language, condition.version]),
+        condition
+      )
+    }
+  }
   return [...unique.values()].map((candidate) => ({
     language: candidate.language,
     languageVersion: candidate.version,
@@ -368,6 +382,43 @@ const flow = (
   extensionElements: emptyExtensions(),
   ...overrides
 })
+
+const standardLoopModel = (
+  testBefore: boolean,
+  loopMaximum: number | undefined,
+  condition: BpmnModel.Expression | null = expression("repeat")
+): BpmnModel.BpmnModel =>
+  model(
+    [
+      startEvent("start-loop", processId, ["flow-start-loop"]),
+      task("task-loop", processId, ["flow-start-loop"], ["flow-loop-end"], {
+        loopCharacteristics: {
+          _tag: "StandardLoopCharacteristics",
+          testBefore,
+          ...(condition === null ? {} : { condition }),
+          ...(loopMaximum === undefined ? {} : { loopMaximum })
+        }
+      }),
+      endEvent("end-loop", processId, ["flow-loop-end"])
+    ],
+    [
+      flow(
+        "flow-start-loop",
+        processId,
+        "start-loop",
+        "task-loop",
+        "normal"
+      ),
+      flow(
+        "flow-loop-end",
+        processId,
+        "task-loop",
+        "end-loop",
+        "normal"
+      )
+    ],
+    { addScopeEnds: false }
+  )
 
 const prepareResult = (
   value: BpmnModel.BpmnModel,
@@ -2196,6 +2247,545 @@ describe("BpmnKernel", () => {
         BpmnKernel.Codes.UnsupportedGateway
       ])
     )
+  })
+
+  it("admits only bounded explicit Standard Loop characteristics on generic tasks", () => {
+    const withoutCondition = prepareResult(
+      standardLoopModel(true, 3, null),
+      limits,
+      "loop-without-condition",
+      []
+    )
+    const withoutMaximum = prepareResult(
+      standardLoopModel(true, undefined),
+      limits,
+      "loop-without-maximum",
+      []
+    )
+    const multiInstance = standardLoopModel(true, 3)
+    const loopTask = multiInstance.flowNodes.find((node) => node.id === "task-loop")
+    if (loopTask?._tag !== "Task") {
+      throw new Error("expected loop task fixture")
+    }
+    loopTask.loopCharacteristics = {
+      _tag: "MultiInstanceCharacteristics",
+      mode: "sequential",
+      cardinality: expression("3")
+    }
+    const unsupportedMultiInstance = prepareResult(
+      multiInstance,
+      limits,
+      "loop-multi-instance",
+      []
+    )
+
+    for (
+      const result of [
+        withoutCondition,
+        withoutMaximum,
+        unsupportedMultiInstance
+      ]
+    ) {
+      assert.isTrue(Result.isFailure(result))
+      if (Result.isSuccess(result)) {
+        throw new Error("expected unsupported loop profile")
+      }
+      assert(
+        result.failure.diagnostics.some((diagnostic) => diagnostic.code === BpmnKernel.Codes.UnsupportedLoop)
+      )
+    }
+  })
+
+  it("executes and replays a test-before Standard Loop with zero iterations", () => {
+    const compiled = compile(standardLoopModel(true, 3))
+    const initialized = BpmnKernel.initialize(
+      compiled,
+      services({ repeat: false })
+    )
+    assert.isTrue(Result.isSuccess(initialized))
+    if (Result.isFailure(initialized)) {
+      throw initialized.failure
+    }
+
+    assert.strictEqual(initialized.success.state.status, "completed")
+    assert.deepStrictEqual(
+      initialized.success.state.loopFrames.map((frame) => ({
+        activation: frame.activation,
+        completedIterations: frame.completedIterations,
+        status: frame.status
+      })),
+      [{
+        activation: 0,
+        completedIterations: 0,
+        status: "completed"
+      }]
+    )
+    assert.deepStrictEqual(
+      initialized.success.events
+        .filter((event) => event._tag.startsWith("Loop"))
+        .map((event) => event._tag),
+      ["LoopOpened", "LoopConditionEvaluated", "LoopCompleted"]
+    )
+    const replayed = BpmnKernel.replay(
+      compiled,
+      initialized.success.events
+    )
+    assert.isTrue(Result.isSuccess(replayed))
+    if (Result.isFailure(replayed)) {
+      throw replayed.failure
+    }
+    assert.deepStrictEqual(replayed.success, initialized.success.state)
+  })
+
+  it("persists exact test-before iterations, replays them, and makes old completion idempotent", () => {
+    const compiled = compile(standardLoopModel(true, 5))
+    const initialized = BpmnKernel.initialize(
+      compiled,
+      services({ repeat: true })
+    )
+    assert.isTrue(Result.isSuccess(initialized))
+    if (Result.isFailure(initialized)) {
+      throw initialized.failure
+    }
+    const firstToken = initialized.success.state.tokens.find((token) =>
+      token.status === "active" &&
+      token.position._tag === "AtNode" &&
+      token.position.nodeId === "task-loop"
+    )
+    if (firstToken === undefined) {
+      throw new Error("expected first loop iteration")
+    }
+    const frameId = initialized.success.state.loopFrames[0]?.frameId
+    assert.strictEqual(firstToken.invocation.branchId, frameId)
+    assert.strictEqual(firstToken.invocation.loopIteration, 0)
+
+    const firstCompletion = BpmnKernel.completeTask(
+      compiled,
+      initialized.success.state,
+      {
+        scopeInstanceId: firstToken.scopeInstanceId,
+        taskNodeId: "task-loop",
+        tokenId: firstToken.tokenId
+      },
+      services({ repeat: true })
+    )
+    assert.isTrue(Result.isSuccess(firstCompletion))
+    if (Result.isFailure(firstCompletion)) {
+      throw firstCompletion.failure
+    }
+    const secondToken = firstCompletion.success.state.tokens.find((token) =>
+      token.status === "active" &&
+      token.position._tag === "AtNode" &&
+      token.position.nodeId === "task-loop"
+    )
+    if (secondToken === undefined) {
+      throw new Error("expected second loop iteration")
+    }
+    assert.strictEqual(secondToken.invocation.branchId, frameId)
+    assert.strictEqual(secondToken.invocation.loopIteration, 1)
+    assert.strictEqual(
+      firstCompletion.success.state.loopFrames[0]?.completedIterations,
+      1
+    )
+
+    const repeated = BpmnKernel.completeTask(
+      compiled,
+      firstCompletion.success.state,
+      {
+        scopeInstanceId: firstToken.scopeInstanceId,
+        taskNodeId: "task-loop",
+        tokenId: firstToken.tokenId
+      },
+      services({ repeat: false })
+    )
+    assert.isTrue(Result.isSuccess(repeated))
+    if (Result.isFailure(repeated)) {
+      throw repeated.failure
+    }
+    assert.deepStrictEqual(
+      repeated.success.state,
+      firstCompletion.success.state
+    )
+    assert.deepStrictEqual(
+      repeated.success.events.map((event) => event._tag),
+      ["TaskCompletionReplayed"]
+    )
+
+    const secondCompletion = BpmnKernel.completeTask(
+      compiled,
+      firstCompletion.success.state,
+      {
+        scopeInstanceId: secondToken.scopeInstanceId,
+        taskNodeId: "task-loop",
+        tokenId: secondToken.tokenId
+      },
+      services({ repeat: false })
+    )
+    assert.isTrue(Result.isSuccess(secondCompletion))
+    if (Result.isFailure(secondCompletion)) {
+      throw secondCompletion.failure
+    }
+    assert.strictEqual(secondCompletion.success.state.status, "completed")
+    assert.deepStrictEqual(
+      secondCompletion.success.state.loopFrames.map((frame) => ({
+        completedIterations: frame.completedIterations,
+        activeIteration: frame.activeIteration,
+        status: frame.status
+      })),
+      [{
+        completedIterations: 2,
+        activeIteration: undefined,
+        status: "completed"
+      }]
+    )
+    const journal = [
+      ...initialized.success.events,
+      ...firstCompletion.success.events,
+      ...secondCompletion.success.events
+    ]
+    const replayed = BpmnKernel.replay(compiled, journal)
+    assert.isTrue(Result.isSuccess(replayed))
+    if (Result.isFailure(replayed)) {
+      throw replayed.failure
+    }
+    assert.deepStrictEqual(replayed.success, secondCompletion.success.state)
+  })
+
+  it("executes test-after at least once and enforces loopMaximum without another evaluation", () => {
+    const compiled = compile(standardLoopModel(false, 2))
+    let evaluations = 0
+    const loopServices: BpmnKernel.Services = {
+      now,
+      evaluateCondition: () => {
+        evaluations++
+        return Result.succeed({ result: true, steps: 1 })
+      }
+    }
+    const initialized = BpmnKernel.initialize(compiled, loopServices)
+    assert.isTrue(Result.isSuccess(initialized))
+    if (Result.isFailure(initialized)) {
+      throw initialized.failure
+    }
+    assert.strictEqual(evaluations, 0)
+    const firstToken = initialized.success.state.tokens.find((token) =>
+      token.status === "active" &&
+      token.position._tag === "AtNode"
+    )
+    if (firstToken === undefined) {
+      throw new Error("expected mandatory first iteration")
+    }
+    const firstCompletion = BpmnKernel.completeTask(
+      compiled,
+      initialized.success.state,
+      {
+        scopeInstanceId: firstToken.scopeInstanceId,
+        taskNodeId: "task-loop",
+        tokenId: firstToken.tokenId
+      },
+      loopServices
+    )
+    assert.isTrue(Result.isSuccess(firstCompletion))
+    if (Result.isFailure(firstCompletion)) {
+      throw firstCompletion.failure
+    }
+    assert.strictEqual(evaluations, 1)
+    const secondToken = firstCompletion.success.state.tokens.find((token) =>
+      token.status === "active" &&
+      token.position._tag === "AtNode"
+    )
+    if (secondToken === undefined) {
+      throw new Error("expected second iteration")
+    }
+    const secondCompletion = BpmnKernel.completeTask(
+      compiled,
+      firstCompletion.success.state,
+      {
+        scopeInstanceId: secondToken.scopeInstanceId,
+        taskNodeId: "task-loop",
+        tokenId: secondToken.tokenId
+      },
+      loopServices
+    )
+    assert.isTrue(Result.isSuccess(secondCompletion))
+    if (Result.isFailure(secondCompletion)) {
+      throw secondCompletion.failure
+    }
+    assert.strictEqual(evaluations, 1)
+    assert.strictEqual(secondCompletion.success.state.status, "completed")
+    const completion = secondCompletion.success.events.find((event) => event._tag === "LoopCompleted")
+    assert.deepStrictEqual(
+      completion?._tag === "LoopCompleted"
+        ? {
+          completedIterations: completion.completedIterations,
+          reason: completion.reason
+        }
+        : undefined,
+      {
+        completedIterations: 2,
+        reason: "maximum-reached"
+      }
+    )
+  })
+
+  it("rejects tampered Standard Loop activation, decision evidence, iteration, and completion cause", () => {
+    const compiled = compile(standardLoopModel(true, 5))
+    const initialized = BpmnKernel.initialize(
+      compiled,
+      services({ repeat: true })
+    )
+    assert.isTrue(Result.isSuccess(initialized))
+    if (Result.isFailure(initialized)) {
+      throw initialized.failure
+    }
+    const token = initialized.success.state.tokens.find((candidate) =>
+      candidate.status === "active" &&
+      candidate.position._tag === "AtNode"
+    )
+    if (token === undefined) {
+      throw new Error("expected loop token")
+    }
+    const completed = BpmnKernel.completeTask(
+      compiled,
+      initialized.success.state,
+      {
+        scopeInstanceId: token.scopeInstanceId,
+        taskNodeId: "task-loop",
+        tokenId: token.tokenId
+      },
+      services({ repeat: false })
+    )
+    assert.isTrue(Result.isSuccess(completed))
+    if (Result.isFailure(completed)) {
+      throw completed.failure
+    }
+    const journal = [
+      ...initialized.success.events,
+      ...completed.success.events
+    ]
+    const tamper = (
+      select: (event: BpmnKernel.TransitionEvent) => boolean,
+      mutate: (event: BpmnKernel.TransitionEvent) => void
+    ): void => {
+      const forged = structuredClone(journal)
+      const event = forged.find(select)
+      if (event === undefined) {
+        throw new Error("expected loop event to tamper")
+      }
+      mutate(event)
+      assert.isTrue(Result.isFailure(BpmnKernel.replay(compiled, forged)))
+    }
+    tamper(
+      (event) => event._tag === "LoopOpened",
+      (event) => {
+        if (event._tag === "LoopOpened") event.activation++
+      }
+    )
+    tamper(
+      (event) => event._tag === "LoopConditionEvaluated",
+      (event) => {
+        if (event._tag === "LoopConditionEvaluated") {
+          event.usage.contextCanonicalBytes++
+        }
+      }
+    )
+    tamper(
+      (event) => event._tag === "LoopIterationStarted",
+      (event) => {
+        if (event._tag === "LoopIterationStarted") event.iteration++
+      }
+    )
+    tamper(
+      (event) => event._tag === "LoopCompleted",
+      (event) => {
+        if (event._tag === "LoopCompleted") {
+          event.reason = "maximum-reached"
+        }
+      }
+    )
+  })
+
+  it("derives protocol-v3 occurrence coordinates from the exact active loop wait", () => {
+    const compiled = compile(
+      standardLoopModel(false, 3),
+      [taskBinding("task-loop")]
+    )
+    const initialized = BpmnKernel.initialize(compiled, services())
+    assert.isTrue(Result.isSuccess(initialized))
+    if (Result.isFailure(initialized)) {
+      throw initialized.failure
+    }
+    const firstToken = initialized.success.state.tokens.find((candidate) =>
+      candidate.status === "active" &&
+      candidate.position._tag === "AtNode"
+    )
+    if (firstToken === undefined) {
+      throw new Error("expected bound loop token")
+    }
+    const target = {
+      scopeInstanceId: firstToken.scopeInstanceId,
+      taskNodeId: "task-loop",
+      tokenId: firstToken.tokenId
+    }
+    const firstOccurrence = BpmnKernel.taskOccurrence(
+      compiled,
+      initialized.success.state,
+      target
+    )
+    assert.isTrue(Result.isSuccess(firstOccurrence))
+    if (Result.isFailure(firstOccurrence)) {
+      throw firstOccurrence.failure
+    }
+    assert.deepStrictEqual(firstOccurrence.success, {
+      nodeId: semanticNodeId,
+      scopePath: [{
+        scopeActivationVersion: 1,
+        scopeId: semanticNodeId,
+        activation: 0
+      }],
+      activation: 0
+    })
+
+    const firstCompletion = BpmnKernel.resolveTask(
+      compiled,
+      initialized.success.state,
+      {
+        commandVersion: BpmnActivityV3.CommandVersion,
+        ...target,
+        outcome: succeededOutcome()
+      },
+      services({ repeat: true })
+    )
+    assert.isTrue(Result.isSuccess(firstCompletion))
+    if (Result.isFailure(firstCompletion)) {
+      throw firstCompletion.failure
+    }
+    const secondToken = firstCompletion.success.state.tokens.find((candidate) =>
+      candidate.status === "active" &&
+      candidate.position._tag === "AtNode"
+    )
+    if (secondToken === undefined) {
+      throw new Error("expected second bound loop token")
+    }
+    const secondOccurrence = BpmnKernel.taskOccurrence(
+      compiled,
+      firstCompletion.success.state,
+      {
+        scopeInstanceId: secondToken.scopeInstanceId,
+        taskNodeId: "task-loop",
+        tokenId: secondToken.tokenId
+      }
+    )
+    assert.isTrue(Result.isSuccess(secondOccurrence))
+    if (Result.isFailure(secondOccurrence)) {
+      throw secondOccurrence.failure
+    }
+    assert.deepStrictEqual(secondOccurrence.success, {
+      nodeId: semanticNodeId,
+      scopePath: [{
+        scopeActivationVersion: 1,
+        scopeId: semanticNodeId,
+        activation: 0
+      }],
+      activation: 1
+    })
+  })
+
+  it("cancels and replays a bound Standard Loop before routing its Boundary Error", () => {
+    const errorRef = "error-loop-business"
+    const definition = standardLoopModel(false, 3)
+    definition.errors = [{
+      id: errorRef,
+      errorCode: "LOOP_BUSINESS"
+    }]
+    definition.flowNodes.push(
+      boundaryError(
+        "boundary-loop-error",
+        "task-loop",
+        "flow-boundary-loop-end",
+        errorRef
+      ),
+      endEvent(
+        "end-loop-error",
+        processId,
+        ["flow-boundary-loop-end"]
+      )
+    )
+    definition.sequenceFlows.push(
+      flow(
+        "flow-boundary-loop-end",
+        processId,
+        "boundary-loop-error",
+        "end-loop-error",
+        "normal"
+      )
+    )
+    const compiled = compile(definition, [
+      taskBinding("task-loop", [{
+        errorTag: "LoopBusinessFailure",
+        errorCode: "REJECTED",
+        errorRef
+      }])
+    ])
+    const initialized = BpmnKernel.initialize(compiled, services())
+    assert.isTrue(Result.isSuccess(initialized))
+    if (Result.isFailure(initialized)) {
+      throw initialized.failure
+    }
+    const token = initialized.success.state.tokens.find((candidate) =>
+      candidate.status === "active" &&
+      candidate.position._tag === "AtNode"
+    )
+    if (token === undefined) {
+      throw new Error("expected bound loop token")
+    }
+    const resolved = BpmnKernel.resolveTask(
+      compiled,
+      initialized.success.state,
+      {
+        commandVersion: BpmnActivityV3.CommandVersion,
+        scopeInstanceId: token.scopeInstanceId,
+        taskNodeId: "task-loop",
+        tokenId: token.tokenId,
+        outcome: failedOutcome(
+          "LoopBusinessFailure",
+          "REJECTED"
+        )
+      },
+      services()
+    )
+    assert.isTrue(Result.isSuccess(resolved))
+    if (Result.isFailure(resolved)) {
+      throw resolved.failure
+    }
+    assert.strictEqual(resolved.success.state.status, "completed")
+    assert.deepStrictEqual(
+      resolved.success.state.loopFrames.map((frame) => ({
+        completedIterations: frame.completedIterations,
+        status: frame.status
+      })),
+      [{
+        completedIterations: 0,
+        status: "cancelled"
+      }]
+    )
+    const causalTags = resolved.success.events.map((event) => event._tag)
+    assert(
+      causalTags.indexOf("LoopFrameCancelled") >
+        causalTags.indexOf("TokenWithdrawn")
+    )
+    assert(
+      causalTags.indexOf("BoundaryErrorCaught") >
+        causalTags.indexOf("LoopFrameCancelled")
+    )
+    const replayed = BpmnKernel.replay(compiled, [
+      ...initialized.success.events,
+      ...resolved.success.events
+    ])
+    assert.isTrue(Result.isSuccess(replayed))
+    if (Result.isFailure(replayed)) {
+      throw replayed.failure
+    }
+    assert.deepStrictEqual(replayed.success, resolved.success.state)
   })
 
   it("rejects duplicate arrivals recorded in the same join epoch", () => {

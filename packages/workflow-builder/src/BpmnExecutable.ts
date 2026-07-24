@@ -16,6 +16,7 @@ import * as Effect from "effect/Effect"
 import type * as PlatformError from "effect/PlatformError"
 import * as Result from "effect/Result"
 import * as Schema from "effect/Schema"
+import * as BpmnActivityV3 from "./BpmnActivityV3.ts"
 import * as BpmnExpression from "./BpmnExpression.ts"
 import * as BpmnKernel from "./BpmnKernel.ts"
 import * as BpmnXml from "./BpmnXml.ts"
@@ -55,7 +56,10 @@ export const CompileXmlOptions = Schema.Struct({
   importOptions: BpmnXml.ImportOptions,
   rootProcessId: Schema.NonEmptyString,
   limits: BpmnKernel.KernelLimits,
-  evaluatorBindings: Schema.Array(BpmnExpression.EvaluatorBinding)
+  evaluatorBindings: Schema.Array(BpmnExpression.EvaluatorBinding),
+  taskBindings: Schema.optionalKey(
+    Schema.Array(BpmnActivityV3.TaskBinding)
+  )
 }).annotate({
   identifier: "WorkflowBpmnExecutableCompileXmlOptions",
   parseOptions: strictParseOptions
@@ -103,8 +107,11 @@ const invalidOptions = (
  *
  * Options are snapshotted and decoded with excess-property rejection before
  * XML parsing begins. Import and kernel diagnostics are returned unchanged.
- * The function does not infer an unspecified gateway direction, choose among
- * multiple populated processes, or claim BPMN conformance.
+ * Evaluator and optional protocol-v3 Task bindings are supplied as explicit
+ * deployment authority outside the BPMN document and become part of the
+ * executable fingerprint. The function does not infer an unspecified gateway
+ * direction, choose among multiple populated processes, or claim BPMN
+ * conformance.
  *
  * @category constructors
  * @since 4.0.0
@@ -142,7 +149,10 @@ export const compileXml = Effect.fnUntraced(function*(
       profileId: imported.success.profileId,
       rootProcessId: options.success.rootProcessId,
       limits: options.success.limits,
-      evaluatorBindings: options.success.evaluatorBindings
+      evaluatorBindings: options.success.evaluatorBindings,
+      ...(options.success.taskBindings === undefined
+        ? undefined
+        : { taskBindings: options.success.taskBindings })
     }
   )
   return Object.freeze({

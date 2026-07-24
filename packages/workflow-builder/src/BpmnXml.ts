@@ -51,7 +51,7 @@ const Path = Schema.Array(Diagnostic.PathSegment)
  * @category constants
  * @since 4.0.0
  */
-export const CoreProcessDiProfileId = "bpmn-2.0.2-core-process-di-v2" as const
+export const CoreProcessDiProfileId = "bpmn-2.0.2-core-process-di-v3" as const
 
 /**
  * Normalized metadata carried by one BPMN `definitions` element.
@@ -784,15 +784,20 @@ interface ParsedNode {
   readonly path: ReadonlyArray<Diagnostic.PathSegment>
 }
 
-const expression = (
+type FormalExpressionElementName = "conditionExpression" | "loopCondition"
+
+const formalExpression = (
   element: BpmnXmlAst.XmlElement,
   context: NamespaceContext,
-  state: ParserState
+  state: ParserState,
+  elementName: FormalExpressionElementName
 ): BpmnModel.Expression => {
-  if (!isElementNamed(element, ModelNamespace, "conditionExpression")) {
+  if (!isElementNamed(element, ModelNamespace, elementName)) {
     abort(
-      Codes.UnsupportedElement,
-      `Expected BPMN conditionExpression, received '${element.name.localName}'`,
+      element.name.namespaceUri === ModelNamespace
+        ? Codes.UnsupportedElement
+        : Codes.UnsupportedNamespace,
+      `Expected BPMN ${elementName}, received '${element.name.localName}'`,
       xmlPath(element)
     )
   }
@@ -805,7 +810,7 @@ const expression = (
   if (typeValue === undefined) {
     abort(
       Codes.InvalidStructure,
-      "conditionExpression requires xsi:type resolving to BPMN tFormalExpression",
+      `${elementName} requires xsi:type resolving to BPMN tFormalExpression`,
       xmlPath(element, ["attributes", "type"])
     )
   }
@@ -814,12 +819,12 @@ const expression = (
     context,
     state.report,
     xmlPath(element, ["attributes", "type"]),
-    "conditionExpression xsi:type"
+    `${elementName} xsi:type`
   )
   if (type.namespaceUri !== ModelNamespace || type.localName !== "tFormalExpression") {
     abort(
       Codes.InvalidStructure,
-      "conditionExpression xsi:type must resolve exactly to BPMN tFormalExpression",
+      `${elementName} xsi:type must resolve exactly to BPMN tFormalExpression`,
       xmlPath(element, ["attributes", "type"]),
       { namespaceUri: type.namespaceUri, localName: type.localName }
     )
@@ -831,7 +836,7 @@ const expression = (
       languageLexical,
       state.report,
       xmlPath(element, ["attributes", "language"]),
-      "conditionExpression language"
+      `${elementName} language`
     )
   const version = state.bindings.byLanguage.get(language)
   if (version === undefined) {
@@ -858,14 +863,14 @@ const expression = (
     }
     abort(
       Codes.InvalidStructure,
-      "conditionExpression cannot contain elements, comments, or processing instructions",
+      `${elementName} cannot contain elements, comments, or processing instructions`,
       xmlPath(element, ["children", index])
     )
   }
   if (source.length === 0) {
     abort(
       Codes.InvalidStructure,
-      "conditionExpression source must be non-empty",
+      `${elementName} source must be non-empty`,
       xmlPath(element, ["children"])
     )
   }
@@ -887,10 +892,114 @@ const parseReferenceChild = (
     owner
   )
 
+const integerPattern = /^[+-]?\d+$/
+
+const readPositiveSafeInteger = (
+  value: string,
+  report: MutableReport,
+  path: ReadonlyArray<Diagnostic.PathSegment>,
+  owner: string
+): number => {
+  const normalized = normalizeToken(value, report, path, owner)
+  if (!integerPattern.test(normalized)) {
+    abort(
+      Codes.InvalidLexicalValue,
+      `${owner} is not an XML Schema integer`,
+      path
+    )
+  }
+  const number = Number(normalized)
+  if (!Number.isSafeInteger(number)) {
+    abort(
+      Codes.UnsupportedModel,
+      `${owner} is outside the safe-integer range represented by this profile`,
+      path
+    )
+  }
+  if (number < 1) {
+    abort(
+      Codes.UnsupportedModel,
+      `${owner} must be at least 1 in this executable profile`,
+      path
+    )
+  }
+  if (String(number) !== normalized) {
+    notice(
+      report.lexicalNonPreservation,
+      "IntegerLexicalForm",
+      `${owner} integer lexical form is normalized`,
+      path
+    )
+  }
+  return number
+}
+
+const parseStandardLoopCharacteristics = (
+  element: BpmnXmlAst.XmlElement,
+  context: NamespaceContext,
+  state: ParserState
+): BpmnModel.StandardLoopCharacteristics => {
+  const attributes = readAttributes(
+    element,
+    new Set(["testBefore", "loopMaximum"])
+  )
+  const testBeforeLexical = unqualifiedAttribute(attributes, "testBefore")
+  const testBefore = testBeforeLexical === undefined
+    ? false
+    : readBoolean(
+      testBeforeLexical,
+      state.report,
+      xmlPath(element, ["attributes", "testBefore"]),
+      "standardLoopCharacteristics testBefore"
+    )
+  if (testBeforeLexical === undefined) {
+    notice(
+      state.report.defaultsApplied,
+      "StandardLoopTestBeforeDefault",
+      "Absent standardLoopCharacteristics testBefore defaults to false",
+      xmlPath(element, ["attributes", "testBefore"])
+    )
+  }
+  const loopMaximumLexical = unqualifiedAttribute(attributes, "loopMaximum")
+  if (loopMaximumLexical === undefined) {
+    abort(
+      Codes.InvalidStructure,
+      "standardLoopCharacteristics requires loopMaximum in this executable profile",
+      xmlPath(element, ["attributes", "loopMaximum"])
+    )
+  }
+  const children = structuralChildren(element)
+  if (children.length !== 1) {
+    abort(
+      Codes.InvalidStructure,
+      "standardLoopCharacteristics requires exactly one BPMN loopCondition",
+      xmlPath(element, ["children"])
+    )
+  }
+  const conditionElement = children[0]!
+  return {
+    _tag: "StandardLoopCharacteristics",
+    testBefore,
+    condition: formalExpression(
+      conditionElement,
+      namespaceContext(context, conditionElement),
+      state,
+      "loopCondition"
+    ),
+    loopMaximum: readPositiveSafeInteger(
+      loopMaximumLexical!,
+      state.report,
+      xmlPath(element, ["attributes", "loopMaximum"]),
+      "standardLoopCharacteristics loopMaximum"
+    )
+  }
+}
+
 interface NodeChildren {
   readonly supplied: boolean
   readonly incoming: ReadonlyArray<string>
   readonly outgoing: ReadonlyArray<string>
+  readonly loopCharacteristics: BpmnModel.StandardLoopCharacteristics | undefined
   readonly contained: ReadonlyArray<BpmnXmlAst.XmlElement>
 }
 
@@ -898,11 +1007,13 @@ const parseNodeChildren = (
   element: BpmnXmlAst.XmlElement,
   context: NamespaceContext,
   state: ParserState,
-  allowContained: boolean
+  allowContained: boolean,
+  allowStandardLoop: boolean
 ): NodeChildren => {
   const incoming: Array<string> = []
   const outgoing: Array<string> = []
   const contained: Array<BpmnXmlAst.XmlElement> = []
+  let loopCharacteristics: BpmnModel.StandardLoopCharacteristics | undefined
   let stage = 0
   let supplied = false
   for (const child of structuralChildren(element)) {
@@ -910,7 +1021,7 @@ const parseNodeChildren = (
       if (stage > 0) {
         abort(
           Codes.InvalidStructure,
-          "BPMN incoming elements must precede outgoing and contained flow elements",
+          "BPMN incoming elements must precede outgoing, loop characteristics, and contained flow elements",
           xmlPath(child)
         )
       }
@@ -927,7 +1038,7 @@ const parseNodeChildren = (
       if (stage > 1) {
         abort(
           Codes.InvalidStructure,
-          "BPMN outgoing elements must precede contained flow elements",
+          "BPMN outgoing elements must precede loop characteristics and contained flow elements",
           xmlPath(child)
         )
       }
@@ -941,6 +1052,29 @@ const parseNodeChildren = (
       ))
       continue
     }
+    if (isElementNamed(child, ModelNamespace, "standardLoopCharacteristics")) {
+      if (!allowStandardLoop) {
+        abort(
+          Codes.UnsupportedElement,
+          `standardLoopCharacteristics is only represented on BPMN task elements`,
+          xmlPath(child)
+        )
+      }
+      if (stage > 1 || loopCharacteristics !== undefined) {
+        abort(
+          Codes.InvalidStructure,
+          "BPMN task permits exactly one standardLoopCharacteristics after incoming and outgoing",
+          xmlPath(child)
+        )
+      }
+      stage = 2
+      loopCharacteristics = parseStandardLoopCharacteristics(
+        child,
+        namespaceContext(context, child),
+        state
+      )
+      continue
+    }
     if (!allowContained) {
       abort(
         child.name.namespaceUri === ModelNamespace
@@ -950,10 +1084,16 @@ const parseNodeChildren = (
         xmlPath(child)
       )
     }
-    stage = 2
+    stage = 3
     contained.push(child)
   }
-  return { supplied, incoming, outgoing, contained }
+  return {
+    supplied,
+    incoming,
+    outgoing,
+    loopCharacteristics,
+    contained
+  }
 }
 
 const commonNodeAttributes = new Set([
@@ -1056,7 +1196,8 @@ const parseNode = (
     element,
     context,
     state,
-    localName === "subProcess"
+    localName === "subProcess",
+    localName === "task"
   )
   const base = {
     id,
@@ -1081,6 +1222,9 @@ const parseNode = (
         ...base,
         taskKind: "generic",
         ...(defaultRef === undefined ? undefined : { defaultFlowId: defaultRef }),
+        ...(children.loopCharacteristics === undefined
+          ? undefined
+          : { loopCharacteristics: children.loopCharacteristics }),
         ...(compensation === undefined
           ? undefined
           : {
@@ -1420,7 +1564,12 @@ const parseSequenceFlow = (
   let condition: BpmnModel.Expression | undefined
   if (children.length === 1) {
     const child = children[0]!
-    condition = expression(child, namespaceContext(context, child), state)
+    condition = formalExpression(
+      child,
+      namespaceContext(context, child),
+      state,
+      "conditionExpression"
+    )
   }
   const isImmediateLexical = unqualifiedAttribute(attributes, "isImmediate")
   state.flows.push({
@@ -2434,10 +2583,9 @@ const assertModelProfile = (
     }
 
     switch (node._tag) {
-      case "Task":
+      case "Task": {
         if (
           node.taskKind !== "generic" ||
-          node.loopCharacteristics !== undefined ||
           node.isForCompensation === true ||
           node.startQuantity !== undefined && node.startQuantity !== 1 ||
           node.completionQuantity !== undefined && node.completionQuantity !== 1 ||
@@ -2454,7 +2602,45 @@ const assertModelProfile = (
             path
           )
         }
+        const loop = node.loopCharacteristics
+        if (loop !== undefined) {
+          if (loop._tag === "StandardLoopCharacteristics") {
+            const condition = loop.condition
+            const loopMaximum = loop.loopMaximum
+            if (condition === undefined || loopMaximum === undefined) {
+              abort(
+                Codes.UnsupportedModel,
+                `Task '${node.id}' requires complete StandardLoopCharacteristics in this executable profile`,
+                [...path, "loopCharacteristics"]
+              )
+            }
+            const completeCondition = condition!
+            const completeLoopMaximum = loopMaximum!
+            if (
+              !Number.isSafeInteger(completeLoopMaximum) ||
+              completeLoopMaximum < 1
+            ) {
+              abort(
+                Codes.UnsupportedModel,
+                `Task '${node.id}' loopMaximum must be a safe integer of at least 1`,
+                [...path, "loopCharacteristics", "loopMaximum"]
+              )
+            }
+            assertExpression(
+              completeCondition,
+              bindings,
+              [...path, "loopCharacteristics", "condition"]
+            )
+          } else {
+            abort(
+              Codes.UnsupportedModel,
+              `Task '${node.id}' only permits StandardLoopCharacteristics in this executable profile`,
+              [...path, "loopCharacteristics"]
+            )
+          }
+        }
         break
+      }
       case "CallActivity":
         if (
           node.loopCharacteristics !== undefined ||
@@ -3300,7 +3486,8 @@ const addOptionalAttribute = (
   }
 }
 
-const exportCondition = (
+const exportFormalExpression = (
+  elementName: FormalExpressionElementName,
   value: BpmnModel.Expression,
   definitions: DefinitionsMetadata
 ): BpmnXmlAst.XmlElement => {
@@ -3310,7 +3497,22 @@ const exportCondition = (
   if (value.language !== definitions.expressionLanguage) {
     attributes.push(xmlAttribute("language", value.language))
   }
-  return bpmnElement("conditionExpression", attributes, [xmlText(value.source)])
+  return bpmnElement(elementName, attributes, [xmlText(value.source)])
+}
+
+const exportStandardLoopCharacteristics = (
+  value: BpmnModel.StandardLoopCharacteristics,
+  definitions: DefinitionsMetadata
+): BpmnXmlAst.XmlElement => {
+  const attributes = [
+    xmlAttribute("testBefore", boolLexical(value.testBefore)),
+    xmlAttribute("loopMaximum", String(value.loopMaximum!))
+  ]
+  return bpmnElement(
+    "standardLoopCharacteristics",
+    attributes,
+    [exportFormalExpression("loopCondition", value.condition!, definitions)]
+  )
 }
 
 const flowReferenceChildren = (
@@ -3434,7 +3636,9 @@ const exportSequenceFlow = (
   return bpmnElement(
     "sequenceFlow",
     attributes,
-    flow.condition === undefined ? [] : [exportCondition(flow.condition, definitions)]
+    flow.condition === undefined
+      ? []
+      : [exportFormalExpression("conditionExpression", flow.condition, definitions)]
   )
 }
 
@@ -3447,7 +3651,21 @@ const exportNode = (
   switch (node._tag) {
     case "Task":
       addActivityAttributes(attributes, node)
-      return bpmnElement("task", attributes, referenceChildren)
+      return bpmnElement(
+        "task",
+        attributes,
+        [
+          ...referenceChildren,
+          ...(node.loopCharacteristics === undefined
+            ? []
+            : [
+              exportStandardLoopCharacteristics(
+                node.loopCharacteristics as BpmnModel.StandardLoopCharacteristics,
+                context.document.definitions
+              )
+            ])
+        ]
+      )
     case "CallActivity":
       addActivityAttributes(attributes, node)
       if (node.calledElement !== undefined) {

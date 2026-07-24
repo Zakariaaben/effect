@@ -5,10 +5,11 @@
  *
  * This module intentionally supports only one coherent executable subset of
  * BPMN 2.0.2: root and embedded subprocess scopes, none start and end events,
- * generic tasks (including immutable protocol-v3 bindings), at most one
- * interrupting Boundary Error per bound task, normal / conditional / default
- * sequence flows, exclusive gateways, and parallel gateways. Unsupported BPMN
- * constructs are rejected at compile time with aggregate diagnostics.
+ * generic tasks (including immutable protocol-v3 bindings and bounded standard
+ * loops), at most one interrupting Boundary Error per bound task, normal /
+ * conditional / default sequence flows, exclusive gateways, and parallel
+ * gateways. Unsupported BPMN constructs are rejected at compile time with
+ * aggregate diagnostics.
  *
  * @since 4.0.0
  */
@@ -27,6 +28,7 @@ import * as DigestV2 from "./DigestV2.ts"
 import * as Json from "./internal/json.ts"
 import * as ProtocolV2Wire from "./ProtocolV2Wire.ts"
 import * as ProtocolV3Wire from "./ProtocolV3Wire.ts"
+import * as SemanticOccurrenceV3 from "./SemanticOccurrenceV3.ts"
 
 const strictParseOptions = {
   errors: "all",
@@ -34,6 +36,7 @@ const strictParseOptions = {
 } as const
 
 const Identifier = Schema.NonEmptyString
+const NonNegativeInt = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
 const PositiveInt = Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))
 
 const sortPath = (
@@ -145,7 +148,7 @@ export const KernelSemanticVersion = BpmnExecutionState.BpmnKernelSemanticVersio
  * @category constants
  * @since 4.0.0
  */
-export const TransitionJournalVersion = 2 as const
+export const TransitionJournalVersion = 3 as const
 
 /**
  * Transition journal event emitted by the executable token kernel.
@@ -201,6 +204,63 @@ export const TransitionEvent = Schema.Union([
     taskNodeId: Identifier,
     scopeInstanceId: Identifier,
     enteredAt: ProtocolV2Wire.Timestamp
+  }),
+  Schema.TaggedStruct("LoopOpened", {
+    frameId: Identifier,
+    activityId: Identifier,
+    processId: Identifier,
+    scopeInstanceId: Identifier,
+    activation: NonNegativeInt,
+    openedAt: ProtocolV2Wire.Timestamp
+  }),
+  Schema.TaggedStruct("LoopConditionEvaluated", {
+    frameId: Identifier,
+    activityId: Identifier,
+    activation: NonNegativeInt,
+    phase: Schema.Literals(["before", "after"]),
+    iteration: NonNegativeInt,
+    expression: BpmnModel.Expression,
+    evaluatorBinding: BpmnExpression.EvaluatorBinding,
+    usage: Schema.Struct({
+      sourceUtf8Bytes: ProtocolV2Wire.NonNegativeSafeInt,
+      contextCanonicalBytes: ProtocolV2Wire.NonNegativeSafeInt,
+      steps: ProtocolV2Wire.NonNegativeSafeInt
+    }),
+    result: Schema.Boolean
+  }),
+  Schema.TaggedStruct("LoopIterationStarted", {
+    frameId: Identifier,
+    activityId: Identifier,
+    activation: NonNegativeInt,
+    iteration: NonNegativeInt,
+    startedAt: ProtocolV2Wire.Timestamp
+  }),
+  Schema.TaggedStruct("LoopIterationCompleted", {
+    frameId: Identifier,
+    activityId: Identifier,
+    activation: NonNegativeInt,
+    iteration: NonNegativeInt,
+    completedAt: ProtocolV2Wire.Timestamp
+  }),
+  Schema.TaggedStruct("LoopCompleted", {
+    frameId: Identifier,
+    activityId: Identifier,
+    activation: NonNegativeInt,
+    completedIterations: NonNegativeInt,
+    reason: Schema.Literals(["condition-false", "maximum-reached"]),
+    completedAt: ProtocolV2Wire.Timestamp
+  }),
+  Schema.TaggedStruct("LoopFrameCancelled", {
+    frameId: Identifier,
+    activityId: Identifier,
+    activation: NonNegativeInt,
+    sourceTokenId: Identifier,
+    reason: Schema.Literals([
+      "boundary-error-caught",
+      "uncaught-bpmn-error",
+      "unmapped-business-failure"
+    ]),
+    cancelledAt: ProtocolV2Wire.Timestamp
   }),
   Schema.TaggedStruct("GatewayFrameOpened", {
     frameId: Identifier,
@@ -334,15 +394,54 @@ export type TransitionJournal = Schema.Schema.Type<typeof TransitionJournal>
  * @category models
  * @since 4.0.0
  */
-export interface EvaluationContext {
+interface EvaluationContextBase {
   readonly expression: BpmnModel.Expression
   readonly evaluatorBinding: BpmnExpression.EvaluatorBinding
   readonly request: BpmnExpressionEvaluator.EvaluationRequest
-  readonly sequenceFlow: BpmnModel.SequenceFlow
-  readonly sourceNode: BpmnModel.Task | BpmnModel.SubProcess | BpmnModel.Gateway
   readonly scopeInstance: BpmnExecutionState.ScopeInstance | MutableScopeInstance
   readonly state: BpmnExecutionState.BpmnExecutionState | MutableState
 }
+
+/**
+ * Evaluation of one conditional sequence flow.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export interface SequenceFlowEvaluationContext extends EvaluationContextBase {
+  readonly _tag: "SequenceFlowCondition"
+  readonly sequenceFlow: BpmnModel.SequenceFlow
+  readonly sourceNode: BpmnModel.Task | BpmnModel.SubProcess | BpmnModel.Gateway
+}
+
+/**
+ * Evaluation of one bounded BPMN standard-loop condition.
+ *
+ * **Details**
+ *
+ * `iteration` is the zero-based candidate iteration for `before`, and the
+ * zero-based iteration that just completed for `after`.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export interface StandardLoopEvaluationContext extends EvaluationContextBase {
+  readonly _tag: "StandardLoopCondition"
+  readonly activity: BpmnModel.Task
+  readonly loopFrame: BpmnExecutionState.LoopFrame
+  readonly phase: "before" | "after"
+  readonly iteration: number
+}
+
+/**
+ * Exact immutable context supplied to one expression evaluator.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type EvaluationContext =
+  | SequenceFlowEvaluationContext
+  | StandardLoopEvaluationContext
 
 /**
  * Services needed while advancing executable BPMN state.
@@ -531,6 +630,38 @@ export const ResolveTaskCommand = BpmnActivityV3.ResolveTaskCommand
  */
 export type ResolveTaskCommand = BpmnActivityV3.ResolveTaskCommand
 
+/**
+ * Replay-derived protocol-v3 coordinates for one exact active BPMN Task wait.
+ *
+ * **Details**
+ *
+ * Root-scope one-shot tasks retain the static-DAG shape (`scopePath: []`,
+ * activation `0`). Re-entry receives the journal-derived task-token ordinal.
+ * A standard loop appends its semantic node as a scope activation and uses
+ * the current zero-based iteration as the node activation.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const TaskOccurrenceCoordinates = Schema.Struct({
+  nodeId: ProtocolV3Wire.AtomicIdentifier,
+  scopePath: SemanticOccurrenceV3.ScopePath,
+  activation: ProtocolV3Wire.NonNegativeSafeInt
+}).annotate({
+  identifier: "WorkflowBpmnTaskOccurrenceCoordinates",
+  parseOptions: strictParseOptions
+})
+
+/**
+ * The decoded type of {@link TaskOccurrenceCoordinates}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type TaskOccurrenceCoordinates = Schema.Schema.Type<
+  typeof TaskOccurrenceCoordinates
+>
+
 const supportedScopeNode = (
   node: BpmnModel.FlowNode
 ): node is BpmnModel.SubProcess => node._tag === "SubProcess"
@@ -543,6 +674,7 @@ type MutableState = Mutable<BpmnExecutionState.BpmnExecutionState>
 type MutableToken = Mutable<BpmnExecutionState.Token>
 type MutableScopeInstance = Mutable<BpmnExecutionState.ScopeInstance>
 type MutableGatewayFrame = Mutable<BpmnExecutionState.GatewayFrame>
+type MutableLoopFrame = Mutable<BpmnExecutionState.LoopFrame>
 
 const directClone = <A>(value: A): Mutable<A> => structuredClone(value) as Mutable<A>
 
@@ -554,6 +686,10 @@ const decodeCompileOptions = Schema.decodeUnknownResult(
 const decodeCompleteTaskCommand = Schema.decodeUnknownResult(CompleteTaskCommand, strictParseOptions)
 const decodeResolveTaskCommand = Schema.decodeUnknownResult(ResolveTaskCommand, strictParseOptions)
 const decodeTransitionJournal = Schema.decodeUnknownResult(TransitionJournal, strictParseOptions)
+const decodeTaskOccurrenceCoordinates = Schema.decodeUnknownResult(
+  TaskOccurrenceCoordinates,
+  strictParseOptions
+)
 const decodeTimestamp = Schema.decodeUnknownResult(ProtocolV2Wire.Timestamp, strictParseOptions)
 const decodeEvaluationResult = Schema.decodeUnknownResult(
   BpmnExpressionEvaluator.EvaluationResult,
@@ -581,6 +717,12 @@ const latestStateTimestamp = (
   }
   for (const resolution of state.activityResolutions) {
     timestamps.push(resolution.resolvedAt)
+  }
+  for (const frame of state.loopFrames) {
+    timestamps.push(frame.openedAt)
+    if (frame.closedAt !== undefined) {
+      timestamps.push(frame.closedAt)
+    }
   }
   return timestamps.reduce((latest, timestamp) => timestamp > latest ? timestamp : latest)
 }
@@ -732,6 +874,162 @@ export const taskBinding = (
   return Result.succeed(binding)
 }
 
+/**
+ * Derives the exact protocol-v3 occurrence coordinates of one active BPMN
+ * Task wait from validated replay state.
+ *
+ * **Details**
+ *
+ * The caller supplies only optimistic wait coordinates. The invocation
+ * counters, scope activations, loop frame, and task ordinal come from the
+ * validated state owned by the exact compiled-kernel authority. This function
+ * does not hash an occurrence document; a trusted Effect Workflow bridge must
+ * compare these coordinates with the exact occurrence retained by its
+ * prepared native invocation.
+ *
+ * @category accessors
+ * @since 4.0.0
+ */
+export const taskOccurrence = (
+  kernel: CompiledKernel,
+  stateInput: unknown,
+  targetInput: unknown
+): Result.Result<TaskOccurrenceCoordinates, Diagnostic.CompilationError> => {
+  const resolvedKernel = resolveKernel(kernel)
+  if (Result.isFailure(resolvedKernel)) {
+    return Result.fail(resolvedKernel.failure)
+  }
+  const authority = resolvedKernel.success
+  const targetSnapshot = Json.snapshot(targetInput)
+  if (Result.isFailure(targetSnapshot)) {
+    return Result.fail(compilationError(error(
+      Codes.InvalidCommand,
+      targetSnapshot.failure.message,
+      ["target", ...targetSnapshot.failure.path]
+    )))
+  }
+  const decodedTarget = decodeCompleteTaskCommand(targetSnapshot.success)
+  if (Result.isFailure(decodedTarget)) {
+    return Result.fail(compilationError(error(
+      Codes.InvalidCommand,
+      "Invalid BPMN Task wait target",
+      ["target"],
+      { issue: String(decodedTarget.failure) }
+    )))
+  }
+  const target = targetSnapshot.success as unknown as CompleteTaskCommand
+  const validated = validateKernelState(authority, stateInput)
+  if (Result.isFailure(validated)) {
+    return Result.fail(validated.failure)
+  }
+  const state = validated.success
+  const token = state.tokens.find((candidate) => candidate.tokenId === target.tokenId)
+  const task = authority.nodeById.get(target.taskNodeId)
+  const binding = authority.taskBindingByTaskNodeId.get(target.taskNodeId)
+  if (
+    token === undefined ||
+    token.status !== "active" ||
+    token.scopeInstanceId !== target.scopeInstanceId ||
+    token.position._tag !== "AtNode" ||
+    token.position.nodeId !== target.taskNodeId ||
+    task?._tag !== "Task" ||
+    binding === undefined
+  ) {
+    return Result.fail(compilationError(error(
+      Codes.InvalidCommand,
+      `Task wait '${target.tokenId}' is not one active protocol-v3-bound Task occurrence`,
+      ["target"]
+    )))
+  }
+  const scope = state.scopeInstances.find((candidate) => candidate.scopeInstanceId === token.scopeInstanceId)
+  if (scope === undefined) {
+    return Result.fail(compilationError(error(
+      Codes.InvalidCommand,
+      `Task wait '${target.tokenId}' has no owning scope`,
+      ["target", "scopeInstanceId"]
+    )))
+  }
+  const nestedPath: Array<SemanticOccurrenceV3.ScopeActivation> = []
+  let current: BpmnExecutionState.ScopeInstance | undefined = scope
+  while (current.parentScopeInstanceId !== undefined) {
+    nestedPath.push({
+      scopeActivationVersion: 1,
+      scopeId: current.definitionId as ProtocolV3Wire.AtomicIdentifier,
+      activation: current.invocation.generation - 1
+    })
+    current = state.scopeInstances.find((candidate) => candidate.scopeInstanceId === current!.parentScopeInstanceId)
+    if (current === undefined) {
+      return Result.fail(compilationError(error(
+        Codes.InvalidCommand,
+        `Task wait '${target.tokenId}' has an incomplete scope ancestry`,
+        ["target", "scopeInstanceId"]
+      )))
+    }
+  }
+  nestedPath.reverse()
+
+  let activation: number
+  if (
+    task.loopCharacteristics?._tag === "StandardLoopCharacteristics"
+  ) {
+    const frame = token.invocation.branchId === undefined
+      ? undefined
+      : state.loopFrames.find((candidate) => candidate.frameId === token.invocation.branchId)
+    if (
+      frame === undefined ||
+      frame.status !== "active" ||
+      frame.activeIteration === undefined ||
+      frame.activeIteration !== token.invocation.loopIteration
+    ) {
+      return Result.fail(compilationError(error(
+        Codes.InvalidCommand,
+        `Task wait '${target.tokenId}' has no exact active standard-loop frame`,
+        ["target", "tokenId"]
+      )))
+    }
+    nestedPath.push({
+      scopeActivationVersion: 1,
+      scopeId: binding.semanticNodeId,
+      activation: frame.activation
+    })
+    activation = frame.activeIteration
+  } else {
+    const occurrences = state.tokens.filter((candidate) =>
+      candidate.scopeInstanceId === token.scopeInstanceId &&
+      candidate.position._tag === "AtNode" &&
+      candidate.position.nodeId === task.id &&
+      candidate.invocation.branchId === undefined &&
+      candidate.invocation.loopIteration === undefined &&
+      candidate.invocation.multiInstanceItemKey === undefined
+    )
+    activation = occurrences.findIndex((candidate) => candidate.tokenId === token.tokenId)
+    if (activation < 0) {
+      return Result.fail(compilationError(error(
+        Codes.InvalidCommand,
+        `Task wait '${target.tokenId}' has no replay-derived activation ordinal`,
+        ["target", "tokenId"]
+      )))
+    }
+  }
+  const coordinates = {
+    nodeId: binding.semanticNodeId,
+    scopePath: nestedPath,
+    activation
+  }
+  const decodedCoordinates = decodeTaskOccurrenceCoordinates(coordinates)
+  if (Result.isFailure(decodedCoordinates)) {
+    return Result.fail(compilationError(error(
+      Codes.InvalidCommand,
+      `Task wait '${target.tokenId}' cannot be represented as protocol-v3 occurrence coordinates`,
+      ["target"],
+      { issue: String(decodedCoordinates.failure) }
+    )))
+  }
+  return Result.succeed(
+    coordinates as TaskOccurrenceCoordinates
+  )
+}
+
 const sameInvocation = (
   left: BpmnExecutionState.InvocationIdentity,
   right: BpmnExecutionState.InvocationIdentity
@@ -871,7 +1169,61 @@ const validateKernelState = (
       )
     }
     const scope = scopeById.get(token.scopeInstanceId)
-    if (scope !== undefined && !sameInvocation(token.invocation, scope.invocation)) {
+    const loopFrame = token.invocation.branchId === undefined
+      ? undefined
+      : state.loopFrames.find((frame) => frame.frameId === token.invocation.branchId)
+    const isLoopInvocation = token.invocation.branchId !== undefined ||
+      token.invocation.loopIteration !== undefined
+    if (scope !== undefined && isLoopInvocation) {
+      if (
+        loopFrame === undefined ||
+        loopFrame.mode !== "standard" ||
+        loopFrame.scopeInstanceId !== token.scopeInstanceId ||
+        loopFrame.processId !== token.processId ||
+        token.invocation.activationId !== scope.invocation.activationId ||
+        token.invocation.generation !== scope.invocation.generation ||
+        token.invocation.multiInstanceItemKey !== undefined
+      ) {
+        stateError(
+          `Token '${token.tokenId}' does not carry an exact standard-loop invocation`,
+          ["tokens", index, "invocation"]
+        )
+      } else if (
+        token.status === "active" &&
+        (
+          loopFrame.status !== "active" ||
+          loopFrame.activeIteration === undefined ||
+          token.invocation.loopIteration !== loopFrame.activeIteration
+        )
+      ) {
+        stateError(
+          `Active token '${token.tokenId}' does not match its standard-loop current iteration`,
+          ["tokens", index, "invocation"]
+        )
+      } else if (
+        token.status === "consumed" &&
+        (
+          token.invocation.loopIteration === undefined ||
+          token.invocation.loopIteration >= loopFrame.completedIterations
+        )
+      ) {
+        stateError(
+          `Consumed token '${token.tokenId}' is not one completed standard-loop iteration`,
+          ["tokens", index, "invocation"]
+        )
+      } else if (
+        token.status === "withdrawn" &&
+        (
+          loopFrame.status !== "cancelled" ||
+          token.invocation.loopIteration !== loopFrame.completedIterations
+        )
+      ) {
+        stateError(
+          `Withdrawn token '${token.tokenId}' is not the iteration cancelled with its standard-loop frame`,
+          ["tokens", index, "invocation"]
+        )
+      }
+    } else if (scope !== undefined && !sameInvocation(token.invocation, scope.invocation)) {
       stateError(
         `Token '${token.tokenId}' invocation does not exactly match its scope invocation`,
         ["tokens", index, "invocation"]
@@ -990,8 +1342,38 @@ const validateKernelState = (
     }
   }
 
+  for (let index = 0; index < state.loopFrames.length; index++) {
+    const frame = state.loopFrames[index]!
+    const activity = kernel.nodeById.get(frame.activityId)
+    if (
+      frame.mode !== "standard" ||
+      activity?._tag !== "Task" ||
+      activity.loopCharacteristics?._tag !== "StandardLoopCharacteristics"
+    ) {
+      stateError(
+        `Loop frame '${frame.frameId}' is outside the executable bounded standard-loop subset`,
+        ["loopFrames", index]
+      )
+    }
+    if (frame.status === "active") {
+      const matching = state.tokens.filter((token) =>
+        token.status === "active" &&
+        token.scopeInstanceId === frame.scopeInstanceId &&
+        token.position._tag === "AtNode" &&
+        token.position.nodeId === frame.activityId &&
+        token.invocation.branchId === frame.frameId &&
+        token.invocation.loopIteration === frame.activeIteration
+      )
+      if (matching.length !== 1) {
+        stateError(
+          `Active standard-loop frame '${frame.frameId}' requires exactly one active iteration token`,
+          ["loopFrames", index]
+        )
+      }
+    }
+  }
+
   const unsupportedStructures = [
-    ["loopFrames", state.loopFrames],
     ["multiInstanceGroups", state.multiInstanceGroups],
     ["callFrames", state.callFrames],
     ["subscriptions", state.subscriptions],
@@ -1018,6 +1400,9 @@ const validateKernelState = (
     }
     if (state.gatewayFrames.some((frame) => frame.status === "waiting" || frame.status === "satisfied")) {
       stateError(`A ${state.status} execution cannot retain open gateway frames`, ["gatewayFrames"])
+    }
+    if (state.loopFrames.some((frame) => frame.status === "active")) {
+      stateError(`A ${state.status} execution cannot retain active loop frames`, ["loopFrames"])
     }
   }
 
@@ -1064,6 +1449,15 @@ const waitingFrames = (
     (frame.status === "waiting" || frame.status === "satisfied")
   )
 
+const activeLoopFrames = (
+  state: Pick<BpmnExecutionState.BpmnExecutionState, "loopFrames">,
+  scopeInstanceId: string
+): ReadonlyArray<BpmnExecutionState.LoopFrame> =>
+  state.loopFrames.filter((frame) =>
+    frame.scopeInstanceId === scopeInstanceId &&
+    frame.status === "active"
+  )
+
 const activeChildScopes = (
   state: Pick<BpmnExecutionState.BpmnExecutionState, "scopeInstances">,
   scopeInstanceId: string
@@ -1102,12 +1496,13 @@ const createToken = (
   state: Pick<BpmnExecutionState.BpmnExecutionState, "tokens">,
   scopeInstance: BpmnExecutionState.ScopeInstance,
   position: BpmnExecutionState.TokenPosition,
-  now: ProtocolV2Wire.Timestamp
+  now: ProtocolV2Wire.Timestamp,
+  invocation: BpmnExecutionState.InvocationIdentity = scopeInstance.invocation
 ): BpmnExecutionState.Token => ({
   tokenId: nextId(state.tokens.map((token) => token.tokenId), "token:"),
   processId: scopeInstance.processId,
   scopeInstanceId: scopeInstance.scopeInstanceId,
-  invocation: directClone(scopeInstance.invocation),
+  invocation: directClone(invocation),
   status: "active",
   position,
   createdAt: now
@@ -1143,31 +1538,61 @@ const createScopeInstance = (
   }
 }
 
-const routeConditional = (
+type EvaluationTarget =
+  | {
+    readonly _tag: "SequenceFlowCondition"
+    readonly sequenceFlow: BpmnModel.SequenceFlow
+    readonly sourceNode: BpmnModel.Task | BpmnModel.SubProcess | BpmnModel.Gateway
+  }
+  | {
+    readonly _tag: "StandardLoopCondition"
+    readonly activity: BpmnModel.Task
+    readonly frame: MutableLoopFrame
+    readonly phase: "before" | "after"
+    readonly iteration: number
+  }
+
+const evaluateConditionExpression = (
   kernel: CompiledKernel,
   services: Services,
   expression: BpmnModel.Expression,
-  sequenceFlow: BpmnModel.SequenceFlow,
-  sourceNode: BpmnModel.Task | BpmnModel.SubProcess | BpmnModel.Gateway,
+  target: EvaluationTarget,
   scopeInstance: MutableScopeInstance,
   state: MutableState,
   journal: Array<TransitionEvent>
 ): Result.Result<boolean, Diagnostic.CompilationError> => {
+  const targetId = target._tag === "SequenceFlowCondition"
+    ? target.sequenceFlow.id
+    : target.activity.id
+  const targetLabel = target._tag === "SequenceFlowCondition"
+    ? `sequence flow '${targetId}'`
+    : `standard loop on activity '${targetId}'`
+  const targetPath: ReadonlyArray<Diagnostic.PathSegment> = target._tag === "SequenceFlowCondition"
+    ? ["sequenceFlows"]
+    : ["flowNodes"]
+  const targetDetails: Schema.Json = target._tag === "SequenceFlowCondition"
+    ? { sequenceFlowId: targetId }
+    : {
+      activityId: targetId,
+      frameId: target.frame.frameId,
+      phase: target.phase,
+      iteration: target.iteration
+    }
   if (services.evaluateCondition === undefined) {
     return Result.fail(compilationError(error(
       Codes.EvaluationRequired,
-      `Conditional sequence flow '${sequenceFlow.id}' requires an evaluation service`,
-      ["sequenceFlows"],
-      { sequenceFlowId: sequenceFlow.id }
+      `Condition for ${targetLabel} requires an evaluation service`,
+      targetPath,
+      targetDetails
     )))
   }
   const stateSnapshot = Json.snapshot(state)
   if (Result.isFailure(stateSnapshot)) {
     return Result.fail(compilationError(error(
       Codes.EvaluationFailed,
-      `Could not create an immutable evaluation snapshot for sequence flow '${sequenceFlow.id}'`,
-      ["sequenceFlows"],
-      { sequenceFlowId: sequenceFlow.id }
+      `Could not create an immutable evaluation snapshot for ${targetLabel}`,
+      targetPath,
+      targetDetails
     )))
   }
   const frozenState = stateSnapshot.success as unknown as BpmnExecutionState.BpmnExecutionState
@@ -1189,27 +1614,54 @@ const routeConditional = (
     return Result.fail(compilationError(error(
       Codes.EvaluationFailed,
       `No compiled evaluator binding exists for expression language '${expression.language}' version '${expression.version}'`,
-      ["sequenceFlows"],
+      targetPath,
       {
-        sequenceFlowId: sequenceFlow.id,
+        ...targetDetails as Record<string, Schema.Json>,
         language: expression.language,
         languageVersion: expression.version
       }
     )))
   }
-  const contextSnapshot = Json.snapshot({
-    expression,
-    sequenceFlow,
-    sourceNode,
-    scopeInstance: frozenScope,
-    state: frozenState
-  })
+  const frozenFrame = target._tag === "StandardLoopCondition"
+    ? frozenState.loopFrames.find((frame) => frame.frameId === target.frame.frameId)
+    : undefined
+  if (
+    target._tag === "StandardLoopCondition" &&
+    frozenFrame === undefined
+  ) {
+    return Result.fail(compilationError(error(
+      Codes.EvaluationFailed,
+      `Could not resolve evaluation frame '${target.frame.frameId}'`,
+      ["loopFrames"],
+      targetDetails
+    )))
+  }
+  const contextInput = target._tag === "SequenceFlowCondition"
+    ? {
+      _tag: "SequenceFlowCondition" as const,
+      expression,
+      sequenceFlow: target.sequenceFlow,
+      sourceNode: target.sourceNode,
+      scopeInstance: frozenScope,
+      state: frozenState
+    }
+    : {
+      _tag: "StandardLoopCondition" as const,
+      expression,
+      activity: target.activity,
+      loopFrame: frozenFrame!,
+      phase: target.phase,
+      iteration: target.iteration,
+      scopeInstance: frozenScope,
+      state: frozenState
+    }
+  const contextSnapshot = Json.snapshot(contextInput)
   if (Result.isFailure(contextSnapshot)) {
     return Result.fail(compilationError(error(
       Codes.EvaluationFailed,
-      `Could not create a canonical evaluator context for sequence flow '${sequenceFlow.id}'`,
-      ["sequenceFlows"],
-      { sequenceFlowId: sequenceFlow.id }
+      `Could not create a canonical evaluator context for ${targetLabel}`,
+      targetPath,
+      targetDetails
     )))
   }
   let sourceUtf8Bytes: number
@@ -1222,18 +1674,18 @@ const routeConditional = (
   } catch {
     return Result.fail(compilationError(error(
       Codes.EvaluationFailed,
-      `Could not measure evaluator input for sequence flow '${sequenceFlow.id}'`,
-      ["sequenceFlows"],
-      { sequenceFlowId: sequenceFlow.id }
+      `Could not measure evaluator input for ${targetLabel}`,
+      targetPath,
+      targetDetails
     )))
   }
   if (sourceUtf8Bytes > evaluatorBinding.limits.maxSourceUtf8Bytes) {
     return Result.fail(compilationError(error(
       Codes.EvaluationFailed,
-      `Condition source for sequence flow '${sequenceFlow.id}' exceeds its evaluator byte limit`,
-      ["sequenceFlows"],
+      `Condition source for ${targetLabel} exceeds its evaluator byte limit`,
+      targetPath,
       {
-        sequenceFlowId: sequenceFlow.id,
+        ...targetDetails as Record<string, Schema.Json>,
         actual: sourceUtf8Bytes,
         maximum: evaluatorBinding.limits.maxSourceUtf8Bytes
       }
@@ -1245,10 +1697,10 @@ const routeConditional = (
   ) {
     return Result.fail(compilationError(error(
       Codes.EvaluationFailed,
-      `Condition context for sequence flow '${sequenceFlow.id}' exceeds its evaluator byte limit`,
-      ["sequenceFlows"],
+      `Condition context for ${targetLabel} exceeds its evaluator byte limit`,
+      targetPath,
       {
-        sequenceFlowId: sequenceFlow.id,
+        ...targetDetails as Record<string, Schema.Json>,
         actual: contextCanonicalBytes,
         maximum: evaluatorBinding.limits.maxContextCanonicalBytes
       }
@@ -1261,29 +1713,32 @@ const routeConditional = (
 
   let evaluated: unknown
   try {
-    evaluated = services.evaluateCondition({
-      expression,
-      evaluatorBinding,
-      request,
-      sequenceFlow,
-      sourceNode,
-      scopeInstance: frozenScope,
-      state: frozenState
-    })
+    const context: EvaluationContext = target._tag === "SequenceFlowCondition"
+      ? {
+        ...contextInput as SequenceFlowEvaluationContext,
+        evaluatorBinding,
+        request
+      }
+      : {
+        ...contextInput as StandardLoopEvaluationContext,
+        evaluatorBinding,
+        request
+      }
+    evaluated = services.evaluateCondition(context)
   } catch {
     return Result.fail(compilationError(error(
       Codes.EvaluationFailed,
-      `Condition evaluator threw for sequence flow '${sequenceFlow.id}'`,
-      ["sequenceFlows"],
-      { sequenceFlowId: sequenceFlow.id }
+      `Condition evaluator threw for ${targetLabel}`,
+      targetPath,
+      targetDetails
     )))
   }
   if (!Result.isResult(evaluated)) {
     return Result.fail(compilationError(error(
       Codes.EvaluationFailed,
-      `Condition evaluator returned an invalid result for sequence flow '${sequenceFlow.id}'`,
-      ["sequenceFlows"],
-      { sequenceFlowId: sequenceFlow.id }
+      `Condition evaluator returned an invalid result for ${targetLabel}`,
+      targetPath,
+      targetDetails
     )))
   }
   if (Result.isFailure(evaluated)) {
@@ -1292,56 +1747,96 @@ const routeConditional = (
     }
     return Result.fail(compilationError(error(
       Codes.EvaluationFailed,
-      `Condition evaluator returned an invalid failure for sequence flow '${sequenceFlow.id}'`,
-      ["sequenceFlows"],
-      { sequenceFlowId: sequenceFlow.id }
+      `Condition evaluator returned an invalid failure for ${targetLabel}`,
+      targetPath,
+      targetDetails
     )))
   }
   const evaluatedSnapshot = Json.snapshot(evaluated.success)
   if (Result.isFailure(evaluatedSnapshot)) {
     return Result.fail(compilationError(error(
       Codes.EvaluationFailed,
-      `Condition evaluator returned a non-JSON result for sequence flow '${sequenceFlow.id}'`,
-      ["sequenceFlows"],
-      { sequenceFlowId: sequenceFlow.id }
+      `Condition evaluator returned a non-JSON result for ${targetLabel}`,
+      targetPath,
+      targetDetails
     )))
   }
   const decodedEvaluation = decodeEvaluationResult(evaluatedSnapshot.success)
   if (Result.isFailure(decodedEvaluation)) {
     return Result.fail(compilationError(error(
       Codes.EvaluationFailed,
-      `Condition evaluator returned an invalid result for sequence flow '${sequenceFlow.id}'`,
-      ["sequenceFlows"],
-      { sequenceFlowId: sequenceFlow.id }
+      `Condition evaluator returned an invalid result for ${targetLabel}`,
+      targetPath,
+      targetDetails
     )))
   }
   const outcome = evaluatedSnapshot.success as unknown as BpmnExpressionEvaluator.EvaluationResult
   if (outcome.steps > evaluatorBinding.limits.maxSteps) {
     return Result.fail(compilationError(error(
       Codes.EvaluationFailed,
-      `Condition evaluator exceeded its step limit for sequence flow '${sequenceFlow.id}'`,
-      ["sequenceFlows"],
+      `Condition evaluator exceeded its step limit for ${targetLabel}`,
+      targetPath,
       {
-        sequenceFlowId: sequenceFlow.id,
+        ...targetDetails as Record<string, Schema.Json>,
         actual: outcome.steps,
         maximum: evaluatorBinding.limits.maxSteps
       }
     )))
   }
-  recordEvent(journal, {
-    _tag: "ConditionEvaluated",
-    sequenceFlowId: sequenceFlow.id,
-    expression,
-    evaluatorBinding,
-    usage: {
-      sourceUtf8Bytes,
-      contextCanonicalBytes,
-      steps: outcome.steps
-    },
-    result: outcome.result
-  })
+  const usage = {
+    sourceUtf8Bytes,
+    contextCanonicalBytes,
+    steps: outcome.steps
+  }
+  if (target._tag === "SequenceFlowCondition") {
+    recordEvent(journal, {
+      _tag: "ConditionEvaluated",
+      sequenceFlowId: target.sequenceFlow.id,
+      expression,
+      evaluatorBinding,
+      usage,
+      result: outcome.result
+    })
+  } else {
+    recordEvent(journal, {
+      _tag: "LoopConditionEvaluated",
+      frameId: target.frame.frameId,
+      activityId: target.activity.id,
+      activation: target.frame.activation,
+      phase: target.phase,
+      iteration: target.iteration,
+      expression,
+      evaluatorBinding,
+      usage,
+      result: outcome.result
+    })
+  }
   return Result.succeed(outcome.result)
 }
+
+const routeConditional = (
+  kernel: CompiledKernel,
+  services: Services,
+  expression: BpmnModel.Expression,
+  sequenceFlow: BpmnModel.SequenceFlow,
+  sourceNode: BpmnModel.Task | BpmnModel.SubProcess | BpmnModel.Gateway,
+  scopeInstance: MutableScopeInstance,
+  state: MutableState,
+  journal: Array<TransitionEvent>
+): Result.Result<boolean, Diagnostic.CompilationError> =>
+  evaluateConditionExpression(
+    kernel,
+    services,
+    expression,
+    {
+      _tag: "SequenceFlowCondition",
+      sequenceFlow,
+      sourceNode
+    },
+    scopeInstance,
+    state,
+    journal
+  )
 
 const emitFlowTokens = (
   state: MutableState,
@@ -1488,6 +1983,318 @@ const routeActivityOutgoing = (
   return Result.succeed(undefined)
 }
 
+const nextLoopActivation = (
+  state: Pick<BpmnExecutionState.BpmnExecutionState, "loopFrames">,
+  activityId: string,
+  scopeInstanceId: string
+): number =>
+  state.loopFrames
+    .filter((frame) =>
+      frame.activityId === activityId &&
+      frame.scopeInstanceId === scopeInstanceId
+    )
+    .reduce((maximum, frame) => Math.max(maximum, frame.activation), -1) + 1
+
+const startStandardLoopIteration = (
+  state: MutableState,
+  frame: MutableLoopFrame,
+  activity: BpmnModel.Task,
+  scope: MutableScopeInstance,
+  journal: Array<TransitionEvent>,
+  now: ProtocolV2Wire.Timestamp
+): void => {
+  const iteration = frame.completedIterations
+  frame.activeIteration = iteration
+  recordEvent(journal, {
+    _tag: "LoopIterationStarted",
+    frameId: frame.frameId,
+    activityId: activity.id,
+    activation: frame.activation,
+    iteration,
+    startedAt: now
+  })
+  const waiting = createToken(
+    state as unknown as BpmnExecutionState.BpmnExecutionState,
+    scope,
+    {
+      _tag: "AtNode",
+      nodeId: activity.id
+    },
+    now,
+    {
+      activationId: scope.invocation.activationId,
+      branchId: frame.frameId,
+      loopIteration: iteration,
+      generation: scope.invocation.generation
+    }
+  )
+  state.tokens.push(waiting)
+  recordEvent(journal, {
+    _tag: "TokenEmitted",
+    tokenId: waiting.tokenId,
+    processId: waiting.processId,
+    scopeInstanceId: waiting.scopeInstanceId,
+    invocation: waiting.invocation,
+    position: waiting.position,
+    createdAt: waiting.createdAt
+  })
+  recordEvent(journal, {
+    _tag: "TaskWaiting",
+    tokenId: waiting.tokenId,
+    taskNodeId: activity.id,
+    scopeInstanceId: waiting.scopeInstanceId,
+    enteredAt: now
+  })
+}
+
+const completeStandardLoopFrame = (
+  frame: MutableLoopFrame,
+  activity: BpmnModel.Task,
+  reason: "condition-false" | "maximum-reached",
+  journal: Array<TransitionEvent>,
+  now: ProtocolV2Wire.Timestamp
+): void => {
+  frame.status = "completed"
+  delete frame.activeIteration
+  frame.closedAt = now
+  recordEvent(journal, {
+    _tag: "LoopCompleted",
+    frameId: frame.frameId,
+    activityId: activity.id,
+    activation: frame.activation,
+    completedIterations: frame.completedIterations,
+    reason,
+    completedAt: now
+  })
+}
+
+const cancelStandardLoopFrame = (
+  frame: MutableLoopFrame,
+  sourceTokenId: string,
+  reason:
+    | "boundary-error-caught"
+    | "uncaught-bpmn-error"
+    | "unmapped-business-failure",
+  journal: Array<TransitionEvent>,
+  now: ProtocolV2Wire.Timestamp
+): void => {
+  frame.status = "cancelled"
+  delete frame.activeIteration
+  frame.closedAt = now
+  recordEvent(journal, {
+    _tag: "LoopFrameCancelled",
+    frameId: frame.frameId,
+    activityId: frame.activityId,
+    activation: frame.activation,
+    sourceTokenId,
+    reason,
+    cancelledAt: now
+  })
+}
+
+const openStandardLoop = (
+  kernel: CompiledKernel,
+  services: Services,
+  state: MutableState,
+  activity: BpmnModel.Task,
+  scope: MutableScopeInstance,
+  journal: Array<TransitionEvent>
+): Result.Result<void, Diagnostic.CompilationError> => {
+  const characteristics = activity.loopCharacteristics
+  if (
+    characteristics?._tag !== "StandardLoopCharacteristics" ||
+    characteristics.condition === undefined ||
+    characteristics.loopMaximum === undefined
+  ) {
+    return Result.fail(compilationError(error(
+      Codes.InvalidExecutableStructure,
+      `Task '${activity.id}' does not have executable bounded standard-loop characteristics`,
+      ["flowNodes"]
+    )))
+  }
+  const frame: MutableLoopFrame = {
+    frameId: nextId(
+      state.loopFrames.map((candidate) => candidate.frameId),
+      "loop-frame:"
+    ),
+    activityId: activity.id,
+    processId: activity.processId,
+    scopeInstanceId: scope.scopeInstanceId,
+    activation: nextLoopActivation(
+      state as unknown as BpmnExecutionState.BpmnExecutionState,
+      activity.id,
+      scope.scopeInstanceId
+    ),
+    completedIterations: 0,
+    mode: "standard",
+    status: "active",
+    openedAt: services.now
+  }
+  state.loopFrames.push(frame)
+  recordEvent(journal, {
+    _tag: "LoopOpened",
+    frameId: frame.frameId,
+    activityId: frame.activityId,
+    processId: frame.processId,
+    scopeInstanceId: frame.scopeInstanceId,
+    activation: frame.activation,
+    openedAt: frame.openedAt
+  })
+  if (characteristics.testBefore) {
+    const evaluated = evaluateConditionExpression(
+      kernel,
+      services,
+      characteristics.condition,
+      {
+        _tag: "StandardLoopCondition",
+        activity,
+        frame,
+        phase: "before",
+        iteration: 0
+      },
+      scope,
+      state,
+      journal
+    )
+    if (Result.isFailure(evaluated)) {
+      return Result.fail(evaluated.failure)
+    }
+    if (!evaluated.success) {
+      completeStandardLoopFrame(
+        frame,
+        activity,
+        "condition-false",
+        journal,
+        services.now
+      )
+      return routeActivityOutgoing(
+        kernel,
+        services,
+        state,
+        activity,
+        scope,
+        journal
+      )
+    }
+  }
+  startStandardLoopIteration(
+    state,
+    frame,
+    activity,
+    scope,
+    journal,
+    services.now
+  )
+  return Result.succeed(undefined)
+}
+
+const completeStandardLoopIteration = (
+  kernel: CompiledKernel,
+  services: Services,
+  state: MutableState,
+  activity: BpmnModel.Task,
+  scope: MutableScopeInstance,
+  token: MutableToken,
+  journal: Array<TransitionEvent>
+): Result.Result<void, Diagnostic.CompilationError> => {
+  const characteristics = activity.loopCharacteristics
+  const frame = token.invocation.branchId === undefined
+    ? undefined
+    : state.loopFrames.find((candidate) => candidate.frameId === token.invocation.branchId)
+  if (
+    characteristics?._tag !== "StandardLoopCharacteristics" ||
+    characteristics.condition === undefined ||
+    characteristics.loopMaximum === undefined ||
+    frame === undefined ||
+    frame.mode !== "standard" ||
+    frame.status !== "active" ||
+    frame.activeIteration === undefined ||
+    frame.activeIteration !== token.invocation.loopIteration
+  ) {
+    return Result.fail(compilationError(error(
+      Codes.InvalidExecutableStructure,
+      `Task token '${token.tokenId}' does not match one executable standard-loop iteration`,
+      ["tokens"]
+    )))
+  }
+  const completedIteration = frame.activeIteration
+  delete frame.activeIteration
+  frame.completedIterations++
+  recordEvent(journal, {
+    _tag: "LoopIterationCompleted",
+    frameId: frame.frameId,
+    activityId: activity.id,
+    activation: frame.activation,
+    iteration: completedIteration,
+    completedAt: services.now
+  })
+  if (frame.completedIterations >= characteristics.loopMaximum) {
+    completeStandardLoopFrame(
+      frame,
+      activity,
+      "maximum-reached",
+      journal,
+      services.now
+    )
+    return routeActivityOutgoing(
+      kernel,
+      services,
+      state,
+      activity,
+      scope,
+      journal
+    )
+  }
+  const phase = characteristics.testBefore ? "before" : "after"
+  const conditionIteration = characteristics.testBefore
+    ? frame.completedIterations
+    : completedIteration
+  const evaluated = evaluateConditionExpression(
+    kernel,
+    services,
+    characteristics.condition,
+    {
+      _tag: "StandardLoopCondition",
+      activity,
+      frame,
+      phase,
+      iteration: conditionIteration
+    },
+    scope,
+    state,
+    journal
+  )
+  if (Result.isFailure(evaluated)) {
+    return Result.fail(evaluated.failure)
+  }
+  if (!evaluated.success) {
+    completeStandardLoopFrame(
+      frame,
+      activity,
+      "condition-false",
+      journal,
+      services.now
+    )
+    return routeActivityOutgoing(
+      kernel,
+      services,
+      state,
+      activity,
+      scope,
+      journal
+    )
+  }
+  startStandardLoopIteration(
+    state,
+    frame,
+    activity,
+    scope,
+    journal,
+    services.now
+  )
+  return Result.succeed(undefined)
+}
+
 const routeExclusiveGateway = (
   kernel: CompiledKernel,
   services: Services,
@@ -1609,6 +2416,17 @@ const failExecutionFromTask = (
         sourceTokenId: sourceToken.tokenId,
         cancelledAt: now
       })
+    }
+  }
+  for (const frame of state.loopFrames) {
+    if (frame.status === "active") {
+      cancelStandardLoopFrame(
+        frame,
+        sourceToken.tokenId,
+        reason,
+        journal,
+        now
+      )
     }
   }
   const failureScopeIds = new Set(
@@ -1769,6 +2587,14 @@ const tryCompleteScopes = (
       continue
     }
     if (
+      activeLoopFrames(
+        state as unknown as BpmnExecutionState.BpmnExecutionState,
+        scope.scopeInstanceId
+      ).length > 0
+    ) {
+      continue
+    }
+    if (
       activeChildScopes(state as unknown as BpmnExecutionState.BpmnExecutionState, scope.scopeInstanceId).length > 0
     ) {
       continue
@@ -1847,6 +2673,19 @@ const routeNodeArrival = (
       : "flow-advanced"
     consumeToken(token, journal, consumeReason, services.now)
     if (target._tag === "Task") {
+      if (
+        target.loopCharacteristics?._tag ===
+          "StandardLoopCharacteristics"
+      ) {
+        return openStandardLoop(
+          kernel,
+          services,
+          state,
+          target,
+          scope,
+          journal
+        )
+      }
       const waiting = createToken(state as unknown as BpmnExecutionState.BpmnExecutionState, scope, {
         _tag: "AtNode",
         nodeId: target.id
@@ -2097,12 +2936,57 @@ interface PendingBoundaryErrorCatch {
   readonly errorRef: string
 }
 
+type PendingLoopTransition =
+  | {
+    readonly kind: "open"
+    readonly activity: BpmnModel.Task
+    readonly scopeInstanceId: string
+    readonly transitionedAt: ProtocolV2Wire.Timestamp
+  }
+  | {
+    readonly kind: "condition"
+    readonly activity: BpmnModel.Task
+    readonly frameId: string
+    readonly phase: "before" | "after"
+    readonly iteration: number
+    readonly transitionedAt: ProtocolV2Wire.Timestamp
+  }
+  | {
+    readonly kind: "iteration-start"
+    readonly activity: BpmnModel.Task
+    readonly frameId: string
+    readonly iteration: number
+    readonly transitionedAt: ProtocolV2Wire.Timestamp
+  }
+  | {
+    readonly kind: "iteration-complete"
+    readonly activity: BpmnModel.Task
+    readonly frameId: string
+    readonly iteration: number
+    readonly transitionedAt: ProtocolV2Wire.Timestamp
+  }
+  | {
+    readonly kind: "complete"
+    readonly activity: BpmnModel.Task
+    readonly frameId: string
+    readonly reason: "condition-false" | "maximum-reached"
+    readonly transitionedAt: ProtocolV2Wire.Timestamp
+  }
+  | {
+    readonly kind: "cancel-before-boundary"
+    readonly activity: BpmnModel.Task
+    readonly frameId: string
+    readonly sourceTokenId: string
+    readonly transitionedAt: ProtocolV2Wire.Timestamp
+  }
+
 interface PendingFailureCleanup {
   readonly resolution: BpmnActivityV3.ActivityResolution
   readonly failureKind: RootFailureKind
   readonly errorRef?: string | undefined
   readonly tokenIds: Array<string>
   readonly frameIds: Array<string>
+  readonly loopFrameIds: Array<string>
   readonly interruptedScopeIds: Array<string>
   readonly failedScopeIds: Array<string>
   readonly rootScopeInstanceId: string
@@ -2291,6 +3175,7 @@ const replayJournal = (
   let pendingTaskWait: PendingTaskWait | undefined
   let pendingResolvedTask: PendingResolvedTask | undefined
   let pendingBoundaryErrorCatch: PendingBoundaryErrorCatch | undefined
+  let pendingLoopTransition: PendingLoopTransition | undefined
   let pendingFailureCleanup: PendingFailureCleanup | undefined
   let pendingExecutionCompletion: string | undefined
   let lastTimestamp = header.startedAt
@@ -2321,6 +3206,16 @@ const replayJournal = (
       ? event.createdAt
       : event._tag === "TaskWaiting"
       ? event.enteredAt
+      : event._tag === "LoopOpened"
+      ? event.openedAt
+      : event._tag === "LoopIterationStarted"
+      ? event.startedAt
+      : event._tag === "LoopIterationCompleted"
+      ? event.completedAt
+      : event._tag === "LoopCompleted"
+      ? event.completedAt
+      : event._tag === "LoopFrameCancelled"
+      ? event.cancelledAt
       : event._tag === "GatewayFired"
       ? event.firedAt
       : event._tag === "TaskCompletionReplayed"
@@ -2375,6 +3270,22 @@ const replayJournal = (
     ) {
       return journalFailure(index, "The journal omitted or reordered a causally required routing decision")
     }
+    if (pendingLoopTransition !== undefined) {
+      const expectedTag = pendingLoopTransition.kind === "open"
+        ? "LoopOpened"
+        : pendingLoopTransition.kind === "condition"
+        ? "LoopConditionEvaluated"
+        : pendingLoopTransition.kind === "iteration-start"
+        ? "LoopIterationStarted"
+        : pendingLoopTransition.kind === "iteration-complete"
+        ? "LoopIterationCompleted"
+        : pendingLoopTransition.kind === "complete"
+        ? "LoopCompleted"
+        : "LoopFrameCancelled"
+      if (event._tag !== expectedTag) {
+        return journalFailure(index, "The journal omitted or reordered a causally required standard-loop transition")
+      }
+    }
     if (pendingExecutionCompletion !== undefined && event._tag !== "ExecutionCompleted") {
       return journalFailure(index, "Root-scope completion must be followed by execution completion")
     }
@@ -2390,6 +3301,7 @@ const replayJournal = (
     }
     if (
       pendingBoundaryErrorCatch !== undefined &&
+      pendingLoopTransition?.kind !== "cancel-before-boundary" &&
       event._tag !== "BoundaryErrorCaught"
     ) {
       return journalFailure(index, "An interrupted failed task must be followed by its Boundary Error catch")
@@ -2399,6 +3311,8 @@ const replayJournal = (
         ? "TokenWithdrawn"
         : pendingFailureCleanup.frameIds.length > 0
         ? "GatewayFrameCancelled"
+        : pendingFailureCleanup.loopFrameIds.length > 0
+        ? "LoopFrameCancelled"
         : pendingFailureCleanup.interruptedScopeIds.length > 0
         ? "ScopeInterruptedByError"
         : pendingFailureCleanup.failedScopeIds.length > 0
@@ -2548,6 +3462,327 @@ const replayJournal = (
         break
       }
 
+      case "LoopOpened": {
+        const pending = pendingLoopTransition
+        if (pending?.kind !== "open") {
+          return journalFailure(
+            index,
+            `Loop frame '${event.frameId}' has no task-arrival cause`
+          )
+        }
+        const scope = findScope(state, pending.scopeInstanceId)
+        const characteristics = pending.activity.loopCharacteristics
+        const expectedFrameId = nextId(
+          state.loopFrames.map((frame) => frame.frameId),
+          "loop-frame:"
+        )
+        const expectedActivation = nextLoopActivation(
+          state as unknown as BpmnExecutionState.BpmnExecutionState,
+          pending.activity.id,
+          pending.scopeInstanceId
+        )
+        if (
+          characteristics?._tag !== "StandardLoopCharacteristics" ||
+          characteristics.condition === undefined ||
+          characteristics.loopMaximum === undefined ||
+          scope === undefined ||
+          scope.status !== "active" ||
+          event.frameId !== expectedFrameId ||
+          event.activityId !== pending.activity.id ||
+          event.processId !== pending.activity.processId ||
+          event.scopeInstanceId !== pending.scopeInstanceId ||
+          event.activation !== expectedActivation ||
+          event.openedAt !== pending.transitionedAt
+        ) {
+          return journalFailure(
+            index,
+            `Loop frame '${event.frameId}' does not match its deterministic task activation`
+          )
+        }
+        state.loopFrames.push({
+          frameId: event.frameId,
+          activityId: event.activityId,
+          processId: event.processId,
+          scopeInstanceId: event.scopeInstanceId,
+          activation: event.activation,
+          completedIterations: 0,
+          mode: "standard",
+          status: "active",
+          openedAt: event.openedAt
+        })
+        pendingLoopTransition = characteristics.testBefore
+          ? {
+            kind: "condition",
+            activity: pending.activity,
+            frameId: event.frameId,
+            phase: "before",
+            iteration: 0,
+            transitionedAt: event.openedAt
+          }
+          : {
+            kind: "iteration-start",
+            activity: pending.activity,
+            frameId: event.frameId,
+            iteration: 0,
+            transitionedAt: event.openedAt
+          }
+        break
+      }
+
+      case "LoopConditionEvaluated": {
+        const pending = pendingLoopTransition
+        if (pending?.kind !== "condition") {
+          return journalFailure(
+            index,
+            `Loop condition for '${event.frameId}' has no evaluation cause`
+          )
+        }
+        const frame = state.loopFrames.find((candidate) => candidate.frameId === pending.frameId)
+        const scope = frame === undefined
+          ? undefined
+          : findScope(state, frame.scopeInstanceId)
+        const characteristics = pending.activity.loopCharacteristics
+        const expression = characteristics?._tag ===
+            "StandardLoopCharacteristics"
+          ? characteristics.condition
+          : undefined
+        const expectedBinding = expression === undefined
+          ? undefined
+          : kernel.evaluatorBindings.find((binding) =>
+            binding.language === expression.language &&
+            binding.languageVersion === expression.version
+          )
+        if (
+          frame === undefined ||
+          frame.status !== "active" ||
+          frame.activeIteration !== undefined ||
+          scope === undefined ||
+          expression === undefined ||
+          expectedBinding === undefined ||
+          event.frameId !== frame.frameId ||
+          event.activityId !== pending.activity.id ||
+          event.activation !== frame.activation ||
+          event.phase !== pending.phase ||
+          event.iteration !== pending.iteration ||
+          !sameExpression(event.expression, expression) ||
+          BpmnExpression.evaluatorBindingKey(event.evaluatorBinding) !==
+            BpmnExpression.evaluatorBindingKey(expectedBinding)
+        ) {
+          return journalFailure(
+            index,
+            `Loop condition for frame '${event.frameId}' is out of order or invalid`
+          )
+        }
+        const contextSnapshot = Json.snapshot({
+          _tag: "StandardLoopCondition",
+          expression,
+          activity: pending.activity,
+          loopFrame: frame,
+          phase: pending.phase,
+          iteration: pending.iteration,
+          scopeInstance: scope,
+          state
+        })
+        if (Result.isFailure(contextSnapshot)) {
+          return journalFailure(
+            index,
+            `Loop condition for frame '${event.frameId}' has no canonical context`
+          )
+        }
+        let sourceUtf8Bytes: number
+        let contextCanonicalBytes: number
+        try {
+          sourceUtf8Bytes = new TextEncoder().encode(
+            expression.source
+          ).byteLength
+          contextCanonicalBytes = new TextEncoder().encode(
+            Json.canonicalizeSnapshot(contextSnapshot.success)
+          ).byteLength
+        } catch {
+          return journalFailure(
+            index,
+            `Loop condition for frame '${event.frameId}' has invalid usage evidence`
+          )
+        }
+        if (
+          event.usage.sourceUtf8Bytes !== sourceUtf8Bytes ||
+          event.usage.contextCanonicalBytes !== contextCanonicalBytes ||
+          event.usage.steps > expectedBinding.limits.maxSteps ||
+          sourceUtf8Bytes > expectedBinding.limits.maxSourceUtf8Bytes ||
+          contextCanonicalBytes >
+            expectedBinding.limits.maxContextCanonicalBytes
+        ) {
+          return journalFailure(
+            index,
+            `Loop condition for frame '${event.frameId}' has invalid usage evidence`
+          )
+        }
+        pendingLoopTransition = event.result
+          ? {
+            kind: "iteration-start",
+            activity: pending.activity,
+            frameId: frame.frameId,
+            iteration: frame.completedIterations,
+            transitionedAt: pending.transitionedAt
+          }
+          : {
+            kind: "complete",
+            activity: pending.activity,
+            frameId: frame.frameId,
+            reason: "condition-false",
+            transitionedAt: pending.transitionedAt
+          }
+        break
+      }
+
+      case "LoopIterationStarted": {
+        const pending = pendingLoopTransition
+        if (pending?.kind !== "iteration-start") {
+          return journalFailure(
+            index,
+            `Loop iteration '${event.frameId}:${event.iteration}' has no start cause`
+          )
+        }
+        const frame = state.loopFrames.find((candidate) => candidate.frameId === pending.frameId)
+        const scope = frame === undefined
+          ? undefined
+          : findScope(state, frame.scopeInstanceId)
+        const characteristics = pending.activity.loopCharacteristics
+        if (
+          frame === undefined ||
+          frame.status !== "active" ||
+          frame.activeIteration !== undefined ||
+          scope === undefined ||
+          scope.status !== "active" ||
+          characteristics?._tag !== "StandardLoopCharacteristics" ||
+          characteristics.loopMaximum === undefined ||
+          pending.iteration !== frame.completedIterations ||
+          pending.iteration >= characteristics.loopMaximum ||
+          event.frameId !== frame.frameId ||
+          event.activityId !== pending.activity.id ||
+          event.activation !== frame.activation ||
+          event.iteration !== pending.iteration ||
+          event.startedAt !== pending.transitionedAt
+        ) {
+          return journalFailure(
+            index,
+            `Loop iteration '${event.frameId}:${event.iteration}' is not the deterministic next iteration`
+          )
+        }
+        frame.activeIteration = event.iteration
+        pendingLoopTransition = undefined
+        pendingEmissions = [{
+          processId: scope.processId,
+          scopeInstanceId: scope.scopeInstanceId,
+          invocation: {
+            activationId: scope.invocation.activationId,
+            branchId: frame.frameId,
+            loopIteration: event.iteration,
+            generation: scope.invocation.generation
+          },
+          position: {
+            _tag: "AtNode",
+            nodeId: pending.activity.id
+          },
+          createdAt: event.startedAt
+        }]
+        break
+      }
+
+      case "LoopIterationCompleted": {
+        const pending = pendingLoopTransition
+        if (pending?.kind !== "iteration-complete") {
+          return journalFailure(
+            index,
+            `Loop iteration completion '${event.frameId}:${event.iteration}' has no completed task cause`
+          )
+        }
+        const frame = state.loopFrames.find((candidate) => candidate.frameId === pending.frameId)
+        const characteristics = pending.activity.loopCharacteristics
+        if (
+          frame === undefined ||
+          frame.status !== "active" ||
+          frame.activeIteration !== pending.iteration ||
+          characteristics?._tag !== "StandardLoopCharacteristics" ||
+          characteristics.condition === undefined ||
+          characteristics.loopMaximum === undefined ||
+          event.frameId !== frame.frameId ||
+          event.activityId !== pending.activity.id ||
+          event.activation !== frame.activation ||
+          event.iteration !== pending.iteration ||
+          event.completedAt !== pending.transitionedAt
+        ) {
+          return journalFailure(
+            index,
+            `Loop iteration completion '${event.frameId}:${event.iteration}' is invalid`
+          )
+        }
+        delete frame.activeIteration
+        frame.completedIterations++
+        pendingLoopTransition = frame.completedIterations >= characteristics.loopMaximum
+          ? {
+            kind: "complete",
+            activity: pending.activity,
+            frameId: frame.frameId,
+            reason: "maximum-reached",
+            transitionedAt: event.completedAt
+          }
+          : {
+            kind: "condition",
+            activity: pending.activity,
+            frameId: frame.frameId,
+            phase: characteristics.testBefore ? "before" : "after",
+            iteration: characteristics.testBefore
+              ? frame.completedIterations
+              : pending.iteration,
+            transitionedAt: event.completedAt
+          }
+        break
+      }
+
+      case "LoopCompleted": {
+        const pending = pendingLoopTransition
+        if (pending?.kind !== "complete") {
+          return journalFailure(
+            index,
+            `Loop completion '${event.frameId}' has no completion decision`
+          )
+        }
+        const frame = state.loopFrames.find((candidate) => candidate.frameId === pending.frameId)
+        const scope = frame === undefined
+          ? undefined
+          : findScope(state, frame.scopeInstanceId)
+        if (
+          frame === undefined ||
+          frame.status !== "active" ||
+          frame.activeIteration !== undefined ||
+          scope === undefined ||
+          scope.status !== "active" ||
+          event.frameId !== frame.frameId ||
+          event.activityId !== pending.activity.id ||
+          event.activation !== frame.activation ||
+          event.completedIterations !== frame.completedIterations ||
+          event.reason !== pending.reason ||
+          event.completedAt !== pending.transitionedAt
+        ) {
+          return journalFailure(
+            index,
+            `Loop completion '${event.frameId}' is inconsistent with its decision`
+          )
+        }
+        frame.status = "completed"
+        frame.closedAt = event.completedAt
+        pendingLoopTransition = undefined
+        pendingRoute = {
+          sourceNode: pending.activity,
+          scopeInstanceId: scope.scopeInstanceId,
+          routingKind: "activity",
+          routedAt: event.completedAt,
+          evaluations: new Map()
+        }
+        break
+      }
+
       case "TaskOutcomeAccepted": {
         const resolution = event.resolution
         const token = state.tokens.find((candidate) => candidate.tokenId === resolution.tokenId)
@@ -2634,6 +3869,9 @@ const replayJournal = (
           frameIds: state.gatewayFrames
             .filter((frame) => frame.status === "waiting" || frame.status === "satisfied")
             .map((frame) => frame.frameId),
+          loopFrameIds: state.loopFrames
+            .filter((frame) => frame.status === "active")
+            .map((frame) => frame.frameId),
           interruptedScopeIds: [...state.scopeInstances]
             .reverse()
             .filter((scope) =>
@@ -2671,12 +3909,39 @@ const replayJournal = (
             return journalFailure(index, `Token '${event.tokenId}' has an invalid task-consumption reason`)
           }
           pendingResolvedTask = undefined
-          pendingRoute = {
-            sourceNode: task,
-            scopeInstanceId: token.scopeInstanceId,
-            routingKind: "activity",
-            routedAt: event.consumedAt,
-            evaluations: new Map()
+          if (
+            task.loopCharacteristics?._tag ===
+              "StandardLoopCharacteristics"
+          ) {
+            const frame = token.invocation.branchId === undefined
+              ? undefined
+              : state.loopFrames.find((candidate) => candidate.frameId === token.invocation.branchId)
+            if (
+              frame === undefined ||
+              frame.status !== "active" ||
+              frame.activeIteration === undefined ||
+              frame.activeIteration !== token.invocation.loopIteration
+            ) {
+              return journalFailure(
+                index,
+                `Loop task token '${token.tokenId}' has no exact active loop frame`
+              )
+            }
+            pendingLoopTransition = {
+              kind: "iteration-complete",
+              activity: task,
+              frameId: frame.frameId,
+              iteration: frame.activeIteration,
+              transitionedAt: event.consumedAt
+            }
+          } else {
+            pendingRoute = {
+              sourceNode: task,
+              scopeInstanceId: token.scopeInstanceId,
+              routingKind: "activity",
+              routedAt: event.consumedAt,
+              evaluations: new Map()
+            }
           }
         } else {
           const firstActiveFlowToken = state.tokens.find((candidate) =>
@@ -2707,13 +3972,25 @@ const replayJournal = (
             return journalFailure(index, `Token '${event.tokenId}' has no active owning scope`)
           }
           if (target._tag === "Task") {
-            pendingEmissions = [{
-              processId: scope.processId,
-              scopeInstanceId: scope.scopeInstanceId,
-              invocation: directClone(scope.invocation),
-              position: { _tag: "AtNode", nodeId: target.id },
-              createdAt: event.consumedAt
-            }]
+            if (
+              target.loopCharacteristics?._tag ===
+                "StandardLoopCharacteristics"
+            ) {
+              pendingLoopTransition = {
+                kind: "open",
+                activity: target,
+                scopeInstanceId: scope.scopeInstanceId,
+                transitionedAt: event.consumedAt
+              }
+            } else {
+              pendingEmissions = [{
+                processId: scope.processId,
+                scopeInstanceId: scope.scopeInstanceId,
+                invocation: directClone(scope.invocation),
+                position: { _tag: "AtNode", nodeId: target.id },
+                createdAt: event.consumedAt
+              }]
+            }
           } else if (target._tag === "SubProcess") {
             const generation = state.scopeInstances.filter((candidate) =>
               candidate.definitionId === target.id &&
@@ -2812,6 +4089,31 @@ const replayJournal = (
             resolution: pendingResolvedTask.resolution,
             boundary: pendingResolvedTask.boundary!,
             errorRef: pendingResolvedTask.errorRef!
+          }
+          const task = kernel.nodeById.get(
+            pendingResolvedTask.resolution.taskNodeId
+          )
+          const frame = token.invocation.branchId === undefined
+            ? undefined
+            : state.loopFrames.find((candidate) => candidate.frameId === token.invocation.branchId)
+          if (
+            task?._tag === "Task" &&
+            task.loopCharacteristics?._tag ===
+              "StandardLoopCharacteristics"
+          ) {
+            if (frame === undefined || frame.status !== "active") {
+              return journalFailure(
+                index,
+                `Boundary-error loop token '${token.tokenId}' has no active loop frame`
+              )
+            }
+            pendingLoopTransition = {
+              kind: "cancel-before-boundary",
+              activity: task,
+              frameId: frame.frameId,
+              sourceTokenId: token.tokenId,
+              transitionedAt: event.withdrawnAt
+            }
           }
           pendingResolvedTask = undefined
           break
@@ -2961,6 +4263,62 @@ const replayJournal = (
         break
       }
 
+      case "LoopFrameCancelled": {
+        const pending = pendingLoopTransition
+        if (pending?.kind === "cancel-before-boundary") {
+          const frame = state.loopFrames.find((candidate) => candidate.frameId === pending.frameId)
+          if (
+            frame === undefined ||
+            frame.status !== "active" ||
+            event.frameId !== frame.frameId ||
+            event.activityId !== pending.activity.id ||
+            event.activation !== frame.activation ||
+            event.sourceTokenId !== pending.sourceTokenId ||
+            event.reason !== "boundary-error-caught" ||
+            event.cancelledAt !== pending.transitionedAt
+          ) {
+            return journalFailure(
+              index,
+              `Loop-frame cancellation '${event.frameId}' does not match its Boundary Error`
+            )
+          }
+          frame.status = "cancelled"
+          delete frame.activeIteration
+          frame.closedAt = event.cancelledAt
+          pendingLoopTransition = undefined
+          break
+        }
+        const cleanup = pendingFailureCleanup
+        const expectedFrameId = cleanup?.loopFrameIds[0]
+        const frame = state.loopFrames.find((candidate) => candidate.frameId === event.frameId)
+        const expectedReason = cleanup?.failureKind === "UncaughtBpmnError"
+          ? "uncaught-bpmn-error"
+          : cleanup === undefined
+          ? undefined
+          : "unmapped-business-failure"
+        if (
+          cleanup === undefined ||
+          event.frameId !== expectedFrameId ||
+          event.sourceTokenId !== cleanup.resolution.tokenId ||
+          event.reason !== expectedReason ||
+          event.cancelledAt !== cleanup.resolution.resolvedAt ||
+          frame === undefined ||
+          frame.status !== "active" ||
+          event.activityId !== frame.activityId ||
+          event.activation !== frame.activation
+        ) {
+          return journalFailure(
+            index,
+            `Loop-frame cancellation '${event.frameId}' is not the next unmatched-failure cleanup`
+          )
+        }
+        frame.status = "cancelled"
+        delete frame.activeIteration
+        frame.closedAt = event.cancelledAt
+        cleanup.loopFrameIds.shift()
+        break
+      }
+
       case "ConditionEvaluated": {
         if (pendingRoute === undefined) {
           return journalFailure(index, `Condition event '${event.sequenceFlowId}' has no routing cause`)
@@ -2989,6 +4347,7 @@ const replayJournal = (
           return journalFailure(index, `Condition event for flow '${event.sequenceFlowId}' has no evaluation scope`)
         }
         const contextSnapshot = Json.snapshot({
+          _tag: "SequenceFlowCondition",
           expression: expected.condition,
           sequenceFlow: expected,
           sourceNode: route.sourceNode,
@@ -3188,6 +4547,10 @@ const replayJournal = (
                 state as unknown as BpmnExecutionState.BpmnExecutionState,
                 scope.scopeInstanceId
               ).length === 0 &&
+            activeLoopFrames(
+                state as unknown as BpmnExecutionState.BpmnExecutionState,
+                scope.scopeInstanceId
+              ).length === 0 &&
             activeChildScopes(
                 state as unknown as BpmnExecutionState.BpmnExecutionState,
                 scope.scopeInstanceId
@@ -3241,7 +4604,8 @@ const replayJournal = (
           event.completedAt !== rootScope.exitedAt ||
           state.scopeInstances.some((scope) => scope.status === "active") ||
           state.tokens.some((token) => token.status === "active") ||
-          state.gatewayFrames.some((frame) => frame.status === "waiting" || frame.status === "satisfied")
+          state.gatewayFrames.some((frame) => frame.status === "waiting" || frame.status === "satisfied") ||
+          state.loopFrames.some((frame) => frame.status === "active")
         ) {
           return journalFailure(index, "Execution completion is inconsistent with the terminal marking")
         }
@@ -3258,6 +4622,7 @@ const replayJournal = (
           cleanup === undefined ||
           cleanup.tokenIds.length !== 0 ||
           cleanup.frameIds.length !== 0 ||
+          cleanup.loopFrameIds.length !== 0 ||
           cleanup.interruptedScopeIds.length !== 0 ||
           cleanup.failedScopeIds.length !== 0 ||
           event.rootScopeInstanceId !== cleanup.rootScopeInstanceId ||
@@ -3271,7 +4636,8 @@ const replayJournal = (
           rootScope.status !== "failed" ||
           state.scopeInstances.some((scope) => scope.status === "active") ||
           state.tokens.some((token) => token.status === "active") ||
-          state.gatewayFrames.some((frame) => frame.status === "waiting" || frame.status === "satisfied")
+          state.gatewayFrames.some((frame) => frame.status === "waiting" || frame.status === "satisfied") ||
+          state.loopFrames.some((frame) => frame.status === "active")
         ) {
           return journalFailure(
             index,
@@ -3294,6 +4660,7 @@ const replayJournal = (
     pendingTaskWait !== undefined ||
     pendingResolvedTask !== undefined ||
     pendingBoundaryErrorCatch !== undefined ||
+    pendingLoopTransition !== undefined ||
     pendingFailureCleanup !== undefined ||
     pendingExecutionCompletion !== undefined
   ) {
@@ -3393,6 +4760,26 @@ const compileStructure = (
       requiredExpressionBindings.set(
         JSON.stringify([flow.condition.language, flow.condition.version]),
         flow.condition
+      )
+    }
+  }
+  for (const node of model.flowNodes) {
+    const characteristics = node._tag === "Task" ||
+        node._tag === "SubProcess"
+      ? node.loopCharacteristics
+      : undefined
+    if (
+      node._tag === "Task" &&
+      characteristics?._tag === "StandardLoopCharacteristics" &&
+      characteristics.condition !== undefined &&
+      characteristics.loopMaximum !== undefined
+    ) {
+      requiredExpressionBindings.set(
+        JSON.stringify([
+          characteristics.condition.language,
+          characteristics.condition.version
+        ]),
+        characteristics.condition
       )
     }
   }
@@ -3618,11 +5005,32 @@ const compileStructure = (
         ))
       }
       if (node.loopCharacteristics !== undefined) {
-        diagnostics.push(error(
-          Codes.UnsupportedLoop,
-          `Node '${node.id}' loop characteristics are not executable in this token-kernel subset`,
-          [...path, "loopCharacteristics"]
-        ))
+        const characteristics = node.loopCharacteristics
+        if (
+          node._tag !== "Task" ||
+          characteristics._tag !== "StandardLoopCharacteristics"
+        ) {
+          diagnostics.push(error(
+            Codes.UnsupportedLoop,
+            `Node '${node.id}' loop characteristics are outside the executable bounded standard-loop subset`,
+            [...path, "loopCharacteristics"]
+          ))
+        } else {
+          if (characteristics.condition === undefined) {
+            diagnostics.push(error(
+              Codes.UnsupportedLoop,
+              `Standard loop task '${node.id}' requires an explicit loop condition in this executable profile`,
+              [...path, "loopCharacteristics", "condition"]
+            ))
+          }
+          if (characteristics.loopMaximum === undefined) {
+            diagnostics.push(error(
+              Codes.UnsupportedLoop,
+              `Standard loop task '${node.id}' requires loopMaximum in this executable profile`,
+              [...path, "loopCharacteristics", "loopMaximum"]
+            ))
+          }
+        }
       }
       if (node.isForCompensation === true) {
         diagnostics.push(error(
@@ -4176,7 +5584,25 @@ export const completeTask = (
     )))
   }
   consumeToken(token, journal, "task-completed", runtimeServices.now)
-  const routed = routeActivityOutgoing(authority, runtimeServices, state, node, scope, journal)
+  const routed = node.loopCharacteristics?._tag ===
+      "StandardLoopCharacteristics"
+    ? completeStandardLoopIteration(
+      authority,
+      runtimeServices,
+      state,
+      node,
+      scope,
+      token,
+      journal
+    )
+    : routeActivityOutgoing(
+      authority,
+      runtimeServices,
+      state,
+      node,
+      scope,
+      journal
+    )
   if (Result.isFailure(routed)) {
     return Result.fail(routed.failure)
   }
@@ -4341,14 +5767,25 @@ export const resolveTask = (
       "task-succeeded",
       runtimeServices.now
     )
-    const routed = routeActivityOutgoing(
-      authority,
-      runtimeServices,
-      state,
-      node,
-      scope,
-      journal
-    )
+    const routed = node.loopCharacteristics?._tag ===
+        "StandardLoopCharacteristics"
+      ? completeStandardLoopIteration(
+        authority,
+        runtimeServices,
+        state,
+        node,
+        scope,
+        token,
+        journal
+      )
+      : routeActivityOutgoing(
+        authority,
+        runtimeServices,
+        state,
+        node,
+        scope,
+        journal
+      )
     if (Result.isFailure(routed)) {
       return Result.fail(routed.failure)
     }
@@ -4379,6 +5816,18 @@ export const resolveTask = (
         "boundary-error-caught",
         runtimeServices.now
       )
+      const loopFrame = token.invocation.branchId === undefined
+        ? undefined
+        : state.loopFrames.find((candidate) => candidate.frameId === token.invocation.branchId)
+      if (loopFrame?.status === "active") {
+        cancelStandardLoopFrame(
+          loopFrame,
+          token.tokenId,
+          "boundary-error-caught",
+          journal,
+          runtimeServices.now
+        )
+      }
       recordEvent(journal, {
         _tag: "BoundaryErrorCaught",
         tokenId: token.tokenId,

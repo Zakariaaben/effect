@@ -5,7 +5,7 @@ small control subset; semantic, data, DI, durable-state, bounded XML-infoset,
 strict named core-process/DI XML mapping, and executable token-kernel
 foundations; complete atomic pattern traceability, XML/XSD coverage, execution
 semantics, and normative conformance suites pending\
-Last reviewed: 2026-07-23
+Last reviewed: 2026-07-24
 
 ## Sources and authority
 
@@ -72,7 +72,10 @@ Implemented foundations:
   exact protocol-v3 task resolutions;
 - a replayable bounded token kernel for an explicitly admitted subset of none
   start/end events, tasks, embedded subprocesses, conditional/default sequence
-  flows, and exclusive/parallel gateways;
+  flows, exclusive/parallel gateways, and Standard Loops on generic Tasks. The
+  loop subset persists iteration and condition evidence, supports the
+  `testBefore` pre-test/post-test choice, and requires a positive
+  `loopMaximum`;
 - an atomic protocol-v3 Task/Boundary Error slice whose executable fingerprint
   commits immutable task bindings and exact business-failure identity mappings.
   Exact success follows the normal route; an explicitly promoted failure may
@@ -82,26 +85,36 @@ Implemented foundations:
   composition once, and emits a portable resolution command plus its raw
   outcome. Operational timeout, defects, and interruption are not promoted to
   BPMN Error. Resolution idempotency, terminal cleanup, and causal replay are
-  enforced without claiming the complete Activity or event lifecycle; and
+  enforced without claiming the complete Activity or event lifecycle. The XML
+  executable facade accepts these immutable bindings explicitly through
+  `CompileXmlOptions`; they are external executable inputs, not values inferred
+  from BPMN XML; and
 - a resource-bounded namespace-aware XML 1.0 infoset parser, semantic
   validator, and serializer;
-- strict profile `bpmn-2.0.2-core-process-di-v2`, which fails closed while
+- strict profile `bpmn-2.0.2-core-process-di-v3`, which fails closed while
   importing, validating, canonically exporting, and normalized-round-tripping
   definitions metadata, ordinary processes and recursive subprocesses, generic
   tasks, source-level call activities with namespace-expanded callable-element
   QNames, none start/end events, exclusive/parallel gateways, sequence flows,
-  conditions, defaults, explicit expression-language version bindings, and the
-  complete current normalized DI slice; and
+  conditions, defaults, Standard Loop characteristics on Tasks, explicit
+  expression-language version bindings, and the complete current normalized DI
+  slice. A mapped Standard Loop requires one version-bound formal
+  `loopCondition`, materializes the BPMN `testBefore=false` default when
+  omitted, and requires a positive `loopMaximum`. BPMN 2.0.2 itself permits an
+  absent `loopMaximum` and a more general or absent `tExpression`
+  `loopCondition`; the stricter requirements are deliberate fail-closed
+  executable-profile constraints, not statements about BPMN validity; and
 - a strict executable-admission facade that composes that named XML profile
   with the bounded token kernel without lowering through the version `1` DAG,
   and proves import, conditional/default routing, parallel split/join,
-  subprocess execution, journal replay, canonical export, re-import,
-  recompilation, and same-journal replay;
+  subprocess and bounded Standard Loop execution, journal replay, canonical
+  export, re-import, recompilation, and same-journal replay;
 - an Effectful executable-preparation boundary whose domain-separated
   SHA-256 fingerprint commits to the normalized semantic model, root process,
   kernel semantic version, limits, named profile, and exact evaluator-build
-  manifest; state version `3`, fingerprint version `2`, and versioned journal
-  headers fail closed on a model/profile mismatch;
+  manifest; kernel semantic version `3`, state version `4`, fingerprint version
+  `2`, and transition-journal version `3` fail closed on a model/profile
+  mismatch;
 - a strict Effect evaluator registry with full language/version/build/limit
   tuple resolution and no compatibility or latest fallback, plus exact
   evaluator-binding and bounded usage evidence in condition journal events; an
@@ -186,8 +199,9 @@ Implemented foundations:
 Not yet implemented and therefore not claimed:
 
 - semantic and DI XML mapping outside the strict named slice, lossless unknown
-  extension preservation, protocol-v3 task-binding admission through the XML
-  executable facade, and import/export validation against the normative XSDs;
+  extension preservation, encoding protocol-v3 task bindings inside BPMN XML,
+  and import/export validation against the normative XSDs. The executable
+  facade accepts bindings only as explicit external compile options;
 - the complete BPMN Common Executable metamodel, including its full data,
   resource, correlation, interface/operation, lane, artifact, and visual
   interchange surfaces;
@@ -256,8 +270,9 @@ status.
 The checked-in catalogue now separates the book's control-flow, data, resource,
 exception, service/correlation, flexibility, change, scientific, time, and
 workflow-activity families using printed-page locators from pp. 105–329. It
-also records executable evidence for only four atomic control patterns:
-Sequence, Parallel Split, Synchronization, and Exclusive Choice.
+also records executable evidence for only five atomic control patterns:
+Sequence, Parallel Split, Synchronization, Exclusive Choice, and the bounded
+Task form of Structured Loop.
 
 This is intentionally not described as complete traceability. Requirement
 `WFP-ATOMIC-CATALOG-COMPLETE` remains unsupported until every named pattern or
@@ -310,7 +325,7 @@ and loser-cancellation obligations continue to apply.
 | Pattern and book pages                 | Semantic obligation                                                                                | BPMN                            |
 | -------------------------------------- | -------------------------------------------------------------------------------------------------- | ------------------------------- |
 | Arbitrary cycles, 147–149              | Support multiple entries/exits and unequal repetition counts through a bounded general marking.    | **N**, backward Sequence Flows  |
-| Structured loop, 149–150               | Distinguish while, repeat-until, and combined pre/post tests; persist iteration identity.          | **N**, loop characteristics     |
+| Structured loop, 149–150               | Distinguish pre-test, post-test, and combined pre/post tests; persist iteration identity.          | **N**, loop characteristics     |
 | Recursion, 150–152                     | Pinned synchronous call frames, parent wait, base case, depth limit, and cancellation propagation. | **N**, recursive Call Activity  |
 | MI without synchronization, 153–155    | Detached instances with explicit cardinality-evaluation time and parent-close behavior.            | **C**, MI behavior without join |
 | MI with design-time knowledge, 155–157 | Fixed sequential/parallel cardinality; wait for all.                                               | **N**                           |
@@ -319,6 +334,16 @@ and loser-cancellation obligations continue to apply.
 | Static partial MI join, 160–162        | Emit at threshold while the remainder continues; reset only after full drain.                      | **E**                           |
 | Canceling partial MI join, 162–164     | Emit at threshold and cancel the remainder under an explicit race table.                           | **N/C**, `completionCondition`  |
 | Dynamic partial MI join, 164–165       | Open group; close creation at threshold; existing instances continue and drain.                    | **E**                           |
+
+Current `WFP-WCP21-STRUCTURED-LOOP` executable evidence is intentionally
+narrower than the complete repetition row: it covers while-style pre-test and
+BPMN post-tested behavior on one generic Task, with a version-bound formal
+condition whose `true` result means continue and a mandatory positive iteration
+cap. The combined pre/post-test
+variant, Standard Loops on SubProcesses, arbitrary cycles, and every
+multi-instance form remain unsupported by this executable slice. This mapping
+follows BPMN 2.0.2 §10.3.8/Table 10.28 and the specification's explicit WCP-21
+reference in §13.3.6; it is not a broader process-execution claim.
 
 ### Concurrency, triggers, cancellation, and completion
 
