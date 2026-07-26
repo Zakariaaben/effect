@@ -25,7 +25,7 @@ const definition = Workflow.make("fingerprint-workflow", {
 })
 
 const plan = (revision: number) => ({
-  formatVersion: 1,
+  formatVersion: 2,
   id: "fingerprint-plan",
   revision,
   definition: {

@@ -14,6 +14,7 @@ import * as Result from "effect/Result"
 import * as Schema from "effect/Schema"
 import type * as Scope from "effect/Scope"
 import type * as Types from "effect/Types"
+import * as Builtins from "./Builtins.ts"
 import type * as Node from "./Node.ts"
 
 const handlerRegistries = new WeakSet<object>()
@@ -127,12 +128,21 @@ export type Definitions<R> = R extends Registry<infer D> ? D : never
 /**
  * Maps every registered definition to its required implementation.
  *
+ * **Details**
+ *
+ * Definitions in the reserved `workflow/` namespace are engine-interpreted
+ * built-ins and take no handler entry; every other definition requires one.
+ *
  * @category utility types
  * @since 4.0.0
  */
-export type HandlersFrom<Definitions extends Readonly<Record<string, Node.Any>>> = {
-  readonly [K in keyof Definitions]: Node.Handler<Definitions[K]>
-}
+export type HandlersFrom<Definitions extends Readonly<Record<string, Node.Any>>> =
+  & {
+    readonly [K in keyof Definitions as K extends `workflow/${string}` ? never : K]: Node.Handler<Definitions[K]>
+  }
+  & {
+    readonly [K in keyof Definitions as K extends `workflow/${string}` ? K : never]?: Node.Handler<Definitions[K]>
+  }
 
 /**
  * Runtime handler entry, including the Effect context captured when its layer
@@ -210,6 +220,9 @@ const Proto = {
       const implementations = Effect.isEffect(build) ? yield* build : build
       const handlers = new Map<string, HandlerEntry>()
       for (const [key, definition] of Object.entries(this.definitions)) {
+        if (Builtins.kindOf(definition) !== undefined) {
+          continue
+        }
         const handler = Object.prototype.hasOwnProperty.call(implementations, key) ? implementations[key] : undefined
         if (typeof handler !== "function") {
           return yield* Effect.fail(

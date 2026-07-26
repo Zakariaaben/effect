@@ -124,7 +124,7 @@ const makePlan = (
     version: "1.0.0"
   }
 ) => ({
-  formatVersion: 1,
+  formatVersion: 2,
   id: "test-plan",
   revision: 2,
   definition: definitionReference,
@@ -287,7 +287,7 @@ describe("Compiler", () => {
   it.effect("reports malformed portable plans as schema diagnostics", () =>
     Effect.gen(function*() {
       const malformed = [
-        { ...basePlan, formatVersion: 2 },
+        { ...basePlan, formatVersion: 1 },
         { ...basePlan, unexpected: true },
         {
           ...basePlan,
@@ -481,7 +481,7 @@ describe("Compiler", () => {
       limits: limits()
     })
     const collisionPlan = {
-      formatVersion: 1,
+      formatVersion: 2,
       id: "collision-plan",
       revision: 1,
       definition: { id: "collision-workflow", version: "1.0.0" },

@@ -3,7 +3,7 @@ import { Schema } from "effect"
 import * as Plan from "../src/Plan.ts"
 
 const validPlan = JSON.parse(`{
-  "formatVersion": 1,
+  "formatVersion": 2,
   "id": "order-processing",
   "revision": 3,
   "definition": {
@@ -60,7 +60,7 @@ describe("Plan", () => {
 
   it("rejects malformed plans", () => {
     const malformed = [
-      { ...validPlan, formatVersion: 2 },
+      { ...validPlan, formatVersion: 1 },
       { ...validPlan, id: "" },
       { ...validPlan, revision: -1 },
       {

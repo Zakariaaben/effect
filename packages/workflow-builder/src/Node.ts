@@ -14,6 +14,8 @@ import type { Pipeable } from "effect/Pipeable"
 import { pipeArguments } from "effect/Pipeable"
 import * as Schema from "effect/Schema"
 import type * as Types from "effect/Types"
+import * as Plan from "./Plan.ts"
+import type * as Policy from "./Policy.ts"
 import type * as Port from "./Port.ts"
 
 /**
@@ -53,6 +55,21 @@ const register = <A extends object>(definition: A): A => {
 export const EmptyConfig = Schema.Struct({})
 
 /**
+ * Success outcomes declared by a node kind: a static list, or a function of
+ * the node's decoded configuration for kinds whose routing vocabulary is
+ * user-composed (a switch's cases, a human task's decisions).
+ *
+ * **Details**
+ *
+ * The reserved `error` outcome is never declared here; it exists exactly when
+ * the definition declares a typed failure schema.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type Outcomes = ReadonlyArray<string> | ((config: never) => ReadonlyArray<string>)
+
+/**
  * A stable, versioned node kind that may be referenced by portable plans.
  *
  * @category models
@@ -80,6 +97,8 @@ export interface Definition<
   readonly inputs: Inputs
   readonly outputs: Outputs
   readonly failureSchema: Failure
+  readonly outcomes: Outcomes | undefined
+  readonly defaultPolicy: Policy.Policy | undefined
   readonly annotations: Context.Context<never>
 
   /**
@@ -492,6 +511,8 @@ export const make = <
   readonly inputs?: Inputs | undefined
   readonly outputs?: Outputs | undefined
   readonly failure?: Failure | undefined
+  readonly outcomes?: ReadonlyArray<string> | ((config: Config["Type"]) => ReadonlyArray<string>) | undefined
+  readonly policy?: Policy.Policy | undefined
   readonly dependencies?: Dependencies | undefined
 }): Definition<
   Type,
@@ -511,5 +532,40 @@ export const make = <
     inputs: Object.freeze({ ...options.inputs }),
     outputs: Object.freeze({ ...options.outputs }),
     failureSchema: options.failure ?? Schema.Never,
+    outcomes: Array.isArray(options.outcomes) ? Object.freeze([...options.outcomes]) : options.outcomes,
+    defaultPolicy: options.policy,
     annotations: Context.empty()
   }))) as any
+
+/**
+ * Tests whether a definition declares a typed business failure.
+ *
+ * **Details**
+
+ * A node has the reserved `error` outcome exactly when this is `true`, so a
+ * plan can route its failures instead of failing the run.
+ *
+ * @category outcomes
+ * @since 4.0.0
+ */
+export const hasDeclaredFailure = (definition: Any): boolean => definition.failureSchema.ast._tag !== "Never"
+
+/**
+ * Resolves the success outcomes of a node for its decoded configuration.
+ *
+ * **Details**
+ *
+ * Without a declaration the only success outcome is the default `done`. The
+ * reserved `error` outcome is excluded; it is implied by a declared failure
+ * schema and resolved separately via {@link hasDeclaredFailure}.
+ *
+ * @category outcomes
+ * @since 4.0.0
+ */
+export const outcomesFor = (definition: Any, config: unknown): ReadonlyArray<string> => {
+  const declared = definition.outcomes
+  if (declared === undefined) {
+    return [Plan.DefaultOutcome]
+  }
+  return typeof declared === "function" ? declared(config as never) : declared
+}

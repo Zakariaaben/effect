@@ -12,7 +12,6 @@ import * as Result from "effect/Result"
 import * as Schema from "effect/Schema"
 import type * as Compiler from "./Compiler.ts"
 import * as Json from "./internal/json.ts"
-import * as Plan from "./Plan.ts"
 
 /**
  * Version of the canonical fingerprint document shape.
@@ -20,7 +19,7 @@ import * as Plan from "./Plan.ts"
  * @category constants
  * @since 4.0.0
  */
-export const FingerprintVersion = 1 as const
+export const FingerprintVersion = 2 as const
 
 /**
  * Version of the compiler semantics represented by a fingerprint.
@@ -33,15 +32,18 @@ export const FingerprintVersion = 1 as const
  * @category constants
  * @since 4.0.0
  */
-export const CompilerSemanticVersion = "2" as const
+export const CompilerSemanticVersion = "3" as const
 
 /**
  * Canonical document hashed for an admitted plan.
  *
  * **Details**
  *
- * The original portable plan captures user-authored meaning and exact version
- * pins. The compiled schedule additionally captures compiler-derived ordering.
+ * The document contains only semantic content: presentation `metadata` is
+ * stripped from the plan, its nodes, and its edges, and unordered collections
+ * are sorted canonically. Moving a node on a canvas therefore cannot change a
+ * fingerprint, while any change to vocabulary pins, configuration, bindings,
+ * policy, wiring, or the compiled schedule does.
  *
  * @category schemas
  * @since 4.0.0
@@ -49,9 +51,9 @@ export const CompilerSemanticVersion = "2" as const
 export const FingerprintDocument = Schema.Struct({
   fingerprintVersion: Schema.Literal(FingerprintVersion),
   compilerSemanticVersion: Schema.Literal(CompilerSemanticVersion),
-  plan: Plan.Plan,
-  topologicalOrder: Schema.Array(Schema.NonEmptyString),
-  stages: Schema.Array(Schema.Array(Schema.NonEmptyString))
+  plan: Schema.Json,
+  boundary: Schema.Json,
+  topologicalOrder: Schema.Array(Schema.NonEmptyString)
 }).annotate({
   identifier: "WorkflowFingerprintDocument",
   parseOptions: { onExcessProperty: "error" }
@@ -153,24 +155,63 @@ export const digest = Effect.fnUntraced(function*(
   })
 })
 
+const compareCodeUnits = (left: string, right: string): number => left < right ? -1 : left > right ? 1 : 0
+
+const stripped = <A extends { readonly metadata?: Schema.Json | undefined }>(
+  value: A
+): Omit<A, "metadata"> => {
+  const { metadata: _metadata, ...rest } = value
+  return rest
+}
+
 /**
  * Materializes the immutable canonical document for a compiled plan.
+ *
+ * **Details**
+ *
+ * Presentation `metadata` is removed at every level and nodes and edges are
+ * sorted by id, so two plans differing only in layout or authoring order
+ * produce the same fingerprint. The workflow boundary — input and output port
+ * names, contracts, cardinality, and fan-out — is committed alongside the
+ * plan because it shapes execution meaning without appearing in the plan
+ * document itself.
  *
  * @category constructors
  * @since 4.0.0
  */
 export const materialize = (compiled: Compiler.CompiledPlan): FingerprintDocument => {
+  const definition = compiled.definition
   const document = Json.snapshot({
     fingerprintVersion: FingerprintVersion,
     compilerSemanticVersion: CompilerSemanticVersion,
-    plan: compiled.plan,
-    topologicalOrder: [...compiled.topologicalOrder],
-    stages: compiled.stages.map((stage) => [...stage])
+    plan: {
+      formatVersion: compiled.plan.formatVersion,
+      id: compiled.plan.id,
+      revision: compiled.plan.revision,
+      definition: compiled.plan.definition,
+      nodes: [...compiled.plan.nodes]
+        .sort((left, right) => compareCodeUnits(left.id, right.id))
+        .map(stripped),
+      edges: [...compiled.plan.edges]
+        .sort((left, right) => compareCodeUnits(left.id, right.id))
+        .map(stripped)
+    },
+    boundary: {
+      inputs: Object.keys(definition.inputs).sort(compareCodeUnits).map((name) => {
+        const port = definition.inputs[name]!
+        return { name, contract: port.contract, fanOut: port.fanOut }
+      }),
+      outputs: Object.keys(definition.outputs).sort(compareCodeUnits).map((name) => {
+        const port = definition.outputs[name]!
+        return { name, contract: port.contract, cardinality: port.cardinality, required: port.required }
+      })
+    },
+    topologicalOrder: [...compiled.topologicalOrder]
   })
   if (Result.isFailure(document)) {
     throw new TypeError(`Cannot materialize invalid fingerprint JSON: ${document.failure.message}`)
   }
-  return document.success as FingerprintDocument
+  return document.success as unknown as FingerprintDocument
 }
 
 /**

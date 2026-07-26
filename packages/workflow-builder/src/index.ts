@@ -7,7 +7,17 @@
 /**
  * @since 4.0.0
  */
+export * as Builtins from "./Builtins.ts"
+
+/**
+ * @since 4.0.0
+ */
 export * as Compiler from "./Compiler.ts"
+
+/**
+ * @since 4.0.0
+ */
+export * as Expression from "./Expression.ts"
 
 /**
  * @since 4.0.0
@@ -33,6 +43,11 @@ export * as Node from "./Node.ts"
  * @since 4.0.0
  */
 export * as Plan from "./Plan.ts"
+
+/**
+ * @since 4.0.0
+ */
+export * as Policy from "./Policy.ts"
 
 /**
  * @since 4.0.0

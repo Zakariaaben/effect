@@ -45,6 +45,21 @@ export const OutputTypeId: OutputTypeId = "@effect/workflow-builder/Port/Output"
 export type OutputTypeId = "@effect/workflow-builder/Port/Output"
 
 /**
+ * The wildcard contract accepted by and offered to every other contract.
+ *
+ * **Details**
+ *
+ * A port using this contract opts out of compile-time contract equality; the
+ * schema validation performed at runtime on every hop remains its correctness
+ * boundary. Engine built-ins use it so untyped JSON can flow between an
+ * application's typed vocabulary and generic control nodes.
+ *
+ * @category constants
+ * @since 4.0.0
+ */
+export const AnyContract = "*" as const
+
+/**
  * Controls how many links may feed an input port.
  *
  * @category models

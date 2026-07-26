@@ -7,12 +7,15 @@
 import * as Effect from "effect/Effect"
 import * as Result from "effect/Result"
 import * as Schema from "effect/Schema"
+import * as Builtins from "./Builtins.ts"
 import * as Diagnostic from "./Diagnostic.ts"
+import * as Expression from "./Expression.ts"
 import * as Json from "./internal/json.ts"
 import type * as LinkPolicy from "./LinkPolicy.ts"
-import type * as Node from "./Node.ts"
+import * as Node from "./Node.ts"
 import * as Plan from "./Plan.ts"
-import type * as Port from "./Port.ts"
+import * as Policy from "./Policy.ts"
+import * as Port from "./Port.ts"
 import type * as Registry from "./Registry.ts"
 import type * as Workflow from "./Workflow.ts"
 
@@ -46,7 +49,15 @@ export const Codes = {
   MissingRequiredInput: "MissingRequiredInput",
   MissingRequiredOutput: "MissingRequiredOutput",
   AmbiguousEdgeOrder: "AmbiguousEdgeOrder",
-  CycleDetected: "CycleDetected"
+  CycleDetected: "CycleDetected",
+  UnknownOutcome: "UnknownOutcome",
+  InvalidOutcomes: "InvalidOutcomes",
+  UnknownBindingInput: "UnknownBindingInput",
+  ConflictingInputBinding: "ConflictingInputBinding",
+  InvalidExpression: "InvalidExpression",
+  DuplicateSignal: "DuplicateSignal",
+  ReservedTypeNamespace: "ReservedTypeNamespace",
+  InvalidJoin: "InvalidJoin"
 } as const
 
 /**
@@ -62,13 +73,16 @@ export interface CompiledDataEdge {
 }
 
 /**
- * A validated control dependency.
+ * A validated control dependency from a source node outcome to a target node.
  *
  * @category models
  * @since 4.0.0
  */
 export interface CompiledControlEdge {
   readonly edge: Plan.ControlEdge
+  readonly sourceNodeId: string
+  readonly outcome: string
+  readonly targetNodeId: string
 }
 
 /**
@@ -81,14 +95,28 @@ export interface CompiledControlEdge {
  * mutate a cached decoded object and change later execution under the same plan
  * fingerprint.
  *
+ * `outcomes` are the resolved success outcomes for this node's configuration;
+ * `errorOutcome` is `true` when the definition declares a typed failure, which
+ * makes the reserved `error` outcome routable. `policy` is the plan-authored
+ * policy merged over the definition default. `dependencies` include data-edge
+ * sources, control-edge sources, and nodes referenced by expressions.
+ *
  * @category models
  * @since 4.0.0
  */
 export interface CompiledNode {
   readonly node: Plan.PlanNode
   readonly definition: Node.Any
+  readonly builtin: Builtins.Builtin | undefined
+  readonly outcomes: ReadonlyArray<string>
+  readonly errorOutcome: boolean
+  readonly join: Plan.Join
+  readonly policy: Policy.Policy
+  readonly bindings: ReadonlyMap<string, Expression.Expression>
   readonly incoming: ReadonlyArray<CompiledDataEdge>
   readonly outgoing: ReadonlyArray<CompiledDataEdge>
+  readonly incomingControl: ReadonlyArray<CompiledControlEdge>
+  readonly outgoingControl: ReadonlyArray<CompiledControlEdge>
   readonly dependencies: ReadonlyArray<string>
   readonly dependents: ReadonlyArray<string>
 }
@@ -101,6 +129,7 @@ export interface CompiledNode {
  *
  * Each inner `stages` array can run concurrently. The array order is stable for
  * a given portable plan and does not depend on activity completion order.
+ * `signals` maps each declared external signal name to its waiting node.
  *
  * @category models
  * @since 4.0.0
@@ -111,6 +140,7 @@ export interface CompiledPlan<out W extends Workflow.Any = Workflow.Any> {
   readonly nodes: ReadonlyMap<string, CompiledNode>
   readonly dataEdges: ReadonlyArray<CompiledDataEdge>
   readonly controlEdges: ReadonlyArray<CompiledControlEdge>
+  readonly signals: ReadonlyMap<string, string>
   readonly topologicalOrder: ReadonlyArray<string>
   readonly stages: ReadonlyArray<ReadonlyArray<string>>
   readonly warnings: ReadonlyArray<Diagnostic.Diagnostic>
@@ -150,8 +180,15 @@ interface MutableCompiledNode {
   readonly index: number
   readonly node: Plan.PlanNode
   readonly definition: Node.Any
+  readonly builtin: Builtins.Builtin | undefined
+  config: unknown
+  configValid: boolean
+  outcomes: ReadonlyArray<string>
+  errorOutcome: boolean
   readonly incoming: Array<CompiledDataEdge>
   readonly outgoing: Array<CompiledDataEdge>
+  readonly incomingControl: Array<CompiledControlEdge>
+  readonly outgoingControl: Array<CompiledControlEdge>
   readonly dependencies: Set<string>
   readonly dependents: Set<string>
 }
@@ -246,6 +283,27 @@ const validateDefinition = (
     }
     checkPorts(node.inputs, `node '${definitionKey}' input`)
     checkPorts(node.outputs, `node '${definitionKey}' output`)
+    if (node.type.startsWith("workflow/") && Builtins.kindOf(node) === undefined) {
+      add(
+        diagnostics,
+        Codes.ReservedTypeNamespace,
+        `Node type '${node.type}' uses the reserved 'workflow/' namespace without being engine-interpreted`,
+        [],
+        { definitionKey, type: node.type }
+      )
+    }
+    if (
+      Node.hasDeclaredFailure(node) &&
+      Object.prototype.hasOwnProperty.call(node.outputs, Plan.ErrorOutcome)
+    ) {
+      add(
+        diagnostics,
+        Codes.InvalidDefinition,
+        `Node '${definitionKey}' declares an output named '${Plan.ErrorOutcome}', which is reserved for its typed failure`,
+        [],
+        { definitionKey }
+      )
+    }
   }
 }
 
@@ -336,6 +394,91 @@ const compileTopology = (
   return {
     topologicalOrder: Object.freeze(topologicalOrder),
     stages: Object.freeze(stages.map((stage) => Object.freeze(stage)))
+  }
+}
+
+interface ExpressionSite {
+  readonly expression: Expression.Expression
+  readonly path: ReadonlyArray<Diagnostic.PathSegment>
+  readonly extraRoots: ReadonlyArray<string>
+}
+
+const builtinExpressionSites = (
+  node: MutableCompiledNode
+): ReadonlyArray<ExpressionSite> => {
+  if (node.builtin === undefined || !node.configValid) {
+    return []
+  }
+  const config = node.config as never
+  const base: ReadonlyArray<Diagnostic.PathSegment> = ["nodes", node.index, "config"]
+  switch (node.builtin) {
+    case "if": {
+      const { condition } = config as { condition: Expression.Expression }
+      return [{ expression: condition, path: [...base, "condition"], extraRoots: [] }]
+    }
+    case "switch": {
+      const { cases } = config as {
+        cases: ReadonlyArray<{ name: string; condition: Expression.Expression }>
+      }
+      return cases.map((entry, index) => ({
+        expression: entry.condition,
+        path: [...base, "cases", index, "condition"],
+        extraRoots: []
+      }))
+    }
+    case "transform": {
+      const { value } = config as { value: Expression.Expression }
+      return [{ expression: value, path: [...base, "value"], extraRoots: [] }]
+    }
+    case "forEach": {
+      const { input, items } = config as {
+        items: Expression.Expression
+        input?: Expression.Expression
+      }
+      const sites: Array<ExpressionSite> = [
+        { expression: items, path: [...base, "items"], extraRoots: [] }
+      ]
+      if (input !== undefined) {
+        sites.push({ expression: input, path: [...base, "input"], extraRoots: ["item", "index"] })
+      }
+      return sites
+    }
+    case "subWorkflow": {
+      const { input } = config as { input?: Expression.Expression }
+      return input === undefined ? [] : [{ expression: input, path: [...base, "input"], extraRoots: [] }]
+    }
+    case "humanTask": {
+      const { assignee, candidateGroups, payload } = config as {
+        payload?: Expression.Expression
+        assignee?: Expression.Expression
+        candidateGroups?: Expression.Expression
+      }
+      const sites: Array<ExpressionSite> = []
+      if (payload !== undefined) {
+        sites.push({ expression: payload, path: [...base, "payload"], extraRoots: [] })
+      }
+      if (assignee !== undefined) {
+        sites.push({ expression: assignee, path: [...base, "assignee"], extraRoots: [] })
+      }
+      if (candidateGroups !== undefined) {
+        sites.push({ expression: candidateGroups, path: [...base, "candidateGroups"], extraRoots: [] })
+      }
+      return sites
+    }
+    case "delay": {
+      const { durationMillis } = config as { durationMillis: number | Expression.Expression }
+      return typeof durationMillis === "number"
+        ? []
+        : [{ expression: durationMillis, path: [...base, "durationMillis"], extraRoots: [] }]
+    }
+    case "fail": {
+      const { message } = config as { message?: string | Expression.Expression }
+      return message === undefined || typeof message === "string"
+        ? []
+        : [{ expression: message, path: [...base, "message"], extraRoots: [] }]
+    }
+    case "receive":
+      return []
   }
 }
 
@@ -456,8 +599,15 @@ export const compile = Effect.fnUntraced(function*<W extends Workflow.Any>(
       index,
       node,
       definition: nodeDefinition,
+      builtin: Builtins.kindOf(nodeDefinition),
+      config: undefined,
+      configValid: false,
+      outcomes: [Plan.DefaultOutcome],
+      errorOutcome: Node.hasDeclaredFailure(nodeDefinition),
       incoming: [],
       outgoing: [],
+      incomingControl: [],
+      outgoingControl: [],
       dependencies: new Set(),
       dependents: new Set()
     })
@@ -478,14 +628,218 @@ export const compile = Effect.fnUntraced(function*<W extends Workflow.Any>(
         ["nodes", compiledNode.index, "config"],
         { nodeId: compiledNode.node.id, type: compiledNode.node.type, version: compiledNode.node.version }
       )
+      continue
+    }
+    compiledNode.config = config.success
+    compiledNode.configValid = true
+
+    const outcomes = Node.outcomesFor(compiledNode.definition, config.success)
+    const seen = new Set<string>()
+    let valid = true
+    for (const outcome of outcomes) {
+      if (typeof outcome !== "string" || outcome.length === 0) {
+        add(
+          diagnostics,
+          Codes.InvalidOutcomes,
+          `Node '${compiledNode.node.id}' resolved an empty outcome name`,
+          ["nodes", compiledNode.index],
+          { nodeId: compiledNode.node.id }
+        )
+        valid = false
+        continue
+      }
+      if (outcome === Plan.ErrorOutcome) {
+        add(
+          diagnostics,
+          Codes.InvalidOutcomes,
+          `Node '${compiledNode.node.id}' declares the reserved outcome '${Plan.ErrorOutcome}'`,
+          ["nodes", compiledNode.index],
+          { nodeId: compiledNode.node.id }
+        )
+        valid = false
+        continue
+      }
+      if (seen.has(outcome)) {
+        add(
+          diagnostics,
+          Codes.InvalidOutcomes,
+          `Node '${compiledNode.node.id}' declares the outcome '${outcome}' more than once`,
+          ["nodes", compiledNode.index],
+          { nodeId: compiledNode.node.id, outcome }
+        )
+        valid = false
+        continue
+      }
+      seen.add(outcome)
+    }
+    if (valid) {
+      compiledNode.outcomes = Object.freeze([...seen])
     }
   }
+
+  // --------------------------------------------------------------------------
+  // Expression reference validation and implicit dependencies
+  // --------------------------------------------------------------------------
+
+  const validateExpression = (
+    site: ExpressionSite,
+    owner: MutableCompiledNode | undefined
+  ): void => {
+    const bounds = Expression.validate(site.expression)
+    if (Result.isFailure(bounds)) {
+      add(diagnostics, Codes.InvalidExpression, bounds.failure.message, site.path)
+      return
+    }
+    for (const reference of Expression.references(site.expression)) {
+      const root = reference[0]
+      if (typeof root !== "string") {
+        add(
+          diagnostics,
+          Codes.InvalidExpression,
+          "Expression references must start with a named scope root",
+          site.path,
+          { reference: [...reference] as unknown as Schema.Json }
+        )
+        continue
+      }
+      if (root === "input" || site.extraRoots.includes(root)) {
+        continue
+      }
+      if (root !== "nodes") {
+        add(
+          diagnostics,
+          Codes.InvalidExpression,
+          `Unknown scope root '${root}'`,
+          site.path,
+          { reference: [...reference] as unknown as Schema.Json }
+        )
+        continue
+      }
+      const referencedId = reference[1]
+      if (typeof referencedId !== "string") {
+        add(
+          diagnostics,
+          Codes.InvalidExpression,
+          "References through 'nodes' must name a node id",
+          site.path,
+          { reference: [...reference] as unknown as Schema.Json }
+        )
+        continue
+      }
+      const referenced = mutableNodes.get(referencedId)
+      if (referenced === undefined) {
+        add(
+          diagnostics,
+          Codes.InvalidExpression,
+          `Expression references unknown node '${referencedId}'`,
+          site.path,
+          { reference: [...reference] as unknown as Schema.Json }
+        )
+        continue
+      }
+      if (owner !== undefined && referencedId === owner.node.id) {
+        add(
+          diagnostics,
+          Codes.InvalidExpression,
+          `Node '${owner.node.id}' cannot reference its own outputs`,
+          site.path
+        )
+        continue
+      }
+      const portName = reference[2]
+      if (portName !== undefined) {
+        const portKey = typeof portName === "number" ? String(portName) : portName
+        const isErrorPort = portKey === Plan.ErrorOutcome && referenced.errorOutcome
+        if (!isErrorPort && getOwn(referenced.definition.outputs, portKey) === undefined) {
+          add(
+            diagnostics,
+            Codes.InvalidExpression,
+            `Node '${referencedId}' has no output '${portKey}'`,
+            site.path,
+            { reference: [...reference] as unknown as Schema.Json }
+          )
+          continue
+        }
+      }
+      if (owner !== undefined) {
+        owner.dependencies.add(referencedId)
+        referenced.dependents.add(owner.node.id)
+      }
+    }
+  }
+
+  for (const compiledNode of mutableNodes.values()) {
+    const bindings = compiledNode.node.bindings
+    if (bindings !== undefined) {
+      for (const [portName, expression] of Object.entries(bindings)) {
+        if (getOwn(compiledNode.definition.inputs, portName) === undefined) {
+          add(
+            diagnostics,
+            Codes.UnknownBindingInput,
+            `Node '${compiledNode.node.id}' has no input '${portName}' to bind`,
+            ["nodes", compiledNode.index, "bindings", portName],
+            { nodeId: compiledNode.node.id, input: portName }
+          )
+          continue
+        }
+        validateExpression({
+          expression,
+          path: ["nodes", compiledNode.index, "bindings", portName],
+          extraRoots: []
+        }, compiledNode)
+      }
+    }
+    for (const site of builtinExpressionSites(compiledNode)) {
+      validateExpression(site, compiledNode)
+    }
+  }
+
+  // --------------------------------------------------------------------------
+  // Signals
+  // --------------------------------------------------------------------------
+
+  const signals = new Map<string, string>()
+  for (const compiledNode of mutableNodes.values()) {
+    if (compiledNode.builtin !== "receive" || !compiledNode.configValid) {
+      continue
+    }
+    const { signal } = compiledNode.config as { signal: string }
+    const existing = signals.get(signal)
+    if (existing !== undefined) {
+      add(
+        diagnostics,
+        Codes.DuplicateSignal,
+        `Signal '${signal}' is declared by both '${existing}' and '${compiledNode.node.id}'`,
+        ["nodes", compiledNode.index, "config", "signal"],
+        { signal, nodes: [existing, compiledNode.node.id] }
+      )
+      continue
+    }
+    signals.set(signal, compiledNode.node.id)
+  }
+
+  // --------------------------------------------------------------------------
+  // Edges
+  // --------------------------------------------------------------------------
 
   const edgeIds = new Set<string>()
   const compiledDataEdges: Array<CompiledDataEdge> = []
   const compiledControlEdges: Array<CompiledControlEdge> = []
   const incoming = new Map<string, Array<readonly [CompiledDataEdge, number]>>()
   const outgoing = new Map<string, Array<readonly [CompiledDataEdge, number]>>()
+
+  const errorPorts = new Map<string, Port.Output.Any>()
+  const errorPort = (node: MutableCompiledNode): Port.Output.Any => {
+    const existing = errorPorts.get(node.node.id)
+    if (existing !== undefined) {
+      return existing
+    }
+    const port = Port.output(node.definition.failureSchema as Port.PayloadSchema, {
+      contract: Port.AnyContract
+    })
+    errorPorts.set(node.node.id, port)
+    return port
+  }
 
   const resolveSource = (
     source: Plan.SourceEndpoint,
@@ -522,7 +876,8 @@ export const compile = Effect.fnUntraced(function*<W extends Workflow.Any>(
       }
       return undefined
     }
-    const port = getOwn(node.definition.outputs, source.output)
+    const declared = getOwn(node.definition.outputs, source.output)
+    const port = declared ?? (source.output === Plan.ErrorOutcome && node.errorOutcome ? errorPort(node) : undefined)
     if (port === undefined) {
       add(
         diagnostics,
@@ -643,11 +998,34 @@ export const compile = Effect.fnUntraced(function*<W extends Workflow.Any>(
           )
         }
       }
-      if (source !== undefined && target !== undefined) {
-        source.dependents.add(target.node.id)
-        target.dependencies.add(source.node.id)
-        compiledControlEdges.push(Object.freeze({ edge }))
+      if (source === undefined || target === undefined) {
+        continue
       }
+      const outcome = edge.outcome ?? Plan.DefaultOutcome
+      const known = outcome === Plan.ErrorOutcome
+        ? source.errorOutcome
+        : source.outcomes.includes(outcome)
+      if (source.configValid && !known) {
+        add(
+          diagnostics,
+          Codes.UnknownOutcome,
+          `Node '${edge.sourceNodeId}' has no outcome '${outcome}'`,
+          ["edges", index, "outcome"],
+          { nodeId: edge.sourceNodeId, outcome, available: [...source.outcomes] }
+        )
+        continue
+      }
+      const compiledEdge: CompiledControlEdge = Object.freeze({
+        edge,
+        sourceNodeId: edge.sourceNodeId,
+        outcome,
+        targetNodeId: edge.targetNodeId
+      })
+      source.outgoingControl.push(compiledEdge)
+      target.incomingControl.push(compiledEdge)
+      source.dependents.add(target.node.id)
+      target.dependencies.add(source.node.id)
+      compiledControlEdges.push(compiledEdge)
       continue
     }
 
@@ -656,15 +1034,27 @@ export const compile = Effect.fnUntraced(function*<W extends Workflow.Any>(
     if (source === undefined || target === undefined) {
       continue
     }
-    if (source.port.contract !== target.port.contract) {
+    const compatible = source.port.contract === target.port.contract ||
+      source.port.contract === Port.AnyContract ||
+      target.port.contract === Port.AnyContract ||
+      edge.transform !== undefined
+    if (!compatible) {
       add(
         diagnostics,
         Codes.IncompatibleContract,
-        `Cannot connect contract '${source.port.contract}' to '${target.port.contract}'`,
+        `Cannot connect contract '${source.port.contract}' to '${target.port.contract}' without a transform`,
         ["edges", index],
         { edgeId: edge.id, source: source.port.contract, target: target.port.contract }
       )
       continue
+    }
+    if (edge.transform !== undefined) {
+      const owner = target.descriptor.kind === "NodeInput" ? mutableNodes.get(target.descriptor.nodeId) : undefined
+      validateExpression({
+        expression: edge.transform,
+        path: ["edges", index, "transform"],
+        extraRoots: ["value"]
+      }, owner)
     }
     const allowed = yield* definition.linkPolicy.authorize({
       edgeId: edge.id,
@@ -710,16 +1100,43 @@ export const compile = Effect.fnUntraced(function*<W extends Workflow.Any>(
     }
   }
 
+  // --------------------------------------------------------------------------
+  // Joins, required inputs, cardinality, and fan-out
+  // --------------------------------------------------------------------------
+
+  for (const node of mutableNodes.values()) {
+    const join = node.node.join ?? "all"
+    if (join === "any" && node.incomingControl.length === 0) {
+      add(
+        diagnostics,
+        Codes.InvalidJoin,
+        `Node '${node.node.id}' declares join 'any' without incoming control edges`,
+        ["nodes", node.index, "join"],
+        { nodeId: node.node.id }
+      )
+    }
+  }
+
   const validateTarget = (
     port: Port.Input.Any,
     key: string,
     label: string,
     path: ReadonlyArray<Diagnostic.PathSegment>,
-    missingCode: string
+    missingCode: string,
+    bound: boolean
   ) => {
     const edges = incoming.get(key) ?? []
-    if (port.required && edges.length === 0) {
+    if (port.required && edges.length === 0 && !bound) {
       add(diagnostics, missingCode, `Required ${label} is not connected`, path, { target: label })
+    }
+    if (edges.length > 0 && bound) {
+      add(
+        diagnostics,
+        Codes.ConflictingInputBinding,
+        `${label} is supplied by both a binding and a data edge`,
+        path,
+        { target: label }
+      )
     }
     const allowed = port.cardinality === "one" ? 1 : definition.limits.maxFanIn
     if (edges.length > allowed) {
@@ -748,12 +1165,15 @@ export const compile = Effect.fnUntraced(function*<W extends Workflow.Any>(
 
   for (const node of mutableNodes.values()) {
     for (const [name, port] of Object.entries(node.definition.inputs)) {
+      const bound = node.node.bindings !== undefined &&
+        Object.prototype.hasOwnProperty.call(node.node.bindings, name)
       validateTarget(
         port,
         storageKey("NodeInput", node.node.id, name),
         `input '${node.node.id}.${name}'`,
         ["nodes", node.index],
-        Codes.MissingRequiredInput
+        Codes.MissingRequiredInput,
+        bound
       )
     }
   }
@@ -763,7 +1183,8 @@ export const compile = Effect.fnUntraced(function*<W extends Workflow.Any>(
       storageKey("WorkflowOutput", name),
       `workflow output '${name}'`,
       ["edges"],
-      Codes.MissingRequiredOutput
+      Codes.MissingRequiredOutput,
+      false
     )
   }
 
@@ -816,13 +1237,29 @@ export const compile = Effect.fnUntraced(function*<W extends Workflow.Any>(
         compareCodeUnits(left.edge.id, right.edge.id)
     })
     node.outgoing.sort((left, right) => compareCodeUnits(left.edge.id, right.edge.id))
+    node.incomingControl.sort((left, right) => compareCodeUnits(left.edge.id, right.edge.id))
+    node.outgoingControl.sort((left, right) => compareCodeUnits(left.edge.id, right.edge.id))
+    const bindings = new Map<string, Expression.Expression>()
+    if (node.node.bindings !== undefined) {
+      for (const key of Object.keys(node.node.bindings).sort(compareCodeUnits)) {
+        bindings.set(key, node.node.bindings[key]!)
+      }
+    }
     nodes.set(
       nodeId,
       Object.freeze({
         node: node.node,
         definition: node.definition,
+        builtin: node.builtin,
+        outcomes: node.outcomes,
+        errorOutcome: node.errorOutcome,
+        join: node.node.join ?? "all",
+        policy: Object.freeze(Policy.merge(node.definition.defaultPolicy, node.node.policy)),
+        bindings: readonlyMap(bindings),
         incoming: Object.freeze(node.incoming),
         outgoing: Object.freeze(node.outgoing),
+        incomingControl: Object.freeze(node.incomingControl),
+        outgoingControl: Object.freeze(node.outgoingControl),
         dependencies: Object.freeze(
           Array.from(node.dependencies).sort(compareCodeUnits)
         ),
@@ -834,12 +1271,17 @@ export const compile = Effect.fnUntraced(function*<W extends Workflow.Any>(
   }
   compiledDataEdges.sort((left, right) => compareCodeUnits(left.edge.id, right.edge.id))
   compiledControlEdges.sort((left, right) => compareCodeUnits(left.edge.id, right.edge.id))
+  const orderedSignals = new Map<string, string>()
+  for (const signal of Array.from(signals.keys()).sort(compareCodeUnits)) {
+    orderedSignals.set(signal, signals.get(signal)!)
+  }
   const compiled = Object.freeze({
     definition,
     plan,
     nodes: readonlyMap(nodes),
     dataEdges: Object.freeze(compiledDataEdges),
     controlEdges: Object.freeze(compiledControlEdges),
+    signals: readonlyMap(orderedSignals),
     topologicalOrder: topology.topologicalOrder,
     stages: topology.stages,
     warnings: Object.freeze(warnings)

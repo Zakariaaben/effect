@@ -4,10 +4,60 @@
  * @since 4.0.0
  */
 import * as Schema from "effect/Schema"
+import * as Expression from "./Expression.ts"
+import * as Policy from "./Policy.ts"
 
 const strictParseOptions = { onExcessProperty: "error" } as const
 
 const NonNegativeInt = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+
+/**
+ * The plan wire-format version accepted by this compiler generation.
+ *
+ * @category constants
+ * @since 4.0.0
+ */
+export const FormatVersion = 2 as const
+
+/**
+ * The reserved outcome name carrying a node's typed business failure.
+ *
+ * @category constants
+ * @since 4.0.0
+ */
+export const ErrorOutcome = "error" as const
+
+/**
+ * The default completion outcome of every node kind.
+ *
+ * @category constants
+ * @since 4.0.0
+ */
+export const DefaultOutcome = "done" as const
+
+/**
+ * Join semantics over a node's incoming edges.
+ *
+ * **Details**
+ *
+ * `all` waits until every incoming edge has settled and runs when at least one
+ * control edge is live (or, without control edges, when data sources
+ * completed); it propagates skipping when every incoming control edge is dead.
+ * `any` runs as soon as one incoming control edge becomes live and never runs
+ * more than once.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const Join = Schema.Literals(["all", "any"])
+
+/**
+ * The decoded type of {@link Join}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type Join = typeof Join.Type
 
 /**
  * Identifies the immutable workflow definition used to compile a plan.
@@ -40,6 +90,11 @@ export type DefinitionReference = Schema.Schema.Type<typeof DefinitionReference>
  * and optional `metadata` remain arbitrary JSON so plans can cross process and
  * persistence boundaries without carrying executable values.
  *
+ * `bindings` supply input ports directly from expressions — literals,
+ * references to earlier node outputs, or reshaped values — as an alternative
+ * to wiring a data edge. `policy` overrides the node definition's default
+ * retry and timeout policy. `join` selects how incoming edges are awaited.
+ *
  * @category schemas
  * @since 4.0.0
  */
@@ -48,6 +103,9 @@ export const PlanNode = Schema.Struct({
   type: Schema.NonEmptyString,
   version: Schema.NonEmptyString,
   config: Schema.Json,
+  bindings: Schema.optionalKey(Schema.Record(Schema.NonEmptyString, Expression.Expression)),
+  policy: Schema.optionalKey(Policy.Policy),
+  join: Schema.optionalKey(Join),
   metadata: Schema.optionalKey(Schema.Json)
 }).annotate({
   identifier: "WorkflowPlanNode",
@@ -193,6 +251,12 @@ export type TargetEndpoint = Schema.Schema.Type<typeof TargetEndpoint>
  *
  * `order` can make multiple edges targeting the same input deterministic.
  *
+ * `transform` reshapes the source value before the target decodes it. The
+ * transform expression is evaluated with the source value bound to the `value`
+ * scope root, alongside the shared `input` and `nodes` roots. An edge with a
+ * transform is exempt from contract equality: the runtime schema validation at
+ * the target is its correctness boundary.
+ *
  * @category schemas
  * @since 4.0.0
  */
@@ -200,6 +264,7 @@ export const DataEdge = Schema.TaggedStruct("DataEdge", {
   id: Schema.NonEmptyString,
   source: SourceEndpoint,
   target: TargetEndpoint,
+  transform: Schema.optionalKey(Expression.Expression),
   order: Schema.optionalKey(NonNegativeInt),
   metadata: Schema.optionalKey(Schema.Json)
 }).annotate({
@@ -216,7 +281,15 @@ export const DataEdge = Schema.TaggedStruct("DataEdge", {
 export type DataEdge = Schema.Schema.Type<typeof DataEdge>
 
 /**
- * An execution-order dependency from one node to another.
+ * An execution-order dependency from a node outcome to another node.
+ *
+ * **Details**
+ *
+ * `outcome` selects which completion outcome of the source node activates
+ * this edge; absent means the default `done` outcome. An edge is *live* when
+ * its source completed with exactly that outcome and *dead* when the source
+ * settled any other way, which is what drives conditional routing and
+ * dead-path propagation.
  *
  * @category schemas
  * @since 4.0.0
@@ -224,6 +297,7 @@ export type DataEdge = Schema.Schema.Type<typeof DataEdge>
 export const ControlEdge = Schema.TaggedStruct("ControlEdge", {
   id: Schema.NonEmptyString,
   sourceNodeId: Schema.NonEmptyString,
+  outcome: Schema.optionalKey(Schema.NonEmptyString),
   targetNodeId: Schema.NonEmptyString,
   metadata: Schema.optionalKey(Schema.Json)
 }).annotate({
@@ -272,7 +346,7 @@ export type PlanEdge = Schema.Schema.Type<typeof PlanEdge>
  * @since 4.0.0
  */
 export const Plan = Schema.Struct({
-  formatVersion: Schema.Literal(1),
+  formatVersion: Schema.Literal(FormatVersion),
   id: Schema.NonEmptyString,
   revision: NonNegativeInt,
   definition: DefinitionReference,
