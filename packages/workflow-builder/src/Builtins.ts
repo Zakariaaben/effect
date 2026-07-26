@@ -96,8 +96,7 @@ export const PlanReference = Schema.Struct({
  */
 export type PlanReference = Schema.Schema.Type<typeof PlanReference>
 
-const output = <S extends Port.PayloadSchema>(schema: S) =>
-  Port.output(schema, { contract: Port.AnyContract })
+const output = <S extends Port.PayloadSchema>(schema: S) => Port.output(schema, { contract: Port.AnyContract })
 
 /**
  * Exclusive boolean branch.
@@ -136,10 +135,12 @@ export const Switch = Node.make("workflow/switch", {
   version: Version,
   description: "Routes control flow to the first matching case, or 'default'",
   config: Schema.Struct({
-    cases: Schema.NonEmptyArray(Schema.Struct({
-      name: Schema.NonEmptyString,
-      condition: Expression.Expression
-    }).annotate({ parseOptions: strictParseOptions }))
+    cases: Schema.NonEmptyArray(
+      Schema.Struct({
+        name: Schema.NonEmptyString,
+        condition: Expression.Expression
+      }).annotate({ parseOptions: strictParseOptions })
+    )
   }).annotate({ parseOptions: strictParseOptions }),
   outcomes: (config) => [...config.cases.map((c) => c.name), "default"]
 }).annotate(Kind, "switch")
@@ -249,8 +250,7 @@ export const HumanTask = Node.make("workflow/humanTask", {
   outputs: {
     output: output(Schema.Json)
   },
-  outcomes: (config) =>
-    config.dueInMillis === undefined ? config.outcomes : [...config.outcomes, "expired"]
+  outcomes: (config) => config.dueInMillis === undefined ? config.outcomes : [...config.outcomes, "expired"]
 }).annotate(Kind, "humanTask")
 
 /**

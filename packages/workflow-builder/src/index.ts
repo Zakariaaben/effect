@@ -17,17 +17,17 @@ export * as Compiler from "./Compiler.ts"
 /**
  * @since 4.0.0
  */
-export * as Expression from "./Expression.ts"
-
-/**
- * @since 4.0.0
- */
 export * as Diagnostic from "./Diagnostic.ts"
 
 /**
  * @since 4.0.0
  */
 export * as Engine from "./Engine.ts"
+
+/**
+ * @since 4.0.0
+ */
+export * as Expression from "./Expression.ts"
 
 /**
  * @since 4.0.0

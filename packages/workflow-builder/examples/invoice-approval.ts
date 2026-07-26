@@ -171,7 +171,11 @@ const handlers = registry.toLayer(registry.of({
 const webCrypto = Crypto.make({
   randomBytes: (size) => globalThis.crypto.getRandomValues(new Uint8Array(size)),
   digest: (algorithm, data) =>
-    Effect.promise(() => globalThis.crypto.subtle.digest(algorithm, data as Uint8Array<ArrayBuffer>).then((buffer) => new Uint8Array(buffer)))
+    Effect.promise(() =>
+      globalThis.crypto.subtle.digest(algorithm, data as Uint8Array<ArrayBuffer>).then((buffer) =>
+        new Uint8Array(buffer)
+      )
+    )
 })
 
 const EngineLive = Engine.layer(definition).pipe(

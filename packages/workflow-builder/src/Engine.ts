@@ -38,9 +38,9 @@ import * as HumanTasks from "./HumanTasks.ts"
 import * as Json from "./internal/json.ts"
 import * as Node from "./Node.ts"
 import * as Plan from "./Plan.ts"
+import * as PlanStore from "./PlanStore.ts"
 import * as Policy from "./Policy.ts"
 import type * as Port from "./Port.ts"
-import * as PlanStore from "./PlanStore.ts"
 import * as Registry from "./Registry.ts"
 import type * as Workflow from "./Workflow.ts"
 
@@ -376,9 +376,7 @@ const decodeConfig = (
       errors: "all",
       onExcessProperty: "error"
     })(node.node.config).pipe(
-      Effect.catchCause((cause) =>
-        Effect.fail(fault(node.node.id, "configuration", Cause.pretty(cause)))
-      )
+      Effect.catchCause((cause) => Effect.fail(fault(node.node.id, "configuration", Cause.pretty(cause))))
     )
   )
 
@@ -492,9 +490,7 @@ const resolveInputs = (
     const inputs: Record<string, unknown> = {}
     for (const portName of Object.keys(node.definition.inputs).sort()) {
       const port = node.definition.inputs[portName]!
-      const edges = node.incoming.filter((edge) =>
-        edge.target.kind === "NodeInput" && edge.target.port === portName
-      )
+      const edges = node.incoming.filter((edge) => edge.target.kind === "NodeInput" && edge.target.port === portName)
       const live: Array<Schema.Json> = []
       for (const edge of edges) {
         const value = yield* liveEdgeValue(context, node.node.id, edge)
@@ -1061,7 +1057,9 @@ const runBuiltin = (
         const concurrency = cfg.mode === "parallel" ? cfg.concurrency ?? "unbounded" : 1
 
         const results = yield* Effect.forEach(
-          items.map((item, index) => [item, index] as const),
+          items.map((item, index) =>
+            [item, index] as const
+          ),
           ([item, index]) =>
             Effect.gen(function*() {
               const input = cfg.input === undefined
@@ -1279,5 +1277,4 @@ export const layer = <W extends Workflow.Any>(
   | PlanStore.PlanStore
   | Registry.HandlerRegistry
   | HumanTasks.HumanTasks
-> =>
-  Run.toLayer((payload, executionId) => interpret(definition, options, payload, executionId)) as any
+> => Run.toLayer((payload, executionId) => interpret(definition, options, payload, executionId)) as any
