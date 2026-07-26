@@ -23,28 +23,21 @@ import * as Schema from "effect/Schema"
 import * as DurableDeferred from "effect/unstable/workflow/DurableDeferred"
 import * as WorkflowEngine from "effect/unstable/workflow/WorkflowEngine"
 import * as Json from "./internal/json.ts"
-
-const strictParseOptions = { onExcessProperty: "error" } as const
+import * as Plan from "./Plan.ts"
 
 /**
  * The decision recorded when a work item concludes.
  *
  * **Details**
  *
- * This is also the success schema of the durable deferred the engine awaits,
- * so the decision value — not the task record — is the replayed authority for
- * the run.
+ * This is {@link Plan.Decision}: the same wire vocabulary every externally
+ * completed node uses, so the decision value — not the task record — is the
+ * replayed authority for the run.
  *
  * @category schemas
  * @since 4.0.0
  */
-export const Decision = Schema.Struct({
-  outcome: Schema.NonEmptyString,
-  output: Schema.Json
-}).annotate({
-  identifier: "WorkflowTaskDecision",
-  parseOptions: strictParseOptions
-})
+export const Decision = Plan.Decision
 
 /**
  * The decoded type of {@link Decision}.
@@ -52,7 +45,7 @@ export const Decision = Schema.Struct({
  * @category models
  * @since 4.0.0
  */
-export type Decision = Schema.Schema.Type<typeof Decision>
+export type Decision = Plan.Decision
 
 /**
  * The outcome recorded when an expiration deadline wins the decision race.
@@ -60,7 +53,7 @@ export type Decision = Schema.Schema.Type<typeof Decision>
  * @category constants
  * @since 4.0.0
  */
-export const ExpiredOutcome = "expired" as const
+export const ExpiredOutcome = Plan.ExpiredOutcome
 
 /**
  * Lifecycle state of a work item.

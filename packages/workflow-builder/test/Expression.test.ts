@@ -257,12 +257,15 @@ describe("Expression", () => {
         )
       })
 
-      assert.deepStrictEqual(sorted(Expression.references(expression)), sorted([
-        ["input", "name"],
-        ["nodes", "fetch", "value"],
-        ["input", "items", 0],
-        ["input", "nul"]
-      ]))
+      assert.deepStrictEqual(
+        sorted(Expression.references(expression)),
+        sorted([
+          ["input", "name"],
+          ["nodes", "fetch", "value"],
+          ["input", "items", 0],
+          ["input", "nul"]
+        ])
+      )
     })
 
     it("returns the reference of a bare Ref and nothing for literals", () => {

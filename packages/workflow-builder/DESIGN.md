@@ -11,11 +11,16 @@ a hosted workflow product and not a second durable-execution runtime.
 
 - Applications own a versioned **vocabulary**: node kinds with schema-typed
   configuration, ports, failures, and handlers; a link policy; admission
-  limits; and the curated set of engine built-ins their end users may
-  compose.
+  limits; a contract catalog naming the data types the platform speaks; and
+  the curated set of engine built-ins their end users may compose.
 - End users own **plans**: portable JSON documents wiring node instances with
   data edges, expressions, outcome-routed control edges, bindings, and
-  per-node policy. Plans never contain code.
+  per-node policy. Plans never contain code. When the definition leaves a
+  boundary side open, the plan also owns that side of the workflow's
+  interface — named, contract-typed inputs and outputs — because only its
+  author knows them. A side declared in code is closed and fully typed
+  instead; both modes share one compiler, one resolved boundary, and one
+  engine.
 - The **compiler** admits a complete plan in one pass, returning every
   independent diagnostic with a path into the document, and produces an
   immutable compiled graph plus a canonical fingerprint free of presentation
@@ -184,6 +189,22 @@ interpreter branches on is either pinned or recorded:
 For-each freezes its item set at activation from a recorded evaluation, and
 array index is member identity: completion order cannot change meaning, and
 results aggregate in input order.
+
+### External completion
+
+The engine's waiting primitive is not "a human": it is a **durable external
+decision** — an opaque token handed out by a registration step, resolved
+first-wins by whoever the application authorizes, optionally raced by an
+idempotent absolute deadline. Any registered node kind opts in with
+`external: true`: its handler becomes the registration step (receiving
+`decisionToken` in its context, retried under the normal node policy), and
+its settlement is the decision's outcome with the payload on the reserved
+`decision` output. `workflow/humanTask` is deliberately implemented as a
+profile of this primitive — registration creates a `HumanTasks` work item and
+expiry updates its projection — which keeps "human" concerns (claiming,
+forms, directories, escalation) in the application-owned service where they
+belong while e-signature envelopes, payment webhooks, mail gateways, and
+legacy workers use the same machinery.
 
 ### Services
 

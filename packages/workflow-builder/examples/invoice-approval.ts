@@ -58,13 +58,13 @@ const registry = Registry.make(
   Builtins.Fail
 )
 
+// The platform declares no workflow boundary in code: every end-user plan
+// owns its interface, typed through this contract catalog (open boundary).
 const definition = Workflow.make("app/invoice-approval", {
   version: "1.0.0",
-  inputs: {
-    document: Port.output(Schema.String, { contract: "app/document-url" })
-  },
-  outputs: {
-    archiveId: Port.input(Schema.String, { contract: "app/archive-id", required: false })
+  contracts: {
+    "app/document-url": Schema.String,
+    "app/archive-id": Schema.String
   },
   nodes: registry,
   linkPolicy: LinkPolicy.allowAll,
@@ -80,6 +80,8 @@ const plan = {
   id: "invoice-approval",
   revision: 1,
   definition: { id: "app/invoice-approval", version: "1.0.0" },
+  inputs: [{ name: "document", contract: "app/document-url" }],
+  outputs: [{ name: "archiveId", contract: "app/archive-id" }],
   nodes: [
     { id: "scan", type: "invoice/ocr", version: "1.0.0", config: {} },
     {

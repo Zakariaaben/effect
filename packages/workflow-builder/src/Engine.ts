@@ -609,7 +609,8 @@ const nodeAttempt = (
   context: RunContext,
   node: Compiler.CompiledNode,
   attempt: number,
-  inputs: Record<string, unknown>
+  inputs: Record<string, unknown>,
+  decisionToken: string | undefined
 ): Effect.Effect<AttemptOutcome, EngineFault, Durable> => {
   const attemptMillis = context.compiled.nodes.get(node.node.id)!.policy.timeouts?.attemptMillis
   const activity = Activity.make({
@@ -639,7 +640,8 @@ const nodeAttempt = (
         nodeId: node.node.id,
         nodeInstanceId: durableName(context.executionId, node.node.id),
         attempt,
-        idempotencyKey
+        idempotencyKey,
+        decisionToken
       }
       const invocation = entry.handler({
         config: config as never,
@@ -687,7 +689,8 @@ const errorRouted = (node: Compiler.CompiledNode): boolean =>
 const runApplicationNode = (
   context: RunContext,
   node: Compiler.CompiledNode,
-  inputs: Record<string, unknown>
+  inputs: Record<string, unknown>,
+  decisionToken?: string
 ): Effect.Effect<Settlement, RunFailure, Durable> =>
   Effect.gen(function*() {
     const retry = node.policy.retry ?? Policy.defaultRetry
@@ -698,7 +701,7 @@ const runApplicationNode = (
 
     let attempt = 1
     while (true) {
-      const outcome = yield* nodeAttempt(context, node, attempt, inputs)
+      const outcome = yield* nodeAttempt(context, node, attempt, inputs, decisionToken)
 
       if (outcome._tag === "Succeeded") {
         return completed(Plan.DefaultOutcome, outcome.outputs)
@@ -744,6 +747,81 @@ const runApplicationNode = (
       }
       attempt++
     }
+  })
+
+// ----------------------------------------------------------------------------
+// Externally completed nodes
+// ----------------------------------------------------------------------------
+
+/**
+ * The durable deferred carrying an external node's decision.
+ *
+ * @category decisions
+ * @since 4.0.0
+ */
+export const decisionDeferred = (
+  nodeId: string
+): DurableDeferred.DurableDeferred<typeof Plan.Decision> =>
+  DurableDeferred.make(durableName("decision", nodeId), { success: Plan.Decision })
+
+const scheduleExpiry = (
+  deferred: DurableDeferred.DurableDeferred<typeof Plan.Decision>,
+  token: DurableDeferred.Token,
+  nodeId: string,
+  wakeUpMillis: number
+): Effect.Effect<void, never, Durable> =>
+  DurableClock.schedule(deferred, {
+    token,
+    scheduleId: durableName("decision", nodeId, "deadline"),
+    wakeUp: DateTime.makeUnsafe(wakeUpMillis),
+    value: { outcome: Plan.ExpiredOutcome, output: null }
+  }) as Effect.Effect<void, never, Durable>
+
+const awaitDecision = (
+  node: Compiler.CompiledNode,
+  deferred: DurableDeferred.DurableDeferred<typeof Plan.Decision>
+): Effect.Effect<Plan.Decision, EngineFault, any> =>
+  Effect.gen(function*() {
+    const decision = yield* DurableDeferred.await(deferred)
+    if (!node.outcomes.includes(decision.outcome)) {
+      return yield* Effect.fail(fault(
+        node.node.id,
+        "decision",
+        `Node decided with unknown outcome '${decision.outcome}'`
+      ))
+    }
+    return decision
+  })
+
+/**
+ * Runs an externally completed application node: the handler registers the
+ * decision token with the outside world (under the normal retry policy), the
+ * optional deadline is armed idempotently, and the node's settlement is the
+ * first-wins decision, exposed on the reserved `decision` output.
+ */
+const runExternalNode = (
+  context: RunContext,
+  node: Compiler.CompiledNode,
+  inputs: Record<string, unknown>
+): Effect.Effect<Settlement, RunFailure, any> =>
+  Effect.gen(function*() {
+    const deferred = decisionDeferred(node.node.id)
+    const token = yield* DurableDeferred.token(deferred)
+
+    const registration = yield* runApplicationNode(context, node, inputs, token)
+    if (registration._tag === "Completed" && registration.outcome === Plan.ErrorOutcome) {
+      return registration
+    }
+
+    const config = yield* decodeConfig(node)
+    const deadlineMillis = node.definition.external?.deadline?.(config as never)
+    if (deadlineMillis !== undefined) {
+      const armedAt = yield* observeMillis(durableName("decision", node.node.id, "armed"))
+      yield* scheduleExpiry(deferred, token, node.node.id, armedAt + deadlineMillis)
+    }
+
+    const decision = yield* awaitDecision(node, deferred)
+    return completed(decision.outcome, { [Plan.DecisionOutput]: decision.output })
   })
 
 // ----------------------------------------------------------------------------
@@ -961,9 +1039,10 @@ const runBuiltin = (
             )
           )
 
-        const deferred = DurableDeferred.make(durableName("task", nodeId), {
-          success: HumanTasks.Decision
-        })
+        // The human task is a profile of the external-decision primitive:
+        // registration creates the work item, the decision resolves the same
+        // deferred every external node uses, and expiry races it first-wins.
+        const deferred = decisionDeferred(nodeId)
         const token = yield* DurableDeferred.token(deferred)
         const handle = yield* Activity.make({
           name: durableName("task", nodeId, "create"),
@@ -990,22 +1069,10 @@ const runBuiltin = (
           })
         })
         if (handle.dueAtMillis !== null) {
-          yield* DurableClock.schedule(deferred, {
-            token,
-            scheduleId: durableName("task", nodeId, "due"),
-            wakeUp: DateTime.makeUnsafe(handle.dueAtMillis),
-            value: { outcome: HumanTasks.ExpiredOutcome, output: null }
-          })
+          yield* scheduleExpiry(deferred, token, nodeId, handle.dueAtMillis)
         }
-        const decision = yield* DurableDeferred.await(deferred)
-        if (!node.outcomes.includes(decision.outcome)) {
-          return yield* Effect.fail(fault(
-            nodeId,
-            "decision",
-            `Task decided with unknown outcome '${decision.outcome}'`
-          ))
-        }
-        if (decision.outcome === HumanTasks.ExpiredOutcome && cfg.dueInMillis !== undefined) {
+        const decision = yield* awaitDecision(node, deferred)
+        if (decision.outcome === Plan.ExpiredOutcome && cfg.dueInMillis !== undefined) {
           yield* Activity.make({
             name: durableName("task", nodeId, "expired"),
             execute: context.humanTasks.expire(handle.taskId).pipe(Effect.ignore)
@@ -1110,7 +1177,9 @@ const runNode = (
     if (resolved._tag === "DeadPath") {
       return yield* settle(context, nodeId, skipped)
     }
-    const settlement = yield* runApplicationNode(context, node, resolved.inputs)
+    const settlement = node.definition.external !== undefined
+      ? yield* runExternalNode(context, node, resolved.inputs)
+      : yield* runApplicationNode(context, node, resolved.inputs)
     yield* settle(context, nodeId, settlement)
   })
 
@@ -1119,8 +1188,7 @@ const collectOutputs = (
 ): Effect.Effect<Record<string, Schema.Json>, EngineFault> =>
   Effect.gen(function*() {
     const outputs: Record<string, Schema.Json> = {}
-    for (const name of Object.keys(context.definition.outputs).sort()) {
-      const port = context.definition.outputs[name]!
+    for (const [name, port] of context.compiled.boundary.outputs) {
       const edges = context.compiled.dataEdges.filter((edge) =>
         edge.target.kind === "WorkflowOutput" && edge.target.port === name
       )
@@ -1201,17 +1269,20 @@ const interpret = (
       )
     )
 
-    // Validate the run input against every declared workflow input port.
+    // Validate the run input against the resolved boundary, whichever side —
+    // definition code or the plan itself — declared it.
     if (payload.input === null || typeof payload.input !== "object" || Array.isArray(payload.input)) {
       return yield* Effect.fail(fault(undefined, "input", "Run input must be a JSON object"))
     }
     const input = payload.input as Schema.JsonObject
-    for (const name of Object.keys(definition.inputs).sort()) {
-      const port = definition.inputs[name]!
+    for (const [name, entry] of compiled.boundary.inputs) {
       if (!Object.prototype.hasOwnProperty.call(input, name)) {
-        return yield* Effect.fail(fault(undefined, "input", `Missing workflow input '${name}'`))
+        if (entry.required) {
+          return yield* Effect.fail(fault(undefined, "input", `Missing workflow input '${name}'`))
+        }
+        continue
       }
-      yield* Schema.decodeUnknownEffect(port.schema)(input[name]).pipe(
+      yield* erase(Schema.decodeUnknownEffect(entry.port.schema)(input[name])).pipe(
         Effect.catchCause((cause) =>
           Effect.fail(fault(undefined, "input", `Workflow input '${name}': ${Cause.pretty(cause)}`))
         )

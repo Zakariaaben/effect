@@ -36,6 +36,102 @@ export const ErrorOutcome = "error" as const
 export const DefaultOutcome = "done" as const
 
 /**
+ * The reserved output name exposing an external node's accepted decision.
+ *
+ * @category constants
+ * @since 4.0.0
+ */
+export const DecisionOutput = "decision" as const
+
+/**
+ * The outcome recorded when a decision deadline wins over completion.
+ *
+ * @category constants
+ * @since 4.0.0
+ */
+export const ExpiredOutcome = "expired" as const
+
+/**
+ * The decision concluding an externally completed node.
+ *
+ * **Details**
+ *
+ * This is wire vocabulary shared by the engine (the durable deferred an
+ * external node awaits), the human-task service, and any application endpoint
+ * completing work through a decision token.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const Decision = Schema.Struct({
+  outcome: Schema.NonEmptyString,
+  output: Schema.Json
+}).annotate({
+  identifier: "WorkflowDecision",
+  parseOptions: strictParseOptions
+})
+
+/**
+ * The decoded type of {@link Decision}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type Decision = Schema.Schema.Type<typeof Decision>
+
+/**
+ * A workflow input declared by the plan itself (open-boundary mode).
+ *
+ * **Details**
+ *
+ * When the workflow definition declares no input ports in code, each plan
+ * owns its input interface: named, contract-typed values the run must be
+ * started with. The schema behind a contract comes from the definition's
+ * contract catalog, defaulting to arbitrary JSON.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const BoundaryInput = Schema.Struct({
+  name: Schema.NonEmptyString,
+  contract: Schema.NonEmptyString,
+  required: Schema.optionalKey(Schema.Boolean)
+}).annotate({
+  identifier: "WorkflowBoundaryInput",
+  parseOptions: strictParseOptions
+})
+
+/**
+ * The decoded type of {@link BoundaryInput}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type BoundaryInput = Schema.Schema.Type<typeof BoundaryInput>
+
+/**
+ * A workflow output declared by the plan itself (open-boundary mode).
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const BoundaryOutput = Schema.Struct({
+  name: Schema.NonEmptyString,
+  contract: Schema.NonEmptyString
+}).annotate({
+  identifier: "WorkflowBoundaryOutput",
+  parseOptions: strictParseOptions
+})
+
+/**
+ * The decoded type of {@link BoundaryOutput}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type BoundaryOutput = Schema.Schema.Type<typeof BoundaryOutput>
+
+/**
  * Join semantics over a node's incoming edges.
  *
  * **Details**
@@ -350,6 +446,8 @@ export const Plan = Schema.Struct({
   id: Schema.NonEmptyString,
   revision: NonNegativeInt,
   definition: DefinitionReference,
+  inputs: Schema.optionalKey(Schema.Array(BoundaryInput)),
+  outputs: Schema.optionalKey(Schema.Array(BoundaryOutput)),
   nodes: Schema.Array(PlanNode),
   edges: Schema.Array(PlanEdge),
   metadata: Schema.optionalKey(Schema.Json)

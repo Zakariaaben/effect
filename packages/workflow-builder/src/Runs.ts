@@ -9,11 +9,13 @@
  * @since 4.0.0
  */
 import * as Effect from "effect/Effect"
+import * as Exit from "effect/Exit"
 import * as Option from "effect/Option"
 import type * as Schema from "effect/Schema"
 import * as DurableDeferred from "effect/unstable/workflow/DurableDeferred"
 import type * as WorkflowEngine from "effect/unstable/workflow/WorkflowEngine"
 import * as Engine from "./Engine.ts"
+import * as Plan from "./Plan.ts"
 import * as PlanStore from "./PlanStore.ts"
 
 /**
@@ -216,3 +218,36 @@ export const signal = (
   })
   return DurableDeferred.succeed(deferred, { token, value: payload })
 }
+
+const decisionCodec = DurableDeferred.make("workflow-builder/decision", {
+  success: Plan.Decision
+})
+
+/**
+ * Completes an externally completed node through its decision token.
+ *
+ * **Details**
+ *
+ * Resolution is first-wins and durable: the returned decision is the
+ * canonical one, which may differ from the submitted decision when a
+ * deadline or a competing completion won the race. The token is an address,
+ * not a capability — the application authenticates and authorizes callers
+ * (webhooks, workers, gateways) before invoking this.
+ *
+ * @category decisions
+ * @since 4.0.0
+ */
+export const resolveDecision = (
+  token: string,
+  decision: Plan.Decision
+): Effect.Effect<Plan.Decision, never, WorkflowEngine.WorkflowEngine> =>
+  DurableDeferred.resolve(decisionCodec, {
+    token: token as DurableDeferred.Token,
+    exit: Exit.succeed(decision)
+  }).pipe(
+    Effect.flatMap((canonical) =>
+      Exit.isSuccess(canonical)
+        ? Effect.succeed(canonical.value)
+        : Effect.die(new Error("Decision deferreds only carry successful decisions"))
+    )
+  )

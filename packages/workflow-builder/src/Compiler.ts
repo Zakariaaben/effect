@@ -57,7 +57,9 @@ export const Codes = {
   InvalidExpression: "InvalidExpression",
   DuplicateSignal: "DuplicateSignal",
   ReservedTypeNamespace: "ReservedTypeNamespace",
-  InvalidJoin: "InvalidJoin"
+  InvalidJoin: "InvalidJoin",
+  ClosedBoundary: "ClosedBoundary",
+  DuplicateBoundaryPort: "DuplicateBoundaryPort"
 } as const
 
 /**
@@ -122,6 +124,36 @@ export interface CompiledNode {
 }
 
 /**
+ * A resolved workflow input port with its run-start requiredness.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export interface BoundaryInputPort {
+  readonly port: Port.Output.Any
+  readonly required: boolean
+}
+
+/**
+ * The run interface a compiled plan executes with.
+ *
+ * **Details**
+ *
+ * The boundary is resolved per side: from the definition's declared ports
+ * when that side is closed, or from the plan's own declarations (with
+ * schemas looked up in the definition's contract catalog) when it is open.
+ * Downstream consumers — edge resolution, fingerprinting, and the engine —
+ * read only this resolved form and never the raw declarations.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export interface CompiledBoundary {
+  readonly inputs: ReadonlyMap<string, BoundaryInputPort>
+  readonly outputs: ReadonlyMap<string, Port.Input.Any>
+}
+
+/**
  * An admitted plan with resolved definitions, ports, configuration, and a
  * deterministic topological schedule.
  *
@@ -137,6 +169,7 @@ export interface CompiledNode {
 export interface CompiledPlan<out W extends Workflow.Any = Workflow.Any> {
   readonly definition: W
   readonly plan: Plan.Plan
+  readonly boundary: CompiledBoundary
   readonly nodes: ReadonlyMap<string, CompiledNode>
   readonly dataEdges: ReadonlyArray<CompiledDataEdge>
   readonly controlEdges: ReadonlyArray<CompiledControlEdge>
@@ -300,6 +333,15 @@ const validateDefinition = (
         diagnostics,
         Codes.InvalidDefinition,
         `Node '${definitionKey}' declares an output named '${Plan.ErrorOutcome}', which is reserved for its typed failure`,
+        [],
+        { definitionKey }
+      )
+    }
+    if (node.external !== undefined && Object.keys(node.outputs).length > 0) {
+      add(
+        diagnostics,
+        Codes.InvalidDefinition,
+        `External node '${definitionKey}' must not declare output ports; it exposes the reserved '${Plan.DecisionOutput}' output`,
         [],
         { definitionKey }
       )
@@ -568,6 +610,85 @@ export const compile = Effect.fnUntraced(function*<W extends Workflow.Any>(
     return yield* fail(diagnostics)
   }
 
+  // --------------------------------------------------------------------------
+  // Boundary resolution (per side: definition-declared = closed, else open)
+  // --------------------------------------------------------------------------
+
+  const contractSchema = (contract: string): Port.PayloadSchema =>
+    getOwn(definition.contracts, contract) ?? (Schema.Json as Port.PayloadSchema)
+
+  const boundaryInputs = new Map<string, BoundaryInputPort>()
+  const boundaryOutputs = new Map<string, Port.Input.Any>()
+
+  const inputsClosed = Object.keys(definition.inputs).length > 0
+  if (inputsClosed) {
+    if (plan.inputs !== undefined) {
+      add(
+        diagnostics,
+        Codes.ClosedBoundary,
+        "The workflow definition declares its inputs in code; the plan cannot declare its own",
+        ["inputs"]
+      )
+    }
+    for (const name of Object.keys(definition.inputs).sort(compareCodeUnits)) {
+      boundaryInputs.set(name, Object.freeze({ port: definition.inputs[name]!, required: true }))
+    }
+  } else if (plan.inputs !== undefined) {
+    for (let index = 0; index < plan.inputs.length; index++) {
+      const declared = plan.inputs[index]!
+      if (boundaryInputs.has(declared.name)) {
+        add(
+          diagnostics,
+          Codes.DuplicateBoundaryPort,
+          `Duplicate workflow input '${declared.name}'`,
+          ["inputs", index, "name"],
+          { name: declared.name }
+        )
+        continue
+      }
+      boundaryInputs.set(
+        declared.name,
+        Object.freeze({
+          port: Port.output(contractSchema(declared.contract), { contract: declared.contract }),
+          required: declared.required ?? true
+        })
+      )
+    }
+  }
+
+  const outputsClosed = Object.keys(definition.outputs).length > 0
+  if (outputsClosed) {
+    if (plan.outputs !== undefined) {
+      add(
+        diagnostics,
+        Codes.ClosedBoundary,
+        "The workflow definition declares its outputs in code; the plan cannot declare its own",
+        ["outputs"]
+      )
+    }
+    for (const name of Object.keys(definition.outputs).sort(compareCodeUnits)) {
+      boundaryOutputs.set(name, definition.outputs[name]!)
+    }
+  } else if (plan.outputs !== undefined) {
+    for (let index = 0; index < plan.outputs.length; index++) {
+      const declared = plan.outputs[index]!
+      if (boundaryOutputs.has(declared.name)) {
+        add(
+          diagnostics,
+          Codes.DuplicateBoundaryPort,
+          `Duplicate workflow output '${declared.name}'`,
+          ["outputs", index, "name"],
+          { name: declared.name }
+        )
+        continue
+      }
+      boundaryOutputs.set(
+        declared.name,
+        Port.input(contractSchema(declared.contract), { contract: declared.contract, required: false })
+      )
+    }
+  }
+
   const mutableNodes = new Map<string, MutableCompiledNode>()
   const nodeIds = new Set<string>()
   for (let index = 0; index < plan.nodes.length; index++) {
@@ -675,6 +796,20 @@ export const compile = Effect.fnUntraced(function*<W extends Workflow.Any>(
     if (valid) {
       compiledNode.outcomes = Object.freeze([...seen])
     }
+
+    const deadline = compiledNode.definition.external?.deadline
+    if (deadline !== undefined) {
+      const millis = deadline(config.success as never)
+      if (millis !== undefined && !compiledNode.outcomes.includes(Plan.ExpiredOutcome)) {
+        add(
+          diagnostics,
+          Codes.InvalidOutcomes,
+          `Node '${compiledNode.node.id}' derives a decision deadline but does not declare the '${Plan.ExpiredOutcome}' outcome`,
+          ["nodes", compiledNode.index],
+          { nodeId: compiledNode.node.id }
+        )
+      }
+    }
   }
 
   // --------------------------------------------------------------------------
@@ -749,8 +884,9 @@ export const compile = Effect.fnUntraced(function*<W extends Workflow.Any>(
       const portName = reference[2]
       if (portName !== undefined) {
         const portKey = typeof portName === "number" ? String(portName) : portName
-        const isErrorPort = portKey === Plan.ErrorOutcome && referenced.errorOutcome
-        if (!isErrorPort && getOwn(referenced.definition.outputs, portKey) === undefined) {
+        const isReservedPort = (portKey === Plan.ErrorOutcome && referenced.errorOutcome) ||
+          (portKey === Plan.DecisionOutput && referenced.definition.external !== undefined)
+        if (!isReservedPort && getOwn(referenced.definition.outputs, portKey) === undefined) {
           add(
             diagnostics,
             Codes.InvalidExpression,
@@ -841,12 +977,21 @@ export const compile = Effect.fnUntraced(function*<W extends Workflow.Any>(
     return port
   }
 
+  const decisionPort = Port.output(Schema.Json as Port.PayloadSchema, { contract: Port.AnyContract })
+
+  const reservedOutput = (node: MutableCompiledNode, output: string): Port.Output.Any | undefined =>
+    output === Plan.ErrorOutcome && node.errorOutcome
+      ? errorPort(node)
+      : output === Plan.DecisionOutput && node.definition.external !== undefined
+      ? decisionPort
+      : undefined
+
   const resolveSource = (
     source: Plan.SourceEndpoint,
     edgeIndex: number
   ): ResolvedSource | undefined => {
     if (source._tag === "WorkflowInput") {
-      const port = getOwn(definition.inputs, source.input)
+      const port = boundaryInputs.get(source.input)?.port
       if (port === undefined) {
         add(
           diagnostics,
@@ -877,7 +1022,7 @@ export const compile = Effect.fnUntraced(function*<W extends Workflow.Any>(
       return undefined
     }
     const declared = getOwn(node.definition.outputs, source.output)
-    const port = declared ?? (source.output === Plan.ErrorOutcome && node.errorOutcome ? errorPort(node) : undefined)
+    const port = declared ?? reservedOutput(node, source.output)
     if (port === undefined) {
       add(
         diagnostics,
@@ -906,7 +1051,7 @@ export const compile = Effect.fnUntraced(function*<W extends Workflow.Any>(
     edgeIndex: number
   ): ResolvedTarget | undefined => {
     if (target._tag === "WorkflowOutput") {
-      const port = getOwn(definition.outputs, target.output)
+      const port = boundaryOutputs.get(target.output)
       if (port === undefined) {
         add(
           diagnostics,
@@ -1177,7 +1322,7 @@ export const compile = Effect.fnUntraced(function*<W extends Workflow.Any>(
       )
     }
   }
-  for (const [name, port] of Object.entries(definition.outputs)) {
+  for (const [name, port] of boundaryOutputs) {
     validateTarget(
       port,
       storageKey("WorkflowOutput", name),
@@ -1206,8 +1351,8 @@ export const compile = Effect.fnUntraced(function*<W extends Workflow.Any>(
       )
     }
   }
-  for (const [name, port] of Object.entries(definition.inputs)) {
-    validateSource(port, storageKey("WorkflowInput", name), `workflow input '${name}'`, ["edges"])
+  for (const [name, entry] of boundaryInputs) {
+    validateSource(entry.port, storageKey("WorkflowInput", name), `workflow input '${name}'`, ["edges"])
   }
   for (const node of mutableNodes.values()) {
     for (const [name, port] of Object.entries(node.definition.outputs)) {
@@ -1275,9 +1420,21 @@ export const compile = Effect.fnUntraced(function*<W extends Workflow.Any>(
   for (const signal of Array.from(signals.keys()).sort(compareCodeUnits)) {
     orderedSignals.set(signal, signals.get(signal)!)
   }
+  const orderedBoundaryInputs = new Map<string, BoundaryInputPort>()
+  for (const name of Array.from(boundaryInputs.keys()).sort(compareCodeUnits)) {
+    orderedBoundaryInputs.set(name, boundaryInputs.get(name)!)
+  }
+  const orderedBoundaryOutputs = new Map<string, Port.Input.Any>()
+  for (const name of Array.from(boundaryOutputs.keys()).sort(compareCodeUnits)) {
+    orderedBoundaryOutputs.set(name, boundaryOutputs.get(name)!)
+  }
   const compiled = Object.freeze({
     definition,
     plan,
+    boundary: Object.freeze({
+      inputs: readonlyMap(orderedBoundaryInputs),
+      outputs: readonlyMap(orderedBoundaryOutputs)
+    }),
     nodes: readonlyMap(nodes),
     dataEdges: Object.freeze(compiledDataEdges),
     controlEdges: Object.freeze(compiledControlEdges),

@@ -94,6 +94,7 @@ export interface Definition<
   readonly description?: string | undefined
   readonly inputs: Inputs
   readonly outputs: Outputs
+  readonly contracts: Readonly<Record<string, Port.PayloadSchema>>
   readonly nodes: Nodes
   readonly linkPolicy: Policy
   readonly limits: Limits
@@ -292,21 +293,30 @@ const Proto = {
  * No link or resource policy is selected implicitly: callers must supply both
  * the authorization policy and admission limits as visible application code.
  *
+ * The boundary is decided per side. A side declared here — `inputs` or
+ * `outputs` with at least one port — is **closed**: every plan compiled
+ * against this definition shares that exact typed interface (code-first,
+ * static workflows). A side omitted is **open**: each plan declares its own
+ * named, contract-typed interface, and `contracts` maps contract names to
+ * the schemas that validate those values (end-user-composed workflows).
+ * Contracts absent from the catalog validate as arbitrary JSON.
+ *
  * @category constructors
  * @since 4.0.0
  */
 export const make = <
   const Id extends string,
   const Version extends string,
-  Inputs extends Port.Outputs,
-  Outputs extends Port.Inputs,
   Nodes extends Registry.Any,
-  Policy extends LinkPolicy.LinkPolicy<any, any>
+  Policy extends LinkPolicy.LinkPolicy<any, any>,
+  Inputs extends Port.Outputs = {},
+  Outputs extends Port.Inputs = {}
 >(id: Id, options: {
   readonly version: Version
   readonly description?: string | undefined
-  readonly inputs: Inputs
-  readonly outputs: Outputs
+  readonly inputs?: Inputs | undefined
+  readonly outputs?: Outputs | undefined
+  readonly contracts?: Readonly<Record<string, Port.PayloadSchema>> | undefined
   readonly nodes: Nodes
   readonly linkPolicy: Policy
   readonly limits: Limits
@@ -317,6 +327,7 @@ export const make = <
     description: options.description,
     inputs: Object.freeze({ ...options.inputs }),
     outputs: Object.freeze({ ...options.outputs }),
+    contracts: Object.freeze({ ...options.contracts }),
     nodes: options.nodes,
     linkPolicy: options.linkPolicy,
     limits: Object.freeze(new Limits({ ...options.limits })),

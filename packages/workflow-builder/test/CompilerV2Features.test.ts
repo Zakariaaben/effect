@@ -165,10 +165,13 @@ describe("CompilerV2Features", () => {
   describe("control edge outcomes", () => {
     it.effect("resolves the default 'done' outcome for untagged control edges", () =>
       Effect.gen(function*() {
-        const compiled = yield* Compiler.compile(definition, makePlan(
-          [stepNode("a"), stepNode("b")],
-          [controlEdge("a-b", "a", "b")]
-        ))
+        const compiled = yield* Compiler.compile(
+          definition,
+          makePlan(
+            [stepNode("a"), stepNode("b")],
+            [controlEdge("a-b", "a", "b")]
+          )
+        )
 
         assert.strictEqual(compiled.controlEdges.length, 1)
         assert.strictEqual(compiled.controlEdges[0]!.outcome, "done")
@@ -179,17 +182,23 @@ describe("CompilerV2Features", () => {
     it.effect("accepts declared branch outcomes and reports unknown ones with the available set", () =>
       Effect.gen(function*() {
         const gate = planNode("gate", "workflow/if", { condition: Expression.literal(true) })
-        const compiled = yield* Compiler.compile(definition, makePlan(
-          [gate, stepNode("then")],
-          [controlEdge("gate-then", "gate", "then", "true")]
-        ))
+        const compiled = yield* Compiler.compile(
+          definition,
+          makePlan(
+            [gate, stepNode("then")],
+            [controlEdge("gate-then", "gate", "then", "true")]
+          )
+        )
         assert.strictEqual(compiled.controlEdges[0]!.outcome, "true")
         assert.deepStrictEqual(compiled.nodes.get("gate")?.outcomes, ["true", "false"])
 
-        const error = yield* Effect.flip(Compiler.compile(definition, makePlan(
-          [gate, stepNode("then")],
-          [controlEdge("gate-then", "gate", "then", "maybe")]
-        )))
+        const error = yield* Effect.flip(Compiler.compile(
+          definition,
+          makePlan(
+            [gate, stepNode("then")],
+            [controlEdge("gate-then", "gate", "then", "maybe")]
+          )
+        ))
         assert.deepStrictEqual(codes(error), [Compiler.Codes.UnknownOutcome])
         assert.deepStrictEqual(error.diagnostics[0]!.details, {
           nodeId: "gate",
@@ -200,17 +209,23 @@ describe("CompilerV2Features", () => {
 
     it.effect("routes the reserved 'error' outcome only for declared failures", () =>
       Effect.gen(function*() {
-        const compiled = yield* Compiler.compile(definition, makePlan(
-          [planNode("risky", "Risky"), stepNode("handler")],
-          [controlEdge("on-error", "risky", "handler", "error")]
-        ))
+        const compiled = yield* Compiler.compile(
+          definition,
+          makePlan(
+            [planNode("risky", "Risky"), stepNode("handler")],
+            [controlEdge("on-error", "risky", "handler", "error")]
+          )
+        )
         assert.strictEqual(compiled.controlEdges[0]!.outcome, "error")
         assert.isTrue(compiled.nodes.get("risky")?.errorOutcome)
 
-        const error = yield* Effect.flip(Compiler.compile(definition, makePlan(
-          [stepNode("a"), stepNode("b")],
-          [controlEdge("on-error", "a", "b", "error")]
-        )))
+        const error = yield* Effect.flip(Compiler.compile(
+          definition,
+          makePlan(
+            [stepNode("a"), stepNode("b")],
+            [controlEdge("on-error", "a", "b", "error")]
+          )
+        ))
         assert.deepStrictEqual(codes(error), [Compiler.Codes.UnknownOutcome])
         assert.isFalse(compiled.nodes.get("handler")?.errorOutcome)
       }))
@@ -228,14 +243,17 @@ describe("CompilerV2Features", () => {
             { name: "low", condition: Expression.literal(true) }
           ]
         })
-        const compiled = yield* Compiler.compile(definition, makePlan(
-          [route, stepNode("h"), stepNode("l"), stepNode("d")],
-          [
-            controlEdge("route-h", "route", "h", "high"),
-            controlEdge("route-l", "route", "l", "low"),
-            controlEdge("route-d", "route", "d", "default")
-          ]
-        ))
+        const compiled = yield* Compiler.compile(
+          definition,
+          makePlan(
+            [route, stepNode("h"), stepNode("l"), stepNode("d")],
+            [
+              controlEdge("route-h", "route", "h", "high"),
+              controlEdge("route-l", "route", "l", "low"),
+              controlEdge("route-d", "route", "d", "default")
+            ]
+          )
+        )
 
         assert.deepStrictEqual(compiled.nodes.get("route")?.outcomes, ["high", "low", "default"])
         assert.strictEqual(compiled.controlEdges.length, 3)
@@ -243,43 +261,58 @@ describe("CompilerV2Features", () => {
 
     it.effect("rejects duplicate case names and cases shadowing 'default'", () =>
       Effect.gen(function*() {
-        const duplicate = yield* Effect.flip(Compiler.compile(definition, makePlan([
-          planNode("route", "workflow/switch", {
-            cases: [
-              { name: "dup", condition: Expression.literal(true) },
-              { name: "dup", condition: Expression.literal(false) }
-            ]
-          })
-        ], [])))
+        const duplicate = yield* Effect.flip(Compiler.compile(
+          definition,
+          makePlan([
+            planNode("route", "workflow/switch", {
+              cases: [
+                { name: "dup", condition: Expression.literal(true) },
+                { name: "dup", condition: Expression.literal(false) }
+              ]
+            })
+          ], [])
+        ))
         assert.deepStrictEqual(codes(duplicate), [Compiler.Codes.InvalidOutcomes])
 
-        const shadowed = yield* Effect.flip(Compiler.compile(definition, makePlan([
-          planNode("route", "workflow/switch", {
-            cases: [{ name: "default", condition: Expression.literal(true) }]
-          })
-        ], [])))
+        const shadowed = yield* Effect.flip(Compiler.compile(
+          definition,
+          makePlan([
+            planNode("route", "workflow/switch", {
+              cases: [{ name: "default", condition: Expression.literal(true) }]
+            })
+          ], [])
+        ))
         assert.deepStrictEqual(codes(shadowed), [Compiler.Codes.InvalidOutcomes])
       }))
 
     it.effect("makes human task decisions routable, adding 'expired' only with a deadline", () =>
       Effect.gen(function*() {
         const base = { title: "Review order", outcomes: ["approve", "reject"] }
-        const decided = yield* Compiler.compile(definition, makePlan(
-          [planNode("review", "workflow/humanTask", base), stepNode("approved")],
-          [controlEdge("on-approve", "review", "approved", "approve")]
-        ))
+        const decided = yield* Compiler.compile(
+          definition,
+          makePlan(
+            [planNode("review", "workflow/humanTask", base), stepNode("approved")],
+            [controlEdge("on-approve", "review", "approved", "approve")]
+          )
+        )
         assert.deepStrictEqual(decided.nodes.get("review")?.outcomes, ["approve", "reject"])
 
-        const expiring = yield* Compiler.compile(definition, makePlan(
-          [planNode("review", "workflow/humanTask", { ...base, dueInMillis: 60_000 }), stepNode("escalate")],
-          [controlEdge("on-expired", "review", "escalate", "expired")]
-        ))
+        const expiring = yield* Compiler.compile(
+          definition,
+          makePlan(
+            [planNode("review", "workflow/humanTask", { ...base, dueInMillis: 60_000 }), stepNode("escalate")],
+            [controlEdge("on-expired", "review", "escalate", "expired")]
+          )
+        )
         assert.deepStrictEqual(expiring.nodes.get("review")?.outcomes, ["approve", "reject", "expired"])
 
-        const error = yield* Effect.flip(Compiler.compile(definition, makePlan(
-          [planNode("review", "workflow/humanTask", base), stepNode("escalate")],
-          [controlEdge("on-expired", "review", "escalate", "expired")]
-        )))
+        const error = yield* Effect.flip(Compiler.compile(
+          definition,
+          makePlan(
+            [planNode("review", "workflow/humanTask", base), stepNode("escalate")],
+            [controlEdge("on-expired", "review", "escalate", "expired")]
+          )
+        ))
         assert.deepStrictEqual(codes(error), [Compiler.Codes.UnknownOutcome])
       }))
   })
@@ -287,24 +320,30 @@ describe("CompilerV2Features", () => {
   describe("bindings", () => {
     it.effect("rejects bindings on undeclared input ports", () =>
       Effect.gen(function*() {
-        const error = yield* Effect.flip(Compiler.compile(definition, makePlan([
-          stepNode("a", {
-            bindings: {
-              value: Expression.literal("text"),
-              nope: Expression.literal(1)
-            }
-          })
-        ], [])))
+        const error = yield* Effect.flip(Compiler.compile(
+          definition,
+          makePlan([
+            stepNode("a", {
+              bindings: {
+                value: Expression.literal("text"),
+                nope: Expression.literal(1)
+              }
+            })
+          ], [])
+        ))
 
         assert.deepStrictEqual(codes(error), [Compiler.Codes.UnknownBindingInput])
       }))
 
     it.effect("rejects an input supplied by both a binding and a data edge", () =>
       Effect.gen(function*() {
-        const error = yield* Effect.flip(Compiler.compile(definition, makePlan(
-          [stepNode("src"), stepNode("b")],
-          [dataEdge("src-b", nodeOutput("src", "value"), nodeInput("b", "value"))]
-        )))
+        const error = yield* Effect.flip(Compiler.compile(
+          definition,
+          makePlan(
+            [stepNode("src"), stepNode("b")],
+            [dataEdge("src-b", nodeOutput("src", "value"), nodeInput("b", "value"))]
+          )
+        ))
 
         assert.deepStrictEqual(codes(error), [Compiler.Codes.ConflictingInputBinding])
       }))
@@ -327,46 +366,64 @@ describe("CompilerV2Features", () => {
 
     it.effect("rejects references to unknown nodes, own outputs, and unknown ports", () =>
       Effect.gen(function*() {
-        const unknownNode = yield* Effect.flip(Compiler.compile(definition, makePlan(
-          [stepNode("a"), boundStep(Expression.ref("nodes", "ghost", "value"))],
-          []
-        )))
+        const unknownNode = yield* Effect.flip(Compiler.compile(
+          definition,
+          makePlan(
+            [stepNode("a"), boundStep(Expression.ref("nodes", "ghost", "value"))],
+            []
+          )
+        ))
         assert.deepStrictEqual(codes(unknownNode), [Compiler.Codes.InvalidExpression])
 
-        const selfReference = yield* Effect.flip(Compiler.compile(definition, makePlan(
-          [boundStep(Expression.ref("nodes", "b", "value"))],
-          []
-        )))
+        const selfReference = yield* Effect.flip(Compiler.compile(
+          definition,
+          makePlan(
+            [boundStep(Expression.ref("nodes", "b", "value"))],
+            []
+          )
+        ))
         assert.deepStrictEqual(codes(selfReference), [Compiler.Codes.InvalidExpression])
 
-        const unknownPort = yield* Effect.flip(Compiler.compile(definition, makePlan(
-          [stepNode("a"), boundStep(Expression.ref("nodes", "a", "missing"))],
-          []
-        )))
+        const unknownPort = yield* Effect.flip(Compiler.compile(
+          definition,
+          makePlan(
+            [stepNode("a"), boundStep(Expression.ref("nodes", "a", "missing"))],
+            []
+          )
+        ))
         assert.deepStrictEqual(codes(unknownPort), [Compiler.Codes.InvalidExpression])
       }))
 
     it.effect("accepts the 'input' root unconditionally and rejects unknown roots", () =>
       Effect.gen(function*() {
-        const compiled = yield* Compiler.compile(definition, makePlan(
-          [boundStep(Expression.ref("input", "anything", "deep"))],
-          []
-        ))
+        const compiled = yield* Compiler.compile(
+          definition,
+          makePlan(
+            [boundStep(Expression.ref("input", "anything", "deep"))],
+            []
+          )
+        )
         assert.deepStrictEqual(compiled.nodes.get("b")?.dependencies, [])
 
-        const error = yield* Effect.flip(Compiler.compile(definition, makePlan(
-          [boundStep(Expression.ref("vars", "x"))],
-          []
-        )))
+        const error = yield* Effect.flip(Compiler.compile(
+          definition,
+          makePlan(
+            [boundStep(Expression.ref("vars", "x"))],
+            []
+          )
+        ))
         assert.deepStrictEqual(codes(error), [Compiler.Codes.InvalidExpression])
       }))
 
     it.effect("derives implicit dependencies from binding references", () =>
       Effect.gen(function*() {
-        const compiled = yield* Compiler.compile(definition, makePlan(
-          [stepNode("a"), boundStep(Expression.ref("nodes", "a", "value"))],
-          []
-        ))
+        const compiled = yield* Compiler.compile(
+          definition,
+          makePlan(
+            [stepNode("a"), boundStep(Expression.ref("nodes", "a", "value"))],
+            []
+          )
+        )
 
         assert.deepStrictEqual(compiled.nodes.get("b")?.dependencies, ["a"])
         assert.deepStrictEqual(compiled.nodes.get("a")?.dependents, ["b"])
@@ -379,27 +436,36 @@ describe("CompilerV2Features", () => {
 
     it.effect("exempts transformed edges from contract equality", () =>
       Effect.gen(function*() {
-        const compiled = yield* Compiler.compile(definition, makePlan(nodes, [
-          dataEdge("src-sink", nodeOutput("src", "value"), nodeInput("sink", "count"), {
-            transform: Expression.size(Expression.ref("value"))
-          })
-        ]))
+        const compiled = yield* Compiler.compile(
+          definition,
+          makePlan(nodes, [
+            dataEdge("src-sink", nodeOutput("src", "value"), nodeInput("sink", "count"), {
+              transform: Expression.size(Expression.ref("value"))
+            })
+          ])
+        )
         assert.strictEqual(compiled.dataEdges.length, 1)
         assert.deepStrictEqual(compiled.nodes.get("sink")?.dependencies, ["src"])
 
-        const untransformed = yield* Effect.flip(Compiler.compile(definition, makePlan(nodes, [
-          dataEdge("src-sink", nodeOutput("src", "value"), nodeInput("sink", "count"))
-        ])))
+        const untransformed = yield* Effect.flip(Compiler.compile(
+          definition,
+          makePlan(nodes, [
+            dataEdge("src-sink", nodeOutput("src", "value"), nodeInput("sink", "count"))
+          ])
+        ))
         assertIncludesCodes(untransformed, [Compiler.Codes.IncompatibleContract])
       }))
 
     it.effect("validates transform expressions against the plan graph", () =>
       Effect.gen(function*() {
-        const error = yield* Effect.flip(Compiler.compile(definition, makePlan(nodes, [
-          dataEdge("src-sink", nodeOutput("src", "value"), nodeInput("sink", "count"), {
-            transform: Expression.ref("nodes", "ghost", "value")
-          })
-        ])))
+        const error = yield* Effect.flip(Compiler.compile(
+          definition,
+          makePlan(nodes, [
+            dataEdge("src-sink", nodeOutput("src", "value"), nodeInput("sink", "count"), {
+              transform: Expression.ref("nodes", "ghost", "value")
+            })
+          ])
+        ))
 
         assert.deepStrictEqual(codes(error), [Compiler.Codes.InvalidExpression])
       }))
@@ -408,13 +474,16 @@ describe("CompilerV2Features", () => {
   describe("wildcard contracts", () => {
     it.effect("connects builtin '*' outputs to typed inputs without a transform", () =>
       Effect.gen(function*() {
-        const compiled = yield* Compiler.compile(definition, makePlan(
-          [
-            planNode("t", "workflow/transform", { value: Expression.literal("hello") }),
-            planNode("s", "Step")
-          ],
-          [dataEdge("t-s", nodeOutput("t", "value"), nodeInput("s", "value"))]
-        ))
+        const compiled = yield* Compiler.compile(
+          definition,
+          makePlan(
+            [
+              planNode("t", "workflow/transform", { value: Expression.literal("hello") }),
+              planNode("s", "Step")
+            ],
+            [dataEdge("t-s", nodeOutput("t", "value"), nodeInput("s", "value"))]
+          )
+        )
 
         assert.strictEqual(compiled.dataEdges.length, 1)
         assert.deepStrictEqual(compiled.nodes.get("s")?.dependencies, ["t"])
@@ -424,20 +493,26 @@ describe("CompilerV2Features", () => {
   describe("signals", () => {
     it.effect("rejects two receive nodes waiting on the same signal name", () =>
       Effect.gen(function*() {
-        const error = yield* Effect.flip(Compiler.compile(definition, makePlan([
-          planNode("r1", "workflow/receive", { signal: "go" }),
-          planNode("r2", "workflow/receive", { signal: "go" })
-        ], [])))
+        const error = yield* Effect.flip(Compiler.compile(
+          definition,
+          makePlan([
+            planNode("r1", "workflow/receive", { signal: "go" }),
+            planNode("r2", "workflow/receive", { signal: "go" })
+          ], [])
+        ))
 
         assert.deepStrictEqual(codes(error), [Compiler.Codes.DuplicateSignal])
       }))
 
     it.effect("maps distinct signal names to their waiting nodes", () =>
       Effect.gen(function*() {
-        const compiled = yield* Compiler.compile(definition, makePlan([
-          planNode("r1", "workflow/receive", { signal: "go" }),
-          planNode("r2", "workflow/receive", { signal: "stop" })
-        ], []))
+        const compiled = yield* Compiler.compile(
+          definition,
+          makePlan([
+            planNode("r1", "workflow/receive", { signal: "go" }),
+            planNode("r2", "workflow/receive", { signal: "stop" })
+          ], [])
+        )
 
         assert.strictEqual(compiled.signals.size, 2)
         assert.strictEqual(compiled.signals.get("go"), "r1")
@@ -448,20 +523,26 @@ describe("CompilerV2Features", () => {
   describe("joins", () => {
     it.effect("rejects join 'any' without incoming control edges", () =>
       Effect.gen(function*() {
-        const error = yield* Effect.flip(Compiler.compile(definition, makePlan(
-          [stepNode("solo", { join: "any" })],
-          []
-        )))
+        const error = yield* Effect.flip(Compiler.compile(
+          definition,
+          makePlan(
+            [stepNode("solo", { join: "any" })],
+            []
+          )
+        ))
 
         assert.deepStrictEqual(codes(error), [Compiler.Codes.InvalidJoin])
       }))
 
     it.effect("accepts join 'any' fed by a control edge", () =>
       Effect.gen(function*() {
-        const compiled = yield* Compiler.compile(definition, makePlan(
-          [stepNode("first"), stepNode("solo", { join: "any" })],
-          [controlEdge("first-solo", "first", "solo")]
-        ))
+        const compiled = yield* Compiler.compile(
+          definition,
+          makePlan(
+            [stepNode("first"), stepNode("solo", { join: "any" })],
+            [controlEdge("first-solo", "first", "solo")]
+          )
+        )
 
         assert.strictEqual(compiled.nodes.get("solo")?.join, "any")
         assert.strictEqual(compiled.nodes.get("first")?.join, "all")
@@ -519,10 +600,13 @@ describe("CompilerV2Features", () => {
   describe("policy merge", () => {
     it.effect("overrides definition defaults wholesale per policy field", () =>
       Effect.gen(function*() {
-        const compiled = yield* Compiler.compile(definition, makePlan([
-          planNode("defaulted", "Retriable"),
-          planNode("overridden", "Retriable", {}, { policy: { retry: { maxAttempts: 1 } } })
-        ], []))
+        const compiled = yield* Compiler.compile(
+          definition,
+          makePlan([
+            planNode("defaulted", "Retriable"),
+            planNode("overridden", "Retriable", {}, { policy: { retry: { maxAttempts: 1 } } })
+          ], [])
+        )
 
         assert.deepStrictEqual(compiled.nodes.get("defaulted")?.policy, {
           retry: { maxAttempts: 3, initialDelayMillis: 100 },

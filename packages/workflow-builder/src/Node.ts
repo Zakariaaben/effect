@@ -70,6 +70,30 @@ export const EmptyConfig = Schema.Struct({})
 export type Outcomes = ReadonlyArray<string> | ((config: never) => ReadonlyArray<string>)
 
 /**
+ * Marks a node kind as externally completed.
+ *
+ * **Details**
+ *
+ * An external node's handler is only the *registration* step: it receives a
+ * decision token in its {@link HandlerContext} and hands it to the outside
+ * world — a work-item store, an e-signature provider, a legacy worker queue,
+ * an email gateway. The node's result is the durable decision later resolved
+ * against that token, exposed through the reserved `decision` output port and
+ * routed by its outcome.
+ *
+ * `deadline` derives an optional decision deadline in milliseconds from the
+ * node's decoded configuration; when it yields a value, the engine schedules
+ * an idempotent expiry that races completion first-wins, and the definition's
+ * outcomes must include `expired`.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export interface External {
+  readonly deadline?: ((config: never) => number | undefined) | undefined
+}
+
+/**
  * A stable, versioned node kind that may be referenced by portable plans.
  *
  * @category models
@@ -98,6 +122,7 @@ export interface Definition<
   readonly outputs: Outputs
   readonly failureSchema: Failure
   readonly outcomes: Outcomes | undefined
+  readonly external: External | undefined
   readonly defaultPolicy: Policy.Policy | undefined
   readonly annotations: Context.Context<never>
 
@@ -168,6 +193,12 @@ export interface HandlerContext {
   readonly nodeInstanceId: string
   readonly attempt: number
   readonly idempotencyKey: string
+  /**
+   * The opaque token that completes this node, present only for definitions
+   * declaring {@link External} completion. The handler must deliver it to
+   * whatever system will eventually decide the outcome.
+   */
+  readonly decisionToken?: string | undefined
 }
 
 /**
@@ -512,6 +543,10 @@ export const make = <
   readonly outputs?: Outputs | undefined
   readonly failure?: Failure | undefined
   readonly outcomes?: ReadonlyArray<string> | ((config: Config["Type"]) => ReadonlyArray<string>) | undefined
+  readonly external?:
+    | boolean
+    | { readonly deadline?: ((config: Config["Type"]) => number | undefined) | undefined }
+    | undefined
   readonly policy?: Policy.Policy | undefined
   readonly dependencies?: Dependencies | undefined
 }): Definition<
@@ -533,6 +568,9 @@ export const make = <
     outputs: Object.freeze({ ...options.outputs }),
     failureSchema: options.failure ?? Schema.Never,
     outcomes: Array.isArray(options.outcomes) ? Object.freeze([...options.outcomes]) : options.outcomes,
+    external: options.external === undefined || options.external === false
+      ? undefined
+      : Object.freeze(options.external === true ? {} : { ...options.external }),
     defaultPolicy: options.policy,
     annotations: Context.empty()
   }))) as any

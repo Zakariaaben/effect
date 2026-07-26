@@ -180,7 +180,6 @@ const stripped = <A extends { readonly metadata?: Schema.Json | undefined }>(
  * @since 4.0.0
  */
 export const materialize = (compiled: Compiler.CompiledPlan): FingerprintDocument => {
-  const definition = compiled.definition
   const document = Json.snapshot({
     fingerprintVersion: FingerprintVersion,
     compilerSemanticVersion: CompilerSemanticVersion,
@@ -197,14 +196,17 @@ export const materialize = (compiled: Compiler.CompiledPlan): FingerprintDocumen
         .map(stripped)
     },
     boundary: {
-      inputs: Object.keys(definition.inputs).sort(compareCodeUnits).map((name) => {
-        const port = definition.inputs[name]!
-        return { name, contract: port.contract, fanOut: port.fanOut }
-      }),
-      outputs: Object.keys(definition.outputs).sort(compareCodeUnits).map((name) => {
-        const port = definition.outputs[name]!
-        return { name, contract: port.contract, cardinality: port.cardinality, required: port.required }
-      })
+      inputs: Array.from(compiled.boundary.inputs, ([name, entry]) => ({
+        name,
+        contract: entry.port.contract,
+        required: entry.required
+      })),
+      outputs: Array.from(compiled.boundary.outputs, ([name, port]) => ({
+        name,
+        contract: port.contract,
+        cardinality: port.cardinality,
+        required: port.required
+      }))
     },
     topologicalOrder: [...compiled.topologicalOrder]
   })

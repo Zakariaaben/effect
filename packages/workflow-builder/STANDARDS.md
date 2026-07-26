@@ -34,7 +34,7 @@ BPMN model/XML/kernel work is preserved in branch history
 | WCP11 Implicit termination           | ✅     | A run completes when every node settles                                                          |
 | WCP12–13 MI (design/runtime known)   | ✅     | `workflow/forEach`: member set frozen at activation, stable `item:<index>` identity, ordered gather |
 | WCP14 MI (runtime, no a priori)      | ❌     | Open-ended fan-out is out of scope for the frozen-set semantics                                  |
-| WCP16 Deferred choice                | ◐      | Human-task decision vs. expiration deadline races first-wins; a general external-event race node is roadmap |
+| WCP16 Deferred choice                | ◐      | External decisions (human tasks, callbacks) race their outcomes and deadline first-wins; a race across multiple distinct event sources is roadmap |
 | WCP19 Cancel task                    | ❌     | No targeted single-node cancellation                                                             |
 | WCP20 Cancel case                    | ◐      | `Runs.cancel`: cooperative interrupt, child cascade, task cancellation, compensation hooks; no physical-stop claim |
 | WCP21 Structured loop                | ❌     | Roadmap (`while` with committed iteration identity)                                              |

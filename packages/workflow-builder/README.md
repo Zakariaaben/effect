@@ -19,6 +19,25 @@ Registry / Policy      expressions,        fingerprint pin        interpreting t
                        policies                                   on WorkflowEngine
 ```
 
+## Two ways to own a workflow
+
+Both integration styles are first-class, decided per boundary side by one
+rule: **declared in code → closed and typed; omitted in code → the plan owns
+it.**
+
+- **Code-first (static).** The application declares the workflow's `inputs`
+  and `outputs` ports on the definition. Every plan shares that exact typed
+  contract — right for embedded pipelines like *send email → reduce stock →
+  charge account*, where the app owns the workflow's identity and wants
+  compile-time types end to end.
+- **End-user-composed (dynamic).** The definition declares no boundary — only
+  the node catalog, link policy, limits, and a **contract catalog** mapping
+  contract names to schemas. Each plan then declares its own interface
+  (`inputs: [{name, contract, required?}]`, `outputs: [{name, contract}]`),
+  because only the end user knows what their workflow consumes and produces.
+  Contracts absent from the catalog validate as JSON, and every value is
+  re-validated at each consuming port regardless.
+
 ## The division of labor
 
 | Layer                        | Owns                                                                                                                       |
@@ -89,9 +108,18 @@ const handlers = registry.toLayer(registry.of({
 - **Policies** — per-node retry (attempts, exponential backoff, non-retryable
   tags) and timeouts (per-attempt, total budget), declared in the plan and
   merged over definition defaults; backoff waits are durable timers.
+- **External completion** — any registered node kind may declare
+  `external: true`: its handler only *registers* the work (it receives an
+  opaque decision token to hand to an e-signature provider, a webhook
+  consumer, a legacy worker, an email gateway), and the node's result is the
+  durable `{outcome, output}` decision later resolved against that token via
+  `Runs.resolveDecision` — first-wins against an optional config-derived
+  deadline, exposed on the reserved `decision` output.
 - **Human tasks** — durable work items with user-composed decision outcomes,
   optional forms/payloads/assignment data, and an expiration deadline that
-  races completion first-wins.
+  races completion first-wins. Implemented as a profile of the external
+  completion primitive, plus the `HumanTasks` work-item inventory
+  (list/claim/complete) for application UIs.
 - **Waiting** — durable relative delays and named external signals.
 - **Composition** — sub-workflow calls and bounded `forEach` fan-out over a
   collection, each iteration a durable child run with a stable identity.
