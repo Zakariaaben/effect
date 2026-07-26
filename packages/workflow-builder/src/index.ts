@@ -27,7 +27,17 @@ export * as Diagnostic from "./Diagnostic.ts"
 /**
  * @since 4.0.0
  */
+export * as Engine from "./Engine.ts"
+
+/**
+ * @since 4.0.0
+ */
 export * as Fingerprint from "./Fingerprint.ts"
+
+/**
+ * @since 4.0.0
+ */
+export * as HumanTasks from "./HumanTasks.ts"
 
 /**
  * @since 4.0.0
@@ -47,6 +57,11 @@ export * as Plan from "./Plan.ts"
 /**
  * @since 4.0.0
  */
+export * as PlanStore from "./PlanStore.ts"
+
+/**
+ * @since 4.0.0
+ */
 export * as Policy from "./Policy.ts"
 
 /**
@@ -58,6 +73,11 @@ export * as Port from "./Port.ts"
  * @since 4.0.0
  */
 export * as Registry from "./Registry.ts"
+
+/**
+ * @since 4.0.0
+ */
+export * as Runs from "./Runs.ts"
 
 /**
  * @since 4.0.0
