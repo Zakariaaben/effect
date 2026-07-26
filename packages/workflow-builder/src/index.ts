@@ -7,6 +7,11 @@
 /**
  * @since 4.0.0
  */
+export * as Bpmn from "./Bpmn.ts"
+
+/**
+ * @since 4.0.0
+ */
 export * as Builtins from "./Builtins.ts"
 
 /**

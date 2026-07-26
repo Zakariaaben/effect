@@ -1268,7 +1268,8 @@ export const compile = Effect.fnUntraced(function*<W extends Workflow.Any>(
     label: string,
     path: ReadonlyArray<Diagnostic.PathSegment>,
     missingCode: string,
-    bound: boolean
+    bound: boolean,
+    allowedOverride?: number
   ) => {
     const edges = incoming.get(key) ?? []
     if (port.required && edges.length === 0 && !bound) {
@@ -1283,7 +1284,7 @@ export const compile = Effect.fnUntraced(function*<W extends Workflow.Any>(
         { target: label }
       )
     }
-    const allowed = port.cardinality === "one" ? 1 : definition.limits.maxFanIn
+    const allowed = allowedOverride ?? (port.cardinality === "one" ? 1 : definition.limits.maxFanIn)
     if (edges.length > allowed) {
       add(
         diagnostics,
@@ -1323,13 +1324,17 @@ export const compile = Effect.fnUntraced(function*<W extends Workflow.Any>(
     }
   }
   for (const [name, port] of boundaryOutputs) {
+    // A plan-declared output may be fed from alternative branches; liveness
+    // selects the value at runtime, so static fan-in is bounded only by the
+    // definition limit.
     validateTarget(
       port,
       storageKey("WorkflowOutput", name),
       `workflow output '${name}'`,
       ["edges"],
       Codes.MissingRequiredOutput,
-      false
+      false,
+      outputsClosed && port.cardinality === "one" ? 1 : definition.limits.maxFanIn
     )
   }
 
