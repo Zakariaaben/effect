@@ -42,6 +42,8 @@ export type Builtin =
   | "subWorkflow"
   | "humanTask"
   | "delay"
+  | "waitUntil"
+  | "while"
   | "receive"
   | "fail"
 
@@ -268,6 +270,60 @@ export const Delay = Node.make("workflow/delay", {
 }).annotate(Kind, "delay")
 
 /**
+ * Durable wait until an absolute point in time.
+ *
+ * **Details**
+ *
+ * The deadline is epoch milliseconds — fixed in configuration or computed
+ * from run data — and is armed as an idempotent durable schedule, so a
+ * restart cannot move it and a deadline already in the past fires
+ * immediately.
+ *
+ * @category definitions
+ * @since 4.0.0
+ */
+export const WaitUntil = Node.make("workflow/waitUntil", {
+  version: Version,
+  description: "Waits durably until an absolute time in epoch milliseconds",
+  config: Schema.Struct({
+    atMillis: Schema.Union([PositiveInt, Expression.Expression])
+  }).annotate({ parseOptions: strictParseOptions })
+}).annotate(Kind, "waitUntil")
+
+/**
+ * Pre-tested structured loop over a stored plan.
+ *
+ * **Details**
+ *
+ * The condition is evaluated — with `iteration` (zero-based) and `previous`
+ * (the last iteration's outputs, `null` before the first) added to the run
+ * scope — before every iteration; while it holds, the body plan executes as
+ * a durable child run with the committed identity `iter:<n>`. Each child
+ * receives `{ iteration, previous }` unless `input` maps something else
+ * (same extra roots). `maxIterations` is a hard safety bound; reaching it
+ * fails the run rather than silently stopping. Outputs report the number of
+ * completed iterations and the last iteration's outputs.
+ *
+ * @category definitions
+ * @since 4.0.0
+ */
+export const While = Node.make("workflow/while", {
+  version: Version,
+  description: "Repeats a stored plan while a condition over run data holds",
+  config: Schema.Struct({
+    condition: Expression.Expression,
+    plan: PlanReference,
+    input: Schema.optionalKey(Expression.Expression),
+    maxIterations: PositiveInt
+  }).annotate({ parseOptions: strictParseOptions }),
+  outputs: {
+    iterations: output(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+    last: output(Schema.Json)
+  },
+  failure: Schema.Json
+}).annotate(Kind, "while")
+
+/**
  * Durable wait for one named external signal.
  *
  * **Details**
@@ -326,6 +382,8 @@ export const all: ReadonlyArray<Node.Any> = Object.freeze([
   SubWorkflow,
   HumanTask,
   Delay,
+  WaitUntil,
+  While,
   Receive,
   Fail
 ])

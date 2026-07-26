@@ -29,7 +29,7 @@ import * as Activity from "effect/unstable/workflow/Activity"
 import * as DurableClock from "effect/unstable/workflow/DurableClock"
 import * as DurableDeferred from "effect/unstable/workflow/DurableDeferred"
 import * as DurableWorkflow from "effect/unstable/workflow/Workflow"
-import type * as WorkflowEngine from "effect/unstable/workflow/WorkflowEngine"
+import * as WorkflowEngine from "effect/unstable/workflow/WorkflowEngine"
 import * as Builtins from "./Builtins.ts"
 import * as Compiler from "./Compiler.ts"
 import * as Expression from "./Expression.ts"
@@ -42,6 +42,7 @@ import * as PlanStore from "./PlanStore.ts"
 import * as Policy from "./Policy.ts"
 import type * as Port from "./Port.ts"
 import * as Registry from "./Registry.ts"
+import * as RunJournal from "./RunJournal.ts"
 import type * as Workflow from "./Workflow.ts"
 
 // ----------------------------------------------------------------------------
@@ -292,15 +293,21 @@ type Settlement =
     readonly _tag: "Completed"
     readonly outcome: string
     readonly outputs: Readonly<Record<string, Schema.Json>>
+    readonly attempts: number
   }
   | { readonly _tag: "Skipped" }
 
 const skipped: Settlement = { _tag: "Skipped" }
 
-const completed = (outcome: string, outputs: Readonly<Record<string, Schema.Json>>): Settlement => ({
+const completed = (
+  outcome: string,
+  outputs: Readonly<Record<string, Schema.Json>>,
+  attempts = 1
+): Settlement => ({
   _tag: "Completed",
   outcome,
-  outputs
+  outputs,
+  attempts
 })
 
 /**
@@ -326,6 +333,7 @@ interface RunContext {
   readonly handlers: Registry.HandlerRegistry["Service"]
   readonly humanTasks: HumanTasks.HumanTasks["Service"]
   readonly planStore: PlanStore.PlanStore["Service"]
+  readonly journal: RunJournal.Service
   readonly input: Schema.JsonObject
   readonly settlements: Map<string, Settlement>
   readonly latches: Map<string, Deferred.Deferred<Settlement>>
@@ -384,6 +392,10 @@ const decodeConfig = (
     )
   )
 
+/** Journal emission: observational, idempotent, and never load-bearing. */
+const emit = (context: RunContext, entry: RunJournal.EntryInput): Effect.Effect<void> =>
+  context.journal.record(entry).pipe(Effect.catchCause(() => Effect.void))
+
 const settle = (
   context: RunContext,
   nodeId: string,
@@ -397,6 +409,24 @@ const settle = (
         context.values.set(durableName("NodeOutput", nodeId, port), value)
       }
     }
+    yield* emit(
+      context,
+      settlement._tag === "Completed"
+        ? {
+          _tag: "NodeCompleted",
+          runId: context.executionId,
+          planId: context.payload.planId,
+          nodeId,
+          outcome: settlement.outcome,
+          attempts: settlement.attempts
+        }
+        : {
+          _tag: "NodeSkipped",
+          runId: context.executionId,
+          planId: context.payload.planId,
+          nodeId
+        }
+    )
     yield* Deferred.succeed(context.latches.get(nodeId)!, settlement)
   })
 
@@ -708,7 +738,7 @@ const runApplicationNode = (
       const outcome = yield* nodeAttempt(context, node, attempt, inputs, decisionToken)
 
       if (outcome._tag === "Succeeded") {
-        return completed(Plan.DefaultOutcome, outcome.outputs)
+        return completed(Plan.DefaultOutcome, outcome.outputs, attempt)
       }
 
       const retryable = outcome._tag === "TimedOut" ||
@@ -725,7 +755,7 @@ const runApplicationNode = (
           )
         }
         if (node.errorOutcome && errorRouted(node)) {
-          return completed(Plan.ErrorOutcome, { [Plan.ErrorOutcome]: outcome.error })
+          return completed(Plan.ErrorOutcome, { [Plan.ErrorOutcome]: outcome.error }, attempt)
         }
         return yield* Effect.fail(
           new NodeFailed({ nodeId: node.node.id, attempts: attempt, error: outcome.error })
@@ -841,6 +871,12 @@ const runCompensations = (context: RunContext): Effect.Effect<void, never, any> 
     for (let index = context.compensations.length - 1; index >= 0; index--) {
       const armed = context.compensations[index]!
       yield* compensationActivity(context, armed.node, armed.settlement)
+      yield* emit(context, {
+        _tag: "CompensationRun",
+        runId: context.executionId,
+        planId: context.payload.planId,
+        nodeId: armed.node.node.id
+      })
     }
   })
 
@@ -873,6 +909,7 @@ const scheduleExpiry = (
   }) as Effect.Effect<void, never, Durable>
 
 const awaitDecision = (
+  context: RunContext,
   node: Compiler.CompiledNode,
   deferred: DurableDeferred.DurableDeferred<typeof Plan.Decision>
 ): Effect.Effect<Plan.Decision, EngineFault, any> =>
@@ -885,6 +922,13 @@ const awaitDecision = (
         `Node decided with unknown outcome '${decision.outcome}'`
       ))
     }
+    yield* emit(context, {
+      _tag: "DecisionRecorded",
+      runId: context.executionId,
+      planId: context.payload.planId,
+      nodeId: node.node.id,
+      outcome: decision.outcome
+    })
     return decision
   })
 
@@ -915,7 +959,7 @@ const runExternalNode = (
       yield* scheduleExpiry(deferred, token, node.node.id, armedAt + deadlineMillis)
     }
 
-    const decision = yield* awaitDecision(node, deferred)
+    const decision = yield* awaitDecision(context, node, deferred)
     return completed(decision.outcome, { [Plan.DecisionOutput]: decision.output })
   })
 
@@ -948,7 +992,7 @@ const childFailureAsBusiness = (
 const resolveChildPin = (
   context: RunContext,
   node: Compiler.CompiledNode,
-  kind: "sub" | "forEach",
+  kind: "sub" | "forEach" | "while",
   reference: Builtins.PlanReference
 ): Effect.Effect<{ readonly revision: number; readonly fingerprint: string }, RunFailure, Durable> =>
   Effect.gen(function*() {
@@ -1093,6 +1137,74 @@ const runBuiltin = (
         return completed(Plan.DefaultOutcome, {})
       }
 
+      case "waitUntil": {
+        const { atMillis } = config as { atMillis: number | Expression.Expression }
+        const millis = typeof atMillis === "number"
+          ? atMillis
+          : yield* evaluateExpression(context, nodeId, "deadline", atMillis).pipe(
+            Effect.flatMap((value) =>
+              typeof value === "number" && Number.isInteger(value) && value > 0
+                ? Effect.succeed(value)
+                : Effect.fail(fault(nodeId, "deadline", "Deadline must evaluate to positive epoch milliseconds"))
+            )
+          )
+        const deferred = DurableDeferred.make(durableName("waitUntil", nodeId), {
+          success: Schema.Json
+        })
+        const token = yield* DurableDeferred.token(deferred)
+        yield* DurableClock.schedule(deferred, {
+          token,
+          scheduleId: durableName("waitUntil", nodeId, "at"),
+          wakeUp: DateTime.makeUnsafe(millis),
+          value: null
+        })
+        yield* DurableDeferred.await(deferred)
+        return completed(Plan.DefaultOutcome, {})
+      }
+
+      case "while": {
+        const cfg = config as {
+          condition: Expression.Expression
+          plan: Builtins.PlanReference
+          input?: Expression.Expression
+          maxIterations: number
+        }
+        const pin = yield* resolveChildPin(context, node, "while", cfg.plan)
+        let iteration = 0
+        let previous: Schema.Json = null
+        while (true) {
+          const extra = { iteration, previous }
+          const proceed = yield* evaluateExpression(context, nodeId, "condition", cfg.condition, extra)
+            .pipe(Effect.flatMap((value) => expectBoolean(nodeId, "condition", value)))
+          if (!proceed) {
+            break
+          }
+          if (iteration >= cfg.maxIterations) {
+            return yield* Effect.fail(fault(
+              nodeId,
+              "loop",
+              `Loop exceeded its maxIterations bound of ${cfg.maxIterations}`
+            ))
+          }
+          const input = cfg.input === undefined
+            ? extra
+            : yield* evaluateExpression(context, nodeId, "iteration-input", cfg.input, extra)
+          const result = yield* executeChild(context, {
+            planId: cfg.plan.planId,
+            revision: pin.revision,
+            fingerprint: pin.fingerprint,
+            input,
+            runKey: durableName(context.executionId, nodeId, "iter", iteration)
+          })
+          if (Result.isFailure(result)) {
+            return yield* settleChildResult(node, result, () => skipped)
+          }
+          previous = result.success.outputs as Schema.Json
+          iteration++
+        }
+        return completed(Plan.DefaultOutcome, { iterations: iteration, last: previous })
+      }
+
       case "receive": {
         const { signal } = config as { signal: string }
         const payload = yield* DurableDeferred.await(signalDeferred(signal))
@@ -1163,10 +1275,17 @@ const runBuiltin = (
             return { taskId: task.taskId, dueAtMillis }
           })
         })
+        yield* emit(context, {
+          _tag: "TaskCreated",
+          runId: context.executionId,
+          planId: context.payload.planId,
+          nodeId,
+          taskId: handle.taskId
+        })
         if (handle.dueAtMillis !== null) {
           yield* scheduleExpiry(deferred, token, nodeId, handle.dueAtMillis)
         }
-        const decision = yield* awaitDecision(node, deferred)
+        const decision = yield* awaitDecision(context, node, deferred)
         if (decision.outcome === Plan.ExpiredOutcome && cfg.dueInMillis !== undefined) {
           yield* Activity.make({
             name: durableName("task", nodeId, "expired"),
@@ -1334,6 +1453,7 @@ const interpret = (
     const planStore = yield* PlanStore.PlanStore
     const handlers = yield* Registry.HandlerRegistry
     const humanTasks = yield* HumanTasks.HumanTasks
+    const journal = yield* RunJournal.RunJournal
 
     const stored = yield* planStore.get(payload.planId, payload.revision).pipe(
       Effect.mapError((error) =>
@@ -1394,6 +1514,7 @@ const interpret = (
       handlers,
       humanTasks,
       planStore,
+      journal,
       input,
       settlements: new Map(),
       latches: new Map(),
@@ -1407,6 +1528,14 @@ const interpret = (
     for (const nodeId of compiled.topologicalOrder) {
       context.latches.set(nodeId, yield* Deferred.make<Settlement>())
     }
+
+    yield* emit(context, {
+      _tag: "RunStarted",
+      runId: executionId,
+      planId: payload.planId,
+      revision: payload.revision,
+      fingerprint: payload.fingerprint
+    })
 
     // Cancel outstanding human work when the run ends for any reason other
     // than successful completion of every waiting node.
@@ -1455,4 +1584,44 @@ export const layer = <W extends Workflow.Any>(
   | PlanStore.PlanStore
   | Registry.HandlerRegistry
   | HumanTasks.HumanTasks
-> => Run.toLayer((payload, executionId) => interpret(definition, options, payload, executionId)) as any
+> =>
+  Run.toLayer((payload, executionId) =>
+    Effect.gen(function*() {
+      const journal = yield* RunJournal.RunJournal
+      const instance = yield* WorkflowEngine.WorkflowInstance
+      const record = (entry: RunJournal.EntryInput) => journal.record(entry).pipe(Effect.catchCause(() => Effect.void))
+      return yield* interpret(definition, options, payload, executionId).pipe(
+        Effect.onExit((exit) => {
+          if (exit._tag === "Success") {
+            return record({ _tag: "RunSucceeded", runId: executionId, planId: payload.planId })
+          }
+          const failure = exit.cause.reasons.find((reason) => reason._tag === "Fail")
+          if (failure !== undefined) {
+            return Schema.encodeUnknownEffect(RunFailure)((failure as { error: RunFailure }).error).pipe(
+              Effect.orElseSucceed((): unknown => null),
+              Effect.flatMap((encoded) =>
+                record({
+                  _tag: "RunFailed",
+                  runId: executionId,
+                  planId: payload.planId,
+                  failure: encoded as Schema.Json
+                })
+              )
+            )
+          }
+          if (instance.interrupted) {
+            return record({ _tag: "RunCancelled", runId: executionId, planId: payload.planId })
+          }
+          if (instance.suspended) {
+            return Effect.void
+          }
+          return record({
+            _tag: "RunFailed",
+            runId: executionId,
+            planId: payload.planId,
+            failure: { defect: Cause.pretty(exit.cause) }
+          })
+        })
+      )
+    })
+  ) as any

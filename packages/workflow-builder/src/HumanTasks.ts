@@ -129,6 +129,12 @@ export interface CreateRequest {
 /**
  * Filter for listing work items.
  *
+ * **Details**
+ *
+ * `limit` and `offset` paginate the listing after every other filter —
+ * including `candidateGroup` — has been applied, over the deterministic
+ * created-at/task-id ordering, so pages are stable across implementations.
+ *
  * @category models
  * @since 4.0.0
  */
@@ -138,6 +144,8 @@ export interface TaskFilter {
   readonly assignee?: string | undefined
   readonly claimedBy?: string | undefined
   readonly candidateGroup?: string | undefined
+  readonly limit?: number | undefined
+  readonly offset?: number | undefined
 }
 
 /**
@@ -188,6 +196,8 @@ export class TaskOutcomeError extends Schema.TaggedErrorClass<TaskOutcomeError>(
  * deferred first-wins: a completion racing an expiration deadline observes
  * the canonical decision and reports a conflict instead of silently losing.
  * `create` and `expire` are engine-facing and idempotent under redelivery.
+ * `reassign` routes an open or claimed item to a different assignee — or
+ * clears the assignment — without touching its state or claim.
  *
  * @category services
  * @since 4.0.0
@@ -198,6 +208,10 @@ export class HumanTasks extends Context.Service<HumanTasks, {
   readonly list: (filter?: TaskFilter) => Effect.Effect<ReadonlyArray<TaskItem>>
   readonly claim: (taskId: string, userId: string) => Effect.Effect<TaskItem, TaskNotFoundError | TaskStateError>
   readonly release: (taskId: string) => Effect.Effect<TaskItem, TaskNotFoundError | TaskStateError>
+  readonly reassign: (
+    taskId: string,
+    assignee: string | undefined
+  ) => Effect.Effect<TaskItem, TaskNotFoundError | TaskStateError>
   readonly complete: (taskId: string, completion: {
     readonly outcome: string
     readonly output?: Schema.Json | undefined
@@ -214,6 +228,17 @@ const decisionCodec = DurableDeferred.make("workflow-builder/task-decision", {
 const canonicalJson = (value: Schema.Json): string => {
   const canonical = Json.canonicalize(value)
   return Result.isFailure(canonical) ? JSON.stringify(value) : canonical.success
+}
+
+// Pagination is applied after every other filter so both layers page over the
+// same deterministic created-at/task-id ordering.
+const paginate = (
+  items: ReadonlyArray<TaskItem>,
+  filter: TaskFilter | undefined
+): ReadonlyArray<TaskItem> => {
+  const offset = filter?.offset ?? 0
+  const end = filter?.limit === undefined ? undefined : offset + filter.limit
+  return offset === 0 && end === undefined ? items : items.slice(offset, end)
 }
 
 /**
@@ -292,7 +317,7 @@ export const layerMemory: Layer.Layer<HumanTasks, never, WorkflowEngine.Workflow
             left.createdAtMillis - right.createdAtMillis ||
             (left.taskId < right.taskId ? -1 : left.taskId > right.taskId ? 1 : 0)
           )
-          return items
+          return paginate(items, filter)
         }),
 
       claim: (taskId, userId) =>
@@ -311,6 +336,15 @@ export const layerMemory: Layer.Layer<HumanTasks, never, WorkflowEngine.Workflow
             return yield* Effect.fail(new TaskStateError({ taskId, state: task.state }))
           }
           return update({ ...task, state: "open", claimedBy: undefined })
+        }),
+
+      reassign: (taskId, assignee) =>
+        Effect.gen(function*() {
+          const task = yield* require_(taskId)
+          if (task.state !== "open" && task.state !== "claimed") {
+            return yield* Effect.fail(new TaskStateError({ taskId, state: task.state }))
+          }
+          return update({ ...task, assignee })
         }),
 
       complete: (taskId, completion) =>
@@ -587,9 +621,10 @@ export const layerSql = (options?: {
               WHERE ${sql.and(conditions)}
               ORDER BY created_at_millis, task_id`.pipe(Effect.orDie)
             const items = rows.map(rowToTask)
-            return filter?.candidateGroup === undefined
+            const matched = filter?.candidateGroup === undefined
               ? items
               : items.filter((task) => task.candidateGroups.includes(filter.candidateGroup!))
+            return paginate(matched, filter)
           }),
 
         claim: (taskId, userId) =>
@@ -610,6 +645,17 @@ export const layerSql = (options?: {
             }
             yield* writeState(taskId, "open", null, null)
             return { ...task, state: "open" as const, claimedBy: undefined }
+          }),
+
+        reassign: (taskId, assignee) =>
+          Effect.gen(function*() {
+            const task = yield* require_(taskId)
+            if (task.state !== "open" && task.state !== "claimed") {
+              return yield* Effect.fail(new TaskStateError({ taskId, state: task.state }))
+            }
+            yield* sql`UPDATE ${tableSql} SET assignee = ${assignee ?? null}
+              WHERE task_id = ${taskId}`.pipe(Effect.orDie, Effect.asVoid)
+            return { ...task, assignee }
           }),
 
         complete: (taskId, completion) =>

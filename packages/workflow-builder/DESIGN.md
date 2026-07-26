@@ -273,24 +273,30 @@ crash/restart recovery — a run suspended on a human task survives full
 runtime disposal, its completed steps replay from persisted results, and it
 resumes to completion in a fresh process over the same database.
 
-Deliberately not in this iteration, in rough priority order:
+Implemented since the consolidation: run observability (`RunJournal`
+timeline projection with idempotent replay-safe emission), structured
+`while` loops with committed iteration identity, absolute-time waits, cron
+schedules with fire-time-idempotent starts, blocking `Runs.await`,
+arithmetic in the expression language, and store API completeness
+(plan listing/revisions, work-item pagination and reassignment).
 
-1. **Multi-runner conformance** — the same engine across several runner
-   processes (socket runners, shard manager, failover evidence); the
-   single-node preset already uses the identical storage model.
-2. **Triggers** — schedule/event/webhook admission producing runs with
-   dedup/correlation, as a layer above `Runs.start`.
-3. **Run observability** — a non-authoritative run journal/timeline
-   projection (node settlements, attempts, task lifecycle) for UIs.
-4. **While/until loops** — structured iteration beyond `forEach`, with
-   committed iteration identity.
-5. **Absolute-time waits and calendars** (`waitUntil`, cron-like schedules)
-   over `DurableClock.schedule`.
-6. **Plan-level saga scopes** — node-kind compensation handlers are
-   implemented (armed on success, unwound durably in reverse order inside
-   the run's failure path, skipped for routed `error` outcomes); explicit
-   compensation *regions* in the plan format remain future work.
-7. **Active-instance migration** — typed mappings from a running plan
-   revision to a successor, in the spirit of Camunda's instance migration.
-8. **Schedule-to-close preemption** — upgrading `timeouts.totalMillis` from
-   an attempt-boundary budget to a deferred-raced hard deadline.
+Explicit non-goals of this iteration — listed because faking them would be
+worse than lacking them:
+
+1. **Multi-runner failover evidence** — the storage model is the cluster
+   engine's own and already supports multiple runners; certifying it
+   honestly requires a real multi-process harness over Postgres, not a
+   simulated one.
+2. **Active-instance migration** — typed mappings from a running plan
+   revision to a successor (Camunda-style). Running runs stay pinned;
+   new runs pick up new revisions.
+3. **Plan-level saga regions** — node-kind compensation is implemented;
+   explicit compensation *scopes* in the plan format remain future work.
+4. **Schedule-to-close preemption** — `timeouts.totalMillis` remains an
+   attempt-boundary budget; a deferred-raced hard deadline that preempts
+   waits is future work.
+5. **Distributed rate quotas and tenant fairness** — per-key concurrency
+   and rate controls need a shared-store token authority.
+6. **Timezone-aware calendars** — cron evaluation is UTC.
+7. **Connector catalog, editor UI, credential vault** — product layers by
+   design; the engine stays UI-agnostic.

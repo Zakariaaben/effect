@@ -37,7 +37,7 @@ BPMN model/XML/kernel work is preserved in branch history
 | WCP16 Deferred choice                | ◐      | External decisions (human tasks, callbacks) race their outcomes and deadline first-wins; a race across multiple distinct event sources is roadmap |
 | WCP19 Cancel task                    | ❌     | No targeted single-node cancellation                                                             |
 | WCP20 Cancel case                    | ◐      | `Runs.cancel`: cooperative interrupt, child cascade, task cancellation, compensation hooks; no physical-stop claim |
-| WCP21 Structured loop                | ❌     | Roadmap (`while` with committed iteration identity)                                              |
+| WCP21 Structured loop                | ✅     | `workflow/while`: pre-tested condition over recorded data, iterations as durable child runs with committed `iter:<n>` identity, hard bound |
 | WCP22 Recursion                      | ✅     | `workflow/subWorkflow` may reference its own plan; bounded by run depth                          |
 | WCP23 Transient trigger              | ❌     | Signals are durable, not transient                                                               |
 | WCP24 Persistent trigger             | ✅     | `workflow/receive` + `Runs.signal`: first-wins durable delivery, retained if it arrives early    |
@@ -88,6 +88,10 @@ application-owned by design:
 
 ## Time patterns
 
-- Durable relative delays (`workflow/delay`), retry backoff as durable
-  timers, human-task deadlines as idempotent absolute schedules racing the
-  decision first-wins. Calendars/cron and absolute-date waits are roadmap.
+- Durable relative delays (`workflow/delay`), absolute-date waits
+  (`workflow/waitUntil` over idempotent schedules), retry backoff as durable
+  timers, decision deadlines as idempotent absolute schedules racing
+  completion first-wins, and cron-based recurring starts (`Schedules`) with
+  fire-time-derived idempotent run keys so restarts and duplicate runners
+  cannot double-fire. Timezone-aware calendars remain roadmap (cron is
+  UTC-based).

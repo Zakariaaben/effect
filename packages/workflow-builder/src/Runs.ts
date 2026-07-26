@@ -8,10 +8,11 @@
  *
  * @since 4.0.0
  */
+import * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
 import * as Exit from "effect/Exit"
 import * as Option from "effect/Option"
-import type * as Schema from "effect/Schema"
+import * as Schema from "effect/Schema"
 import * as DurableDeferred from "effect/unstable/workflow/DurableDeferred"
 import type * as WorkflowEngine from "effect/unstable/workflow/WorkflowEngine"
 import * as Engine from "./Engine.ts"
@@ -173,6 +174,60 @@ export const status = (
         : { _tag: "Interrupted" as const }
     })
   )
+
+/**
+ * Raised by {@link await} when the observed run ends by cancellation.
+ *
+ * @category errors
+ * @since 4.0.0
+ */
+export class RunInterrupted extends Schema.TaggedErrorClass<RunInterrupted>(
+  "@effect/workflow-builder/Runs/RunInterrupted"
+)("RunInterrupted", {
+  runId: Schema.String
+}) {}
+
+const awaitResult = (
+  runId: string,
+  options?: { readonly pollInterval?: Duration.Input | undefined }
+): Effect.Effect<
+  Engine.RunSuccess,
+  Engine.RunFailure | RunInterrupted,
+  WorkflowEngine.WorkflowEngine
+> =>
+  Effect.gen(function*() {
+    const interval = options?.pollInterval ?? Duration.millis(100)
+    while (true) {
+      const current = yield* status(runId)
+      switch (current._tag) {
+        case "Succeeded":
+          return current.value
+        case "Failed":
+          return yield* Effect.fail(current.error)
+        case "Interrupted":
+          return yield* Effect.fail(new RunInterrupted({ runId }))
+        case "Running":
+        case "Suspended":
+          yield* Effect.sleep(interval)
+      }
+    }
+  })
+
+export {
+  /**
+   * Waits for a run started elsewhere to reach a terminal state and returns
+   * its result, failing with the run's typed failure or {@link RunInterrupted}.
+   *
+   * **Details**
+   *
+   * Polling-based, so it works from any process holding the `WorkflowEngine`
+   * layer. Compose `Effect.timeout` around it to bound the wait.
+   *
+   * @category observation
+   * @since 4.0.0
+   */
+  awaitResult as await
+}
 
 /**
  * Cooperatively cancels a run: in-flight work is interrupted, compensation

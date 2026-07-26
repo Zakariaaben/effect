@@ -95,8 +95,9 @@ const handlers = registry.toLayer(registry.of({
   literal/expression `bindings` on input ports; the wildcard `*` contract for
   generic JSON interop.
 - **Expressions** — a small, pure, JSON-portable language (references,
-  templates, records, lists, boolean logic, comparisons, coalescing) used for
-  mappings, conditions, and configuration. Deterministic and bounded.
+  templates, records, lists, boolean logic, comparisons, arithmetic,
+  coalescing) used for mappings, conditions, and configuration.
+  Deterministic and bounded; a visual builder emits the AST directly.
 - **Control flow** — every node completes with an *outcome*; control edges
   route on outcomes (`if` → `true`/`false`, `switch` → case names, human
   tasks → their configured decisions). Untaken branches settle as skipped and
@@ -120,7 +121,12 @@ const handlers = registry.toLayer(registry.of({
   races completion first-wins. Implemented as a profile of the external
   completion primitive, plus the `HumanTasks` work-item inventory
   (list/claim/complete) for application UIs.
-- **Waiting** — durable relative delays and named external signals.
+- **Waiting** — durable relative delays, absolute-time waits
+  (`workflow/waitUntil`, restart-proof idempotent schedules), and named
+  external signals.
+- **Loops** — bounded `forEach` fan-out and pre-tested `workflow/while`
+  loops whose iterations are durable child runs with committed identities
+  and a hard iteration cap.
 - **Composition** — sub-workflow calls and bounded `forEach` fan-out over a
   collection, each iteration a durable child run with a stable identity.
 - **Sagas** — a node kind may declare a `compensation` handler in code
@@ -161,6 +167,65 @@ const tasks = yield* HumanTasks.HumanTasks
 const open = yield* tasks.list({ state: "open", candidateGroup: "finance" })
 yield* tasks.complete(open[0].taskId, { outcome: "approve", output: { amount: 1200 } })
 ```
+
+## Triggers
+
+- **Schedules (cron).** `Schedules.create({ scheduleId, planId, cron, input })`
+  registers a recurring start (UTC cron, validated at creation, optional
+  revision pin); the `Schedules.runner` layer fires due schedules. Firing is
+  **idempotent by construction**: the run key derives from the schedule id
+  and the exact fire time, so restarts and duplicate runners join the same
+  run instead of double-firing, and a backlog of missed occurrences
+  collapses to one fire for the latest. Memory and SQL stores included.
+- **Webhooks and events.** Admission is a one-liner on the existing API:
+  `Runs.start(planId, { input, runKey: deliveryId })` — the caller-supplied
+  key makes redelivered webhooks join the original run. Authentication and
+  payload validation happen in your HTTP layer before admission.
+
+## Observing runs
+
+`Runs.status` reads a run's state without blocking; `Runs.await` waits for
+the terminal result from any process. Providing `RunJournal.layerMemory` or
+`RunJournal.layerSql` switches on a per-run **timeline projection** — run
+started, every node settlement with its attempt count, work items created,
+decisions recorded, compensations run, and the terminal outcome — queryable
+with `RunJournal.timeline(runId)`. The journal is deliberately
+non-authoritative: entries are idempotent under replay, a journal failure
+never fails a run, and a rebuilt journal cannot corrupt anything.
+
+## Security model
+
+The engine is a library inside your trust boundary; it deliberately ships
+**mechanism, not user policy**:
+
+- **Tokens are addresses, not capabilities.** Decision tokens and signal
+  addresses locate durable state; possessing one must not imply permission.
+  Your application authenticates and authorizes every caller of
+  `HumanTasks.complete`, `Runs.resolveDecision`, `Runs.signal`, and the run
+  lifecycle operations before invoking them — exactly where your user model
+  and directory live.
+- **Plans are untrusted input.** Everything a plan can do was registered in
+  code and admitted by your link policy and limits; expressions are pure and
+  bounded; plans carry no code and no credentials. Secrets belong in handler
+  services, never in configuration.
+- **Tenancy** is the deployment's concern: separate databases (or table
+  prefixes) per tenant, and the `tenantId` engine option flows into every
+  handler's context for per-tenant service scoping.
+
+## Operations
+
+- **Recovery latency** is governed by the sharding poll interval
+  (`DurableEngine` `shardingConfig.entityMessagePollInterval`, default 10s —
+  lower it for latency-sensitive deployments, keep tests at ~100ms).
+- **Keep stable across restarts** of one database: `shardsPerGroup`, shard
+  groups, and the storage table prefix.
+- **Retention**: the native message storage grows with completed runs;
+  schedule external pruning of processed rows per your compliance window.
+  The `RunJournal` and `HumanTasks` tables are projections and may be
+  archived independently.
+- **At-least-once effects**: handler side effects and compensations may
+  re-execute after crashes; integrate idempotency keys (provided in every
+  handler context) with external systems.
 
 ## Guarantees and boundaries
 

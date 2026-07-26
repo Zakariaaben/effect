@@ -227,4 +227,111 @@ describe("Durability", () => {
 
       yield* Effect.promise(() => second.dispose())
     }), 60_000)
+
+  it.live("a deadline armed before a crash fires in a fresh process", () =>
+    Effect.gen(function*() {
+      const directory = mkdtempSync(join(tmpdir(), "workflow-builder-durability-deadline-"))
+      const file = join(directory, "workflows.db")
+
+      const expiryPlan = {
+        formatVersion: 2,
+        id: "durable-deadline",
+        revision: 1,
+        definition: { id: "test/durable", version: "1.0.0" },
+        outputs: [{ name: "verdict", contract: "*" }],
+        nodes: [
+          {
+            id: "review",
+            type: "workflow/humanTask",
+            version: "1.0.0",
+            config: {
+              title: "Approve before the deadline",
+              outcomes: ["approve"],
+              dueInMillis: 3000
+            }
+          },
+          {
+            id: "verdict",
+            type: "workflow/transform",
+            version: "1.0.0",
+            config: { value: Expression.literal("expired-path") }
+          }
+        ],
+        edges: [
+          {
+            _tag: "ControlEdge",
+            id: "late",
+            sourceNodeId: "review",
+            outcome: "expired",
+            targetNodeId: "verdict"
+          },
+          {
+            _tag: "DataEdge",
+            id: "out",
+            source: { _tag: "NodeOutput", nodeId: "verdict", output: "value" },
+            target: { _tag: "WorkflowOutput", output: "verdict" }
+          }
+        ]
+      }
+
+      // ----- process 1: admit the plan, start the run, arm the deadline
+      const first = ManagedRuntime.make(appLayer(file))
+      const runId = yield* run(
+        first,
+        Effect.gen(function*() {
+          const compiled = yield* Compiler.compile(definition, expiryPlan)
+          const store = yield* PlanStore.PlanStore
+          yield* store.save(compiled)
+          const handle = yield* Runs.start("durable-deadline", {
+            input: {},
+            runKey: "deadline-proof"
+          })
+          return handle.runId
+        })
+      )
+
+      let taskId: string | undefined
+      for (let index = 0; index < 200 && taskId === undefined; index++) {
+        taskId = yield* run(
+          first,
+          Effect.gen(function*() {
+            const tasks = yield* HumanTasks.HumanTasks
+            const open = yield* tasks.list({ runId, state: "open" })
+            return open[0]?.taskId
+          })
+        )
+        if (taskId === undefined) {
+          yield* Effect.sleep("50 millis")
+        }
+      }
+      assert.isDefined(taskId)
+
+      // ----- the crash: nobody completed the task, the deadline is on disk
+      yield* Effect.promise(() => first.dispose())
+
+      // ----- process 2: the deadline fires on the real clock after restart
+      const second = ManagedRuntime.make(appLayer(file))
+
+      let status = yield* run(second, Runs.status(runId))
+      for (let index = 0; index < 300 && status._tag !== "Succeeded"; index++) {
+        yield* Effect.sleep("100 millis")
+        status = yield* run(second, Runs.status(runId))
+      }
+      assert.strictEqual(status._tag, "Succeeded")
+      assert.deepStrictEqual(
+        (status as Extract<Runs.RunStatus, { _tag: "Succeeded" }>).value.outputs,
+        { verdict: "expired-path" }
+      )
+
+      const expired = yield* run(
+        second,
+        Effect.gen(function*() {
+          const tasks = yield* HumanTasks.HumanTasks
+          return yield* tasks.get(taskId!)
+        })
+      )
+      assert.strictEqual(expired.state, "expired")
+
+      yield* Effect.promise(() => second.dispose())
+    }), 60_000)
 })

@@ -87,7 +87,17 @@ export * as Registry from "./Registry.ts"
 /**
  * @since 4.0.0
  */
+export * as RunJournal from "./RunJournal.ts"
+
+/**
+ * @since 4.0.0
+ */
 export * as Runs from "./Runs.ts"
+
+/**
+ * @since 4.0.0
+ */
+export * as Schedules from "./Schedules.ts"
 
 /**
  * @since 4.0.0

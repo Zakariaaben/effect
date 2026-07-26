@@ -73,6 +73,22 @@ export type Path = readonly [PathSegment, ...ReadonlyArray<PathSegment>]
 export const CompareOp = Schema.Literals(["lt", "le", "gt", "ge"])
 
 /**
+ * Arithmetic operators over numbers.
+ *
+ * @category schemas
+ * @since 4.0.0
+ */
+export const ArithmeticOp = Schema.Literals(["add", "subtract", "multiply", "divide", "modulo"])
+
+/**
+ * The decoded type of {@link ArithmeticOp}.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type ArithmeticOp = typeof ArithmeticOp.Type
+
+/**
  * The decoded type of {@link CompareOp}.
  *
  * @category models
@@ -120,6 +136,12 @@ export type Expression =
   }
   | { readonly _tag: "Size"; readonly operand: Expression }
   | { readonly _tag: "Coalesce"; readonly operands: ReadonlyArray<Expression> }
+  | {
+    readonly _tag: "Arithmetic"
+    readonly op: ArithmeticOp
+    readonly left: Expression
+    readonly right: Expression
+  }
 
 const Suspended: Schema.Codec<Expression, Expression> = Schema.suspend(
   (): Schema.Codec<Expression, Expression> => Expression
@@ -152,7 +174,12 @@ export const Expression: Schema.Codec<Expression, Expression> = Schema.Union([
     right: Suspended
   }).annotate({ parseOptions: strictParseOptions }),
   Schema.TaggedStruct("Size", { operand: Suspended }).annotate({ parseOptions: strictParseOptions }),
-  Schema.TaggedStruct("Coalesce", { operands: Schema.Array(Suspended) }).annotate({ parseOptions: strictParseOptions })
+  Schema.TaggedStruct("Coalesce", { operands: Schema.Array(Suspended) }).annotate({ parseOptions: strictParseOptions }),
+  Schema.TaggedStruct("Arithmetic", {
+    op: ArithmeticOp,
+    left: Suspended,
+    right: Suspended
+  }).annotate({ parseOptions: strictParseOptions })
 ]).annotate({ identifier: "WorkflowExpression" }) as any
 
 /**
@@ -312,6 +339,25 @@ export const size = (operand: Expression): Expression => ({ _tag: "Size", operan
  */
 export const coalesce = (...operands: ReadonlyArray<Expression>): Expression => ({ _tag: "Coalesce", operands })
 
+/**
+ * Constructs a strict numeric arithmetic expression.
+ *
+ * **Details**
+ *
+ * Both operands must evaluate to numbers; division and modulo by zero and
+ * non-finite results are evaluation errors rather than `Infinity`/`NaN`, so
+ * committed values stay portable JSON.
+ *
+ * @category constructors
+ * @since 4.0.0
+ */
+export const arithmetic = (op: ArithmeticOp, left: Expression, right: Expression): Expression => ({
+  _tag: "Arithmetic",
+  op,
+  left,
+  right
+})
+
 // ----------------------------------------------------------------------------
 // Static analysis
 // ----------------------------------------------------------------------------
@@ -343,6 +389,7 @@ const children = (expression: Expression): ReadonlyArray<Expression> => {
       return expression.operands
     case "Eq":
     case "Compare":
+    case "Arithmetic":
       return [expression.left, expression.right]
   }
 }
@@ -654,6 +701,51 @@ const evaluateAt = (
         }
       }
       return Result.succeed(null)
+    }
+    case "Arithmetic": {
+      const left = evaluateAt(expression.left, scope, [...expressionPath, "left"])
+      if (Result.isFailure(left)) {
+        return left
+      }
+      const right = evaluateAt(expression.right, scope, [...expressionPath, "right"])
+      if (Result.isFailure(right)) {
+        return right
+      }
+      const l = left.success
+      const r = right.success
+      if (typeof l !== "number" || typeof r !== "number") {
+        return Result.fail(evaluationError(
+          "TypeMismatch",
+          `Arithmetic requires two numbers, received ${describe(l)} and ${describe(r)}`,
+          expressionPath
+        ))
+      }
+      let value: number
+      switch (expression.op) {
+        case "add":
+          value = l + r
+          break
+        case "subtract":
+          value = l - r
+          break
+        case "multiply":
+          value = l * r
+          break
+        case "divide":
+          value = l / r
+          break
+        case "modulo":
+          value = l % r
+          break
+      }
+      if (!Number.isFinite(value)) {
+        return Result.fail(evaluationError(
+          "TypeMismatch",
+          `Arithmetic '${expression.op}' produced a non-finite result`,
+          expressionPath
+        ))
+      }
+      return Result.succeed(value)
     }
   }
 }

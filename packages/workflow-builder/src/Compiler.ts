@@ -513,6 +513,25 @@ const builtinExpressionSites = (
         ? []
         : [{ expression: durationMillis, path: [...base, "durationMillis"], extraRoots: [] }]
     }
+    case "waitUntil": {
+      const { atMillis } = config as { atMillis: number | Expression.Expression }
+      return typeof atMillis === "number"
+        ? []
+        : [{ expression: atMillis, path: [...base, "atMillis"], extraRoots: [] }]
+    }
+    case "while": {
+      const { condition, input } = config as {
+        condition: Expression.Expression
+        input?: Expression.Expression
+      }
+      const sites: Array<ExpressionSite> = [
+        { expression: condition, path: [...base, "condition"], extraRoots: ["iteration", "previous"] }
+      ]
+      if (input !== undefined) {
+        sites.push({ expression: input, path: [...base, "input"], extraRoots: ["iteration", "previous"] })
+      }
+      return sites
+    }
     case "fail": {
       const { message } = config as { message?: string | Expression.Expression }
       return message === undefined || typeof message === "string"

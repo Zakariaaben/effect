@@ -64,6 +64,18 @@ export interface StoredPlan {
 }
 
 /**
+ * A plan's identity pinned at its latest admitted revision.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export interface PlanSummary {
+  readonly planId: string
+  readonly latestRevision: number
+  readonly fingerprint: Fingerprint.Fingerprint
+}
+
+/**
  * Service storing admitted plan revisions.
  *
  * **Details**
@@ -71,7 +83,9 @@ export interface StoredPlan {
  * `save` accepts only a plan that passed compilation, computes its canonical
  * fingerprint, and is idempotent for identical content. `get` returns an
  * exact revision and `latest` the highest saved revision; both return the
- * pinned fingerprint so callers can fail closed on drift.
+ * pinned fingerprint so callers can fail closed on drift. `list` summarizes
+ * every stored plan at its latest revision, sorted by plan id, and
+ * `revisions` returns a plan's full history in ascending revision order.
  *
  * @category services
  * @since 4.0.0
@@ -82,6 +96,8 @@ export class PlanStore extends Context.Service<PlanStore, {
   ) => Effect.Effect<StoredPlan, PlanConflictError | PlatformError.PlatformError>
   readonly get: (planId: string, revision: number) => Effect.Effect<StoredPlan, PlanNotFoundError>
   readonly latest: (planId: string) => Effect.Effect<StoredPlan, PlanNotFoundError>
+  readonly list: () => Effect.Effect<ReadonlyArray<PlanSummary>>
+  readonly revisions: (planId: string) => Effect.Effect<ReadonlyArray<StoredPlan>, PlanNotFoundError>
 }>()("@effect/workflow-builder/PlanStore") {}
 
 const storageKey = (planId: string, revision: number): string => JSON.stringify([planId, revision])
@@ -158,7 +174,30 @@ export const layerMemory: Layer.Layer<PlanStore, never, Crypto.Crypto> = Layer.e
         return stored === undefined
           ? Effect.fail(new PlanNotFoundError({ planId }))
           : Effect.succeed(stored)
-      }
+      },
+      list: () =>
+        Effect.sync(() => {
+          const summaries: Array<PlanSummary> = []
+          for (const [planId, revision] of latestRevision) {
+            const stored = revisions.get(storageKey(planId, revision))!
+            summaries.push({
+              planId,
+              latestRevision: stored.revision,
+              fingerprint: stored.fingerprint
+            })
+          }
+          summaries.sort((left, right) => (left.planId < right.planId ? -1 : left.planId > right.planId ? 1 : 0))
+          return summaries
+        }),
+      revisions: (planId) =>
+        Effect.suspend(() => {
+          const history = Array.from(revisions.values()).filter((stored) => stored.planId === planId)
+          if (history.length === 0) {
+            return Effect.fail(new PlanNotFoundError({ planId }))
+          }
+          history.sort((left, right) => left.revision - right.revision)
+          return Effect.succeed(history as ReadonlyArray<StoredPlan>)
+        })
     })
   })
 )
@@ -315,6 +354,32 @@ export const layerSql = (options?: {
               rows.length === 0
                 ? Effect.fail(new PlanNotFoundError({ planId }))
                 : rowToStored(rows[0]!)
+            )
+          ),
+        list: () =>
+          sql<Pick<Row, "plan_id" | "revision" | "fingerprint">>`SELECT plan_id, revision, fingerprint
+            FROM ${tableSql} pins
+            WHERE revision = (SELECT MAX(revision) FROM ${tableSql} WHERE plan_id = pins.plan_id)
+            ORDER BY plan_id`.pipe(
+            Effect.orDie,
+            Effect.map((rows) =>
+              rows.map((row): PlanSummary => ({
+                planId: row.plan_id,
+                latestRevision: Number(row.revision),
+                fingerprint: row.fingerprint as Fingerprint.Fingerprint
+              }))
+            )
+          ),
+        revisions: (planId) =>
+          sql<Row>`SELECT plan_id, revision, fingerprint, document
+            FROM ${tableSql}
+            WHERE plan_id = ${planId}
+            ORDER BY revision`.pipe(
+            Effect.orDie,
+            Effect.flatMap((rows) =>
+              rows.length === 0
+                ? Effect.fail(new PlanNotFoundError({ planId }))
+                : Effect.forEach(rows, rowToStored)
             )
           )
       })
