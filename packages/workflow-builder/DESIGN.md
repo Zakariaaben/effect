@@ -265,11 +265,19 @@ Task, Hatchet, Trigger.dev, Netflix Maestro — shaped these standing choices:
 
 ## Roadmap
 
+Durable execution is implemented: `DurableEngine.layer` composes the native
+cluster workflow engine into a single-node persistent engine over an
+application-supplied `SqlClient`, `PlanStore.layerSql`/`HumanTasks.layerSql`
+persist the surrounding state, and `test/Durability.test.ts` proves
+crash/restart recovery — a run suspended on a human task survives full
+runtime disposal, its completed steps replay from persisted results, and it
+resumes to completion in a fresh process over the same database.
+
 Deliberately not in this iteration, in rough priority order:
 
-1. **Cluster conformance suite** — the engine against
-   `ClusterWorkflowEngine` with crash/restart and multi-worker evidence;
-   durable `PlanStore`/`HumanTasks` reference implementations over SQL.
+1. **Multi-runner conformance** — the same engine across several runner
+   processes (socket runners, shard manager, failover evidence); the
+   single-node preset already uses the identical storage model.
 2. **Triggers** — schedule/event/webhook admission producing runs with
    dedup/correlation, as a layer above `Runs.start`.
 3. **Run observability** — a non-authoritative run journal/timeline

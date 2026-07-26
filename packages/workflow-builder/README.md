@@ -165,11 +165,14 @@ yield* tasks.complete(open[0].taskId, { outcome: "approve", output: { amount: 12
   activity boundaries. Handlers must keep their own nondeterminism inside
   their activity (it is recorded) and their external effects idempotent —
   activity execution is at-least-once.
-- **Durability is the injected engine's.** `WorkflowEngine.layerMemory`
-  drives tests; production durability, crash recovery, and distribution
-  require a persistent engine layer (e.g. the cluster engine) plus durable
-  `PlanStore`/`HumanTasks` implementations. This package ships memory layers
-  and the semantics they must preserve.
+- **Durability is real and single-node friendly.** `WorkflowEngine.layerMemory`
+  drives tests; `DurableEngine.layer` provides the persistent engine over any
+  `SqlClient` (SQLite for one box, Postgres/MySQL for a server) — no
+  multi-node deployment required — with `PlanStore.layerSql` and
+  `HumanTasks.layerSql` persisting plans and work items beside it. Runs
+  survive process crashes: committed steps replay from their recorded
+  results, suspended waits wake on completion or their scheduled deadline,
+  and the restart proof lives in `test/Durability.test.ts`.
 - **Cancellation is cooperative.** `Runs.cancel` interrupts the run, cascades
   to children, cancels open work items, and runs compensation; it does not
   claim an already-started external effect stopped.

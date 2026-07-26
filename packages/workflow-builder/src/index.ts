@@ -22,6 +22,11 @@ export * as Diagnostic from "./Diagnostic.ts"
 /**
  * @since 4.0.0
  */
+export * as DurableEngine from "./DurableEngine.ts"
+
+/**
+ * @since 4.0.0
+ */
 export * as Engine from "./Engine.ts"
 
 /**
