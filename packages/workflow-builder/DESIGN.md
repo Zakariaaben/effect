@@ -286,8 +286,10 @@ Deliberately not in this iteration, in rough priority order:
    committed iteration identity.
 5. **Absolute-time waits and calendars** (`waitUntil`, cron-like schedules)
    over `DurableClock.schedule`.
-6. **Compensation vocabulary** — saga scopes surfaced in the plan format
-   (the native `withCompensation` hook is already used for task cleanup).
+6. **Plan-level saga scopes** — node-kind compensation handlers are
+   implemented (armed on success, unwound durably in reverse order inside
+   the run's failure path, skipped for routed `error` outcomes); explicit
+   compensation *regions* in the plan format remain future work.
 7. **Active-instance migration** — typed mappings from a running plan
    revision to a successor, in the spirit of Camunda's instance migration.
 8. **Schedule-to-close preemption** — upgrading `timeouts.totalMillis` from

@@ -123,6 +123,13 @@ const handlers = registry.toLayer(registry.of({
 - **Waiting** — durable relative delays and named external signals.
 - **Composition** — sub-workflow calls and bounded `forEach` fan-out over a
   collection, each iteration a durable child run with a stable identity.
+- **Sagas** — a node kind may declare a `compensation` handler in code
+  (refund the charge, release the reservation); compensations arm as
+  compensable steps complete and unwind as durable activities, in reverse
+  order, when the run fails or is cancelled — never on a failure the plan
+  routed as a handled `error` outcome. Nodes without a declared compensation
+  simply have nothing to undo, and a cancelled sub-workflow unwinds its own
+  compensations recursively.
 
 ## Running plans
 

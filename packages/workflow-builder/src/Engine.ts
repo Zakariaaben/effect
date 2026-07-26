@@ -331,6 +331,10 @@ interface RunContext {
   readonly latches: Map<string, Deferred.Deferred<Settlement>>
   readonly values: Map<string, Schema.Json>
   readonly nodesScope: { [nodeId: string]: Schema.Json }
+  readonly compensations: Array<{
+    readonly node: Compiler.CompiledNode
+    readonly settlement: Extract<Settlement, { _tag: "Completed" }>
+  }>
 }
 
 const valueKey = (endpoint: { readonly kind: string; readonly nodeId?: string; readonly port: string }): string =>
@@ -746,6 +750,97 @@ const runApplicationNode = (
         }
       }
       attempt++
+    }
+  })
+
+// ----------------------------------------------------------------------------
+// Saga compensation
+// ----------------------------------------------------------------------------
+
+const compensationActivity = (
+  context: RunContext,
+  node: Compiler.CompiledNode,
+  settlement: Extract<Settlement, { _tag: "Completed" }>
+): Effect.Effect<void, never, any> =>
+  Activity.make({
+    name: durableName("compensate", node.node.id),
+    execute: Effect.gen(function*() {
+      const entry = context.handlers.get(node.node.type, node.node.version)
+      const compensation = node.definition.compensation
+      if (entry === undefined || compensation === undefined) {
+        return
+      }
+      const config = yield* decodeConfig(node)
+      const resolved = yield* resolveInputs(context, node)
+      const inputs = resolved._tag === "Resolved" ? resolved.inputs : {}
+      const outputs: Record<string, unknown> = {}
+      for (const portName of Object.keys(node.definition.outputs)) {
+        const encoded = settlement.outputs[portName]
+        if (encoded !== undefined) {
+          outputs[portName] = yield* decodePortValue(
+            node.node.id,
+            portName,
+            node.definition.outputs[portName]!.schema,
+            encoded
+          )
+        }
+      }
+      const idempotencyKey = yield* Activity.idempotencyKey(durableName("compensate", node.node.id))
+      const request = {
+        config,
+        inputs,
+        outputs,
+        context: {
+          scope: {
+            _tag: "Durable" as const,
+            tenantId: context.tenantId,
+            handlerDeploymentId: `${context.definition.id}@${context.definition.version}`
+          },
+          runId: context.executionId,
+          planId: context.payload.planId,
+          planRevision: context.payload.revision,
+          nodeId: node.node.id,
+          nodeInstanceId: durableName(context.executionId, node.node.id),
+          attempt: 1,
+          idempotencyKey
+        }
+      }
+      yield* (compensation(request as never) as Effect.Effect<void, never, any>).pipe(
+        Effect.updateContext((current) => Context.merge(entry.context as Context.Context<any>, current))
+      )
+    }).pipe(Effect.orDie)
+  }) as Effect.Effect<void, never, any>
+
+/**
+ * Arms a completed node's declared compensation on the run's own saga stack.
+ *
+ * **Details**
+ *
+ * Compensations run as durable activities, in reverse arming order, inside
+ * the run's failure path — before the failed or cancelled result becomes
+ * observable — and never when a business failure was routed through a wired
+ * `error` outcome, which is a handled path. Nodes without a declared
+ * compensation simply have nothing to unwind.
+ */
+const armCompensation = (
+  context: RunContext,
+  node: Compiler.CompiledNode,
+  settlement: Settlement
+): void => {
+  if (
+    settlement._tag === "Completed" &&
+    settlement.outcome !== Plan.ErrorOutcome &&
+    node.definition.compensation !== undefined
+  ) {
+    context.compensations.push({ node, settlement })
+  }
+}
+
+const runCompensations = (context: RunContext): Effect.Effect<void, never, any> =>
+  Effect.gen(function*() {
+    for (let index = context.compensations.length - 1; index >= 0; index--) {
+      const armed = context.compensations[index]!
+      yield* compensationActivity(context, armed.node, armed.settlement)
     }
   })
 
@@ -1180,6 +1275,7 @@ const runNode = (
     const settlement = node.definition.external !== undefined
       ? yield* runExternalNode(context, node, resolved.inputs)
       : yield* runApplicationNode(context, node, resolved.inputs)
+    armCompensation(context, node, settlement)
     yield* settle(context, nodeId, settlement)
   })
 
@@ -1302,7 +1398,8 @@ const interpret = (
       settlements: new Map(),
       latches: new Map(),
       values: new Map(),
-      nodesScope: {}
+      nodesScope: {},
+      compensations: []
     }
     for (const name of Object.keys(input)) {
       context.values.set(durableName("WorkflowInput", name), input[name]!)
@@ -1315,9 +1412,19 @@ const interpret = (
     // than successful completion of every waiting node.
     yield* DurableWorkflow.addFinalizer(() => humanTasks.cancelByRun(executionId).pipe(Effect.ignore))
 
+    // The saga boundary: when interpretation fails or the run is cancelled,
+    // armed compensations unwind — durably, in reverse order — before the
+    // terminal result becomes observable. A failure routed through a wired
+    // `error` outcome never reaches this path.
     yield* Effect.all(
       compiled.topologicalOrder.map((nodeId) => runNode(context, nodeId)),
       { concurrency: "unbounded", discard: true }
+    ).pipe(
+      Effect.onExit((exit) =>
+        exit._tag === "Success" || context.compensations.length === 0
+          ? Effect.void
+          : Effect.uninterruptible(runCompensations(context))
+      )
     )
 
     const outputs = yield* collectOutputs(context)

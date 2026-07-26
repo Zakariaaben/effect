@@ -80,6 +80,11 @@ application-owned by design:
 - Timeouts as distinct, non-business outcomes (attempt and total budget).
 - Run-level abort (`workflow/fail`) and external cancellation with
   compensation hooks and work-item cleanup.
+- Saga compensation: node kinds declare compensation handlers in code;
+  completed compensable steps unwind as durable activities in reverse order
+  on run failure or cancellation, before the terminal result is observable,
+  and never for failures the plan routed as handled outcomes. No
+  exactly-once claim: compensations are at-least-once like any activity.
 
 ## Time patterns
 

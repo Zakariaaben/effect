@@ -70,6 +70,21 @@ export const EmptyConfig = Schema.Struct({})
 export type Outcomes = ReadonlyArray<string> | ((config: never) => ReadonlyArray<string>)
 
 /**
+ * Everything a compensation handler receives about the completed work it
+ * must undo: the node's decoded configuration, the inputs it ran with, the
+ * outputs it produced, and the run context.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export interface CompensationRequest<N extends Any> {
+  readonly config: Config<N>
+  readonly inputs: InputValues<N>
+  readonly outputs: OutputValues<N>
+  readonly context: HandlerContext
+}
+
+/**
  * Marks a node kind as externally completed.
  *
  * **Details**
@@ -123,6 +138,7 @@ export interface Definition<
   readonly failureSchema: Failure
   readonly outcomes: Outcomes | undefined
   readonly external: External | undefined
+  readonly compensation: ((request: never) => Effect.Effect<void, never, any>) | undefined
   readonly defaultPolicy: Policy.Policy | undefined
   readonly annotations: Context.Context<never>
 
@@ -547,6 +563,14 @@ export const make = <
     | boolean
     | { readonly deadline?: ((config: Config["Type"]) => number | undefined) | undefined }
     | undefined
+  readonly compensation?:
+    | ((request: {
+      readonly config: Config["Type"]
+      readonly inputs: Port.InputValues<Inputs>
+      readonly outputs: Port.OutputValues<Outputs>
+      readonly context: HandlerContext
+    }) => Effect.Effect<void, never, Context.Service.Identifier<Dependencies[number]>>)
+    | undefined
   readonly policy?: Policy.Policy | undefined
   readonly dependencies?: Dependencies | undefined
 }): Definition<
@@ -571,6 +595,7 @@ export const make = <
     external: options.external === undefined || options.external === false
       ? undefined
       : Object.freeze(options.external === true ? {} : { ...options.external }),
+    compensation: options.compensation,
     defaultPolicy: options.policy,
     annotations: Context.empty()
   }))) as any
