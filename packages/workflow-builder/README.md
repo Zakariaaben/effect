@@ -203,14 +203,25 @@ The engine is a library inside your trust boundary; it deliberately ships
   Your application authenticates and authorizes every caller of
   `HumanTasks.complete`, `Runs.resolveDecision`, `Runs.signal`, and the run
   lifecycle operations before invoking them — exactly where your user model
-  and directory live.
+  and directory live. Tokens carry no built-in HMAC and execution ids are
+  derived (not high-entropy) when you supply a guessable `runKey`, so this
+  authorization is load-bearing: do not expose raw tokens to untrusted
+  clients, and prefer an unguessable `runKey`. Defense-in-depth (signed
+  tokens, tenant-scoped stores) is a planned hardening; today the application
+  boundary is the only barrier.
 - **Plans are untrusted input.** Everything a plan can do was registered in
-  code and admitted by your link policy and limits; expressions are pure and
-  bounded; plans carry no code and no credentials. Secrets belong in handler
-  services, never in configuration.
-- **Tenancy** is the deployment's concern: separate databases (or table
-  prefixes) per tenant, and the `tenantId` engine option flows into every
-  handler's context for per-tenant service scoping.
+  code and admitted by your link policy and limits; expressions are pure,
+  depth/size-bounded, and stack-safe; admission caps plan nesting and node
+  fan-out (`while` iterations, `forEach` concurrency, wait horizons); plans
+  carry no code and no credentials. Secrets belong in handler services, never
+  in configuration.
+- **Tenancy** is currently the deployment's responsibility and is *not*
+  enforced by the engine: the SQL stores carry no tenant column, and a plan
+  may reference another plan by id (`subWorkflow`/`forEach`/`while`) with no
+  ownership check. For multi-tenant isolation run a **separate deployment
+  (database and plan namespace) per tenant** rather than sharing storage; the
+  `tenantId` engine option only scopes handler-context services, not storage.
+  Engine-enforced tenant scoping is on the roadmap.
 
 ## Operations
 

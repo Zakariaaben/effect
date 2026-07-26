@@ -12,10 +12,33 @@ are cited as design requirements, not as a conformance certificate: a pattern
 is listed as supported only when the portable plan can express it and the
 engine executes it under replay.
 
-BPMN 2.0.2 is treated as prior art and a possible future import source, not
-as this package's format. **No BPMN conformance is claimed.** The earlier
-BPMN model/XML/kernel work is preserved in branch history
-(`agent/workflow-builder-bpmn-foundations`) should an importer be revisited.
+BPMN 2.0.2 is prior art and a *design lens*, not this package's execution
+format. The `Bpmn` module ships an importer and exporter over the executable
+subset (`Bpmn.toPlan` / `Bpmn.fromPlan`), but **no BPMN Process Execution
+Conformance is claimed**: the importer maps a bounded subset to the portable
+plan and fails closed on unsupported vocabulary, while some token-flow shapes
+are deliberately reinterpreted through the plan's join semantics rather than
+executed as a BPMN engine would.
+
+### Known BPMN divergences
+
+These are intentional and documented, not conformance:
+
+- **Exclusive gateway, no default flow, no case true.** BPMN raises a runtime
+  error; the importer synthesizes a `default`-outcome fail node so an
+  unmatched gateway fails the run (matching the *outcome*, not the error
+  vocabulary).
+- **Exclusive split → parallel join.** BPMN deadlocks awaiting the missing
+  token; the plan's synchronizing merge fires on the live branch and does not
+  deadlock. More forgiving than BPMN.
+- **Parallel split → converging exclusive gateway (multi-merge, WCP8).** BPMN
+  passes each token independently (two firings); the plan fires once. This
+  shape should be avoided in imported models.
+- **Export.** Emitted exclusive gateways carry routing in `wb:config` (not
+  native `conditionExpression`/`default`), and outcome routing uses an
+  extension attribute; a standards modeler can display and re-import the
+  file faithfully, but a third-party BPMN engine cannot execute it. "Standard
+  BPMN XML for interchange", not "portable executable BPMN".
 
 ## Control-flow patterns
 
@@ -43,6 +66,24 @@ BPMN model/XML/kernel work is preserved in branch history
 | WCP24 Persistent trigger             | ✅     | `workflow/receive` + `Runs.signal`: first-wins durable delivery, retained if it arrives early    |
 
 ✅ supported ◐ partial (as described) ❌ not supported
+
+**A note on `join: "all"`.** Despite the name, it is a *synchronizing* merge
+with dead-path elimination, not a strict AND-join: it waits for every
+incoming branch to settle, then fires when at least one incoming control edge
+is live (settling as skipped when all are dead), and skipping propagates
+transitively. This single mechanism realizes WCP3, WCP5, and WCP7 — and,
+restricted to the admitted acyclic plan language, an acyclic OR-join. A pure
+control merge never deadlocks; a merge whose dead branch is fed by an
+unrelated slow node is latency-coupled to that node's settlement (never a
+deadlock, but not "fire on first arrival").
+
+**A note on dead-path references.** A required data-edge input from a skipped
+node settles the consumer as skipped, but an *expression* reference
+(`workflow/transform`/`if`/`switch` config, or a binding) to a skipped node's
+output evaluates to a missing path and fails the run, matching Camunda's
+"missing variable" behavior. Guard such references with `coalesce` when a
+branch may legitimately not run (as when a zero-iteration `while` feeds a
+downstream transform).
 
 ## Data patterns
 

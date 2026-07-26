@@ -190,11 +190,11 @@ describe("DualMode", () => {
         yield* savePlan(openDefinition, openPlan)
 
         const missing = yield* Runs.execute("open-plan", { input: {} }).pipe(Effect.flip)
-        assert.strictEqual(missing._tag, "EngineFault")
-        assert.match((missing as Engine.EngineFault).message, /amount/)
+        assert.strictEqual(missing._tag, "InputRejected")
+        assert.strictEqual((missing as Engine.InputRejected).input, "amount")
 
         const mistyped = yield* Runs.execute("open-plan", { input: { amount: "NaN" } }).pipe(Effect.flip)
-        assert.strictEqual(mistyped._tag, "EngineFault")
+        assert.strictEqual(mistyped._tag, "InputRejected")
       }).pipe(Effect.provide(OpenLayer)))
 
     it.effect("rejects plan-declared boundaries against a closed definition", () =>

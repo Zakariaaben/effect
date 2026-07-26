@@ -300,3 +300,28 @@ worse than lacking them:
 6. **Timezone-aware calendars** — cron evaluation is UTC.
 7. **Connector catalog, editor UI, credential vault** — product layers by
    design; the engine stays UI-agnostic.
+
+### Review-panel residuals (hardening backlog)
+
+A six-reviewer panel (three integration personas, three experts) validated
+the engine and surfaced work worth tracking. Confirmed correctness and
+security issues were fixed with tests (expression stack-safety and admission
+bounds; null-prototype scopes; causal journal ordering; fan-out DoS caps;
+the two BPMN token-flow divergences; the any-join data race; typed
+`InputRejected`). The remaining, deliberately-deferred items:
+
+- **Token defense-in-depth** — HMAC-signed decision/signal tokens with a
+  deployment secret, and not returning raw tokens from `HumanTasks`
+  list/get, so an authorization lapse is insufficient for compromise.
+- **Engine-enforced tenancy** — a tenant column and mandatory predicate on
+  every store, `tenantId` in the run identity, and an ownership check before
+  a plan may reference another plan.
+- **Compiled-plan caching** by `(planId, revision, fingerprint)` — today the
+  plan recompiles on every run and every replay.
+- **Draft/partial compile mode and an encoded-config introspection helper**
+  for canvas UIs, plus structured field paths on schema/config diagnostics.
+- **A typed `PlanBuilder`** that emits portable plan JSON with compile-time
+  wiring checks, and a `CompiledPlan`-typed `Runs` facade, for code-first
+  authoring ergonomics.
+- **Run inventory** (`Runs.list` by plan/state/tenant) and a generic
+  external-decision registry (the human-task work-item store, generalized).

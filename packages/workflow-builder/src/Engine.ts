@@ -196,6 +196,26 @@ export class PlanRejected extends Schema.TaggedErrorClass<PlanRejected>(
 }) {}
 
 /**
+ * The run input did not satisfy the workflow's input boundary.
+ *
+ * **Details**
+ *
+ * A distinct, caller-attributable failure — a missing or mistyped run input
+ * is the caller's mistake, not an engine fault — so an application can map it
+ * to a client error (e.g. HTTP 400) while treating {@link EngineFault} as an
+ * internal error (500).
+ *
+ * @category errors
+ * @since 4.0.0
+ */
+export class InputRejected extends Schema.TaggedErrorClass<InputRejected>(
+  "@effect/workflow-builder/Engine/InputRejected"
+)("InputRejected", {
+  input: Schema.optionalKey(Schema.String),
+  message: Schema.String
+}) {}
+
+/**
  * Every way a run can fail.
  *
  * @category schemas
@@ -206,7 +226,8 @@ export const RunFailure = Schema.Union([
   NodeTimedOut,
   RunAborted,
   EngineFault,
-  PlanRejected
+  PlanRejected,
+  InputRejected
 ]).annotate({ identifier: "WorkflowRunFailure" })
 
 /**
@@ -1514,21 +1535,22 @@ const interpret = (
     )
 
     // Validate the run input against the resolved boundary, whichever side —
-    // definition code or the plan itself — declared it.
+    // definition code or the plan itself — declared it. A bad input is the
+    // caller's mistake, reported distinctly from an engine fault.
     if (payload.input === null || typeof payload.input !== "object" || Array.isArray(payload.input)) {
-      return yield* Effect.fail(fault(undefined, "input", "Run input must be a JSON object"))
+      return yield* Effect.fail(new InputRejected({ message: "Run input must be a JSON object" }))
     }
     const input = payload.input as Schema.JsonObject
     for (const [name, entry] of compiled.boundary.inputs) {
       if (!Object.prototype.hasOwnProperty.call(input, name)) {
         if (entry.required) {
-          return yield* Effect.fail(fault(undefined, "input", `Missing workflow input '${name}'`))
+          return yield* Effect.fail(new InputRejected({ input: name, message: `Missing workflow input '${name}'` }))
         }
         continue
       }
       yield* erase(Schema.decodeUnknownEffect(entry.port.schema)(input[name])).pipe(
         Effect.catchCause((cause) =>
-          Effect.fail(fault(undefined, "input", `Workflow input '${name}': ${Cause.pretty(cause)}`))
+          Effect.fail(new InputRejected({ input: name, message: `Workflow input '${name}': ${Cause.pretty(cause)}` }))
         )
       )
     }
