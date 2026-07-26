@@ -1,4 +1,4 @@
-import { Compiler, Interpreter, LinkPolicy, Node, Port, Registry, Workflow } from "@effect/workflow-builder"
+import { Compiler, LinkPolicy, Node, Port, Registry, Workflow } from "@effect/workflow-builder"
 import * as Effect from "effect/Effect"
 import * as Schema from "effect/Schema"
 
@@ -66,15 +66,11 @@ const plan = {
 
 const program = Effect.gen(function*() {
   const compiled = yield* Compiler.compile(definition, plan)
-  const handlers = yield* registry.toHandlers(registry.of({
-    "Decorate@1.0.0": ({ config, inputs }) => Effect.succeed({ value: `${config.prefix}, ${inputs.value}!` })
-  }))
-
-  return yield* Interpreter.execute(compiled, { name: "Ada" }, {
-    runId: "example-run-1",
-    concurrency: 4
-  }).pipe(Effect.provideService(Registry.HandlerRegistry, handlers))
+  return {
+    nodes: Array.from(compiled.nodes.keys()),
+    order: compiled.topologicalOrder
+  }
 })
 
 Effect.runPromise(program).then(console.log)
-// { greeting: "Hello, Ada!" }
+// { nodes: ["hello"], order: ["hello"] }
