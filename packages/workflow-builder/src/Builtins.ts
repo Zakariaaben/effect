@@ -21,6 +21,44 @@ const strictParseOptions = { onExcessProperty: "error" } as const
 const PositiveInt = Schema.Int.check(Schema.isGreaterThan(0))
 
 /**
+ * Hard ceiling on `workflow/while` iterations.
+ *
+ * **Details**
+ *
+ * A bound on the loop's iteration budget that admission enforces regardless
+ * of what the plan requests, so a single loop cannot schedule an unbounded
+ * fan of durable child runs. Generous for real business loops, far below a
+ * denial-of-service fan-out.
+ *
+ * @category constants
+ * @since 4.0.0
+ */
+export const MaxIterations = 100_000
+
+/**
+ * Hard ceiling on the concurrency of a parallel `workflow/forEach`.
+ *
+ * @category constants
+ * @since 4.0.0
+ */
+export const MaxConcurrency = 256
+
+/**
+ * Hard ceiling, in milliseconds, on a single durable wait (`workflow/delay`
+ * or a `workflow/humanTask` deadline). Roughly one hundred years — long
+ * enough for any legitimate business wait, bounded so a plan cannot pin
+ * durable storage indefinitely.
+ *
+ * @category constants
+ * @since 4.0.0
+ */
+export const MaxWaitMillis = 100 * 365 * 24 * 60 * 60 * 1000
+
+const BoundedIterations = PositiveInt.check(Schema.isLessThanOrEqualTo(MaxIterations))
+const BoundedConcurrency = PositiveInt.check(Schema.isLessThanOrEqualTo(MaxConcurrency))
+const BoundedWaitMillis = PositiveInt.check(Schema.isLessThanOrEqualTo(MaxWaitMillis))
+
+/**
  * The version shared by every built-in definition in this engine generation.
  *
  * @category constants
@@ -186,7 +224,7 @@ export const ForEach = Node.make("workflow/forEach", {
     items: Expression.Expression,
     plan: PlanReference,
     mode: Schema.optionalKey(Schema.Literals(["sequential", "parallel"])),
-    concurrency: Schema.optionalKey(PositiveInt),
+    concurrency: Schema.optionalKey(BoundedConcurrency),
     input: Schema.optionalKey(Expression.Expression)
   }).annotate({ parseOptions: strictParseOptions }),
   outputs: {
@@ -247,7 +285,7 @@ export const HumanTask = Node.make("workflow/humanTask", {
     payload: Schema.optionalKey(Expression.Expression),
     assignee: Schema.optionalKey(Expression.Expression),
     candidateGroups: Schema.optionalKey(Expression.Expression),
-    dueInMillis: Schema.optionalKey(PositiveInt)
+    dueInMillis: Schema.optionalKey(BoundedWaitMillis)
   }).annotate({ parseOptions: strictParseOptions }),
   outputs: {
     output: output(Schema.Json)
@@ -265,7 +303,7 @@ export const Delay = Node.make("workflow/delay", {
   version: Version,
   description: "Waits a fixed or computed number of milliseconds",
   config: Schema.Struct({
-    durationMillis: Schema.Union([PositiveInt, Expression.Expression])
+    durationMillis: Schema.Union([BoundedWaitMillis, Expression.Expression])
   }).annotate({ parseOptions: strictParseOptions })
 }).annotate(Kind, "delay")
 
@@ -314,7 +352,7 @@ export const While = Node.make("workflow/while", {
     condition: Expression.Expression,
     plan: PlanReference,
     input: Schema.optionalKey(Expression.Expression),
-    maxIterations: PositiveInt
+    maxIterations: BoundedIterations
   }).annotate({ parseOptions: strictParseOptions }),
   outputs: {
     iterations: output(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),

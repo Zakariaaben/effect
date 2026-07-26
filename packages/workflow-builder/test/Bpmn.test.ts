@@ -260,6 +260,79 @@ describe("Bpmn", () => {
       assert.include(codesOf(badDuration), Bpmn.Codes.InvalidDuration)
     }))
 
+  it.effect("synthesizes a fail for an exclusive gateway with no default flow", () =>
+    Effect.gen(function*() {
+      const imported = yield* importPlan(`<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+    xmlns:wb="${Bpmn.ExtensionNamespace}" id="defs" targetNamespace="urn:test">
+  <bpmn:process id="nodefault" isExecutable="true">
+    <bpmn:startEvent id="start"/>
+    <bpmn:serviceTask id="score" name="Score">
+      <bpmn:extensionElements><wb:node type="Score" version="1.0.0"/></bpmn:extensionElements>
+    </bpmn:serviceTask>
+    <bpmn:exclusiveGateway id="gate"/>
+    <bpmn:serviceTask id="high">
+      <bpmn:extensionElements>
+        <wb:node type="workflow/transform" version="1.0.0"/>
+        <wb:config>{"value":{"_tag":"Literal","value":"high"}}</wb:config>
+      </bpmn:extensionElements>
+    </bpmn:serviceTask>
+    <bpmn:serviceTask id="mid">
+      <bpmn:extensionElements>
+        <wb:node type="workflow/transform" version="1.0.0"/>
+        <wb:config>{"value":{"_tag":"Literal","value":"mid"}}</wb:config>
+      </bpmn:extensionElements>
+    </bpmn:serviceTask>
+    <bpmn:endEvent id="done"/>
+    <bpmn:sequenceFlow id="f1" sourceRef="start" targetRef="score"/>
+    <bpmn:sequenceFlow id="f2" sourceRef="score" targetRef="gate"/>
+    <bpmn:sequenceFlow id="toHigh" name="high" sourceRef="gate" targetRef="high">
+      <bpmn:conditionExpression language="${Bpmn.ExpressionLanguage}">${condition("gt")}</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="toMid" name="mid" sourceRef="gate" targetRef="mid">
+      <bpmn:conditionExpression language="${Bpmn.ExpressionLanguage}">${condition("le")}</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="f3" sourceRef="high" targetRef="done"/>
+    <bpmn:sequenceFlow id="f4" sourceRef="mid" targetRef="done"/>
+  </bpmn:process>
+</bpmn:definitions>`)
+
+      const failNode = imported.plan.nodes.find((node) => node.type === "workflow/fail")
+      assert.isDefined(failNode)
+      assert.strictEqual((failNode!.config as { code: string }).code, "BPMN_NO_OUTGOING_FLOW")
+      assert.include(controlEdgesOf(imported.plan).map((edge) => `${edge[0]}:${edge[1]}`), "gate:default")
+
+      // The synthesized plan compiles: the unmatched default is now routable.
+      const compiled = yield* Compiler.compile(definition, imported.plan)
+      assert.isTrue(Compiler.isCompiled(compiled))
+    }).pipe(Effect.provide(TestLayer)))
+
+  it.effect("honors a pinned single-outcome gateway instead of dissolving it", () =>
+    Effect.gen(function*() {
+      const plan = {
+        formatVersion: 2 as const,
+        id: "single-case",
+        revision: 1,
+        definition: definitionReference,
+        nodes: [
+          {
+            id: "route",
+            type: "workflow/switch",
+            version: "1.0.0",
+            config: { cases: [{ name: "only", condition: Expression.literal(true) }] }
+          },
+          { id: "after", type: "workflow/transform", version: "1.0.0", config: { value: Expression.literal("x") } }
+        ],
+        edges: [
+          { _tag: "ControlEdge" as const, id: "e", sourceNodeId: "route", outcome: "only", targetNodeId: "after" }
+        ]
+      }
+      const xml = yield* Bpmn.fromPlan(plan as unknown as Plan.Plan)
+      const reimported = yield* Bpmn.toPlan(xml, { definition: definitionReference, planId: "single-case" })
+      // The switch survived the round trip; it did not silently dissolve.
+      assert.isDefined(reimported.plan.nodes.find((node) => node.id === "route" && node.type === "workflow/switch"))
+    }).pipe(Effect.provide(TestLayer)))
+
   it("parses and renders calendar-free ISO-8601 durations", () => {
     assert.strictEqual(Bpmn.parseDurationMillis("PT5M"), 300_000)
     assert.strictEqual(Bpmn.parseDurationMillis("P1DT2H3M4.5S"), ((26 * 60 + 3) * 60 + 4.5) * 1000)

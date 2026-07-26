@@ -412,6 +412,7 @@ export const toPlan = Effect.fnUntraced(function*(
   const resolutions = new Map<string, Resolution>()
   const flows: Array<Flow> = []
   const gatewayFlowOutcomes = new Map<string, string>()
+  const gatewaysWithoutDefault: Array<string> = []
   const outcomesByNode = new Map<string, ReadonlyArray<string>>()
   const flowsBySource = new Map<string, Array<Flow>>()
   const flowsByTarget = new Map<string, Array<Flow>>()
@@ -653,12 +654,20 @@ export const toPlan = Effect.fnUntraced(function*(
 
       case "exclusiveGateway": {
         const outgoing = flowsBySource.get(id) ?? []
-        if (outgoing.length <= 1) {
+        // A pinned gateway is always honored as a node; only an unpinned
+        // pass-through (0 or 1 outgoing flow, no explicit routing) dissolves.
+        if (pin === undefined && outgoing.length <= 1) {
           resolutions.set(id, { _tag: "Dissolved", id })
           break
         }
         pinned(() => {
           const defaultFlow = element.attributes.default
+          // BPMN mandates a runtime error when no outgoing flow is enabled and
+          // no default is declared. Our switch would instead complete on an
+          // unwired `default`; synthesize a fail so the semantics match.
+          if (defaultFlow === undefined) {
+            gatewaysWithoutDefault.push(id)
+          }
           const cases: Array<{ name: string; condition: Schema.Json }> = []
           for (const flow of outgoing) {
             const name = flow.outcome ?? flow.name ?? flow.id
@@ -888,6 +897,36 @@ export const toPlan = Effect.fnUntraced(function*(
         height: Number(box.attributes.height ?? 0)
       })
     }
+  }
+
+  // Synthesize a `default`-outcome fail for every exclusive gateway lacking a
+  // default flow, so an unmatched gateway fails the run as BPMN requires
+  // rather than completing silently on an unwired outcome. Skipped when the
+  // plan already wired the `default` outcome itself.
+  for (const gatewayId of gatewaysWithoutDefault) {
+    const alreadyRouted = edges.some((edge) =>
+      typeof edge === "object" && edge !== null && !Array.isArray(edge) &&
+      (edge as { _tag?: unknown })._tag === "ControlEdge" &&
+      (edge as { sourceNodeId?: unknown }).sourceNodeId === gatewayId &&
+      (edge as { outcome?: unknown }).outcome === "default"
+    )
+    if (alreadyRouted) {
+      continue
+    }
+    const failId = `${gatewayId}__nodefault`
+    nodes.push({
+      id: failId,
+      type: "workflow/fail",
+      version: "1.0.0",
+      config: { code: "BPMN_NO_OUTGOING_FLOW" }
+    })
+    edges.push({
+      _tag: "ControlEdge",
+      id: `${gatewayId}__nodefault_flow`,
+      sourceNodeId: gatewayId,
+      outcome: "default",
+      targetNodeId: failId
+    })
   }
 
   if (diagnostics.length > 0) {

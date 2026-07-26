@@ -192,10 +192,11 @@ export interface Definition<
  * allowing a durable backend to replay a pinned plan without depending on UI
  * layout or iteration order. The default idempotency key is independent of
  * attempt identity; durable execution additionally scopes it by tenant so two
- * tenants may safely reuse a run identifier. `attempt` identifies the
- * invocation separately. Version `1` currently supplies only attempt `1`, while
- * preserving the identity boundary needed by a future command version with
- * retry semantics.
+ * tenants may safely reuse a run identifier. `attempt` is the one-based
+ * managed-retry attempt number for the current invocation: it is `1` on the
+ * first try and increments on each policy-driven retry, so a handler can key
+ * external idempotency by `idempotencyKey` while observing which attempt it
+ * is running.
  *
  * @category models
  * @since 4.0.0

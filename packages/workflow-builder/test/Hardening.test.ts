@@ -107,6 +107,48 @@ describe("Hardening", () => {
       }).pipe(Effect.provide(Layer.succeed(Crypto.Crypto)(testCrypto))))
   })
 
+  describe("fan-out bounds reject denial-of-service plans at admission", () => {
+    const registry = Registry.make(Builtins.While, Builtins.ForEach, Builtins.Delay)
+    const definition = Workflow.make("test/bounds", {
+      version: "1.0.0",
+      nodes: registry,
+      linkPolicy: LinkPolicy.allowAll,
+      limits: new Workflow.Limits({ maxNodes: 8, maxEdges: 8, maxFanIn: 4, maxFanOut: 4, maxDepth: 4 })
+    })
+    const boundsPlan = (nodeConfig: object, type: string) => ({
+      formatVersion: 2,
+      id: "bounds",
+      revision: 1,
+      definition: { id: "test/bounds", version: "1.0.0" },
+      nodes: [{ id: "n", type, version: "1.0.0", config: nodeConfig }],
+      edges: []
+    })
+    const rejects = (type: string, config: object) =>
+      Effect.gen(function*() {
+        const error = yield* Compiler.compile(definition, boundsPlan(config, type)).pipe(Effect.flip)
+        assert.strictEqual(error._tag, "CompilationError")
+        assert.include(error.diagnostics.map((diagnostic) => diagnostic.code), Compiler.Codes.InvalidNodeConfig)
+      }).pipe(Effect.provide(Layer.succeed(Crypto.Crypto)(testCrypto)))
+
+    it.effect("rejects an unbounded while iteration count", () =>
+      rejects("workflow/while", {
+        condition: { _tag: "Literal", value: true },
+        plan: { planId: "body" },
+        maxIterations: Builtins.MaxIterations + 1
+      }))
+
+    it.effect("rejects an oversized forEach concurrency", () =>
+      rejects("workflow/forEach", {
+        items: { _tag: "Literal", value: [] },
+        plan: { planId: "body" },
+        mode: "parallel",
+        concurrency: Builtins.MaxConcurrency + 1
+      }))
+
+    it.effect("rejects a wait horizon beyond the hard ceiling", () =>
+      rejects("workflow/delay", { durationMillis: Builtins.MaxWaitMillis + 1 }))
+  })
+
   describe("run journal timeline is causally ordered", () => {
     const probe = Node.make("Probe", {
       version: "1.0.0",
