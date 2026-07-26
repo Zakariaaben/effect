@@ -22,6 +22,21 @@ import type * as Workflow from "./Workflow.ts"
 const compiledPlans = new WeakSet<object>()
 
 /**
+ * Maximum JSON nesting depth a plan document may reach at admission.
+ *
+ * **Details**
+ *
+ * Bounds the recursive schema decode and the depth of any single embedded
+ * expression before {@link Expression.validate}'s own bound applies. Well
+ * above any hand-authored or canvas-generated plan; far below a stack
+ * overflow.
+ *
+ * @category constants
+ * @since 4.0.0
+ */
+export const AdmissionMaxDepth = 256
+
+/**
  * Stable built-in diagnostic codes emitted by the compiler.
  *
  * @category constants
@@ -564,7 +579,17 @@ export const compile = Effect.fnUntraced(function*<W extends Workflow.Any>(
   Diagnostic.CompilationError | Workflow.PolicyError<W>,
   Requirements<W>
 > {
-  const snapped = Json.snapshot(input)
+  // Bound admission BEFORE the recursive schema decode: the plan schema
+  // recurses through suspended expression nodes, so an unbounded-depth JSON
+  // document would overflow the stack as a defect rather than a diagnostic.
+  // The snapshot's structural caps are the real admission gate; derive them
+  // from the definition's own limits so a plan cannot exceed what the
+  // application declared it will accept.
+  const snapped = Json.snapshot(input, {
+    maxDepth: AdmissionMaxDepth,
+    maxContainers: Math.max(1024, (definition.limits.maxNodes + definition.limits.maxEdges) * 64),
+    maxEntries: Math.max(16384, (definition.limits.maxNodes + definition.limits.maxEdges) * 512)
+  })
   if (Result.isFailure(snapped)) {
     return yield* fail([
       Diagnostic.error(Codes.InvalidPlanSchema, snapped.failure.message, snapped.failure.path)

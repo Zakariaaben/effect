@@ -334,6 +334,7 @@ interface RunContext {
   readonly humanTasks: HumanTasks.HumanTasks["Service"]
   readonly planStore: PlanStore.PlanStore["Service"]
   readonly journal: RunJournal.Service
+  readonly sequence: { next: () => number }
   readonly input: Schema.JsonObject
   readonly settlements: Map<string, Settlement>
   readonly latches: Map<string, Deferred.Deferred<Settlement>>
@@ -392,9 +393,22 @@ const decodeConfig = (
     )
   )
 
-/** Journal emission: observational, idempotent, and never load-bearing. */
-const emit = (context: RunContext, entry: RunJournal.EntryInput): Effect.Effect<void> =>
-  context.journal.record(entry).pipe(Effect.catchCause(() => Effect.void))
+/**
+ * Journal emission: observational, idempotent, and never load-bearing.
+ *
+ * The causal `sequence` is stamped here from the run's monotonic counter, so
+ * `RunStarted` precedes every node event and the terminal event follows them
+ * all, while events within one node fiber keep their emission order. Records
+ * are idempotent by entry key, so a replayed emission cannot change the
+ * committed sequence.
+ */
+const emit = (
+  context: RunContext,
+  entry: RunJournal.EmitInput
+): Effect.Effect<void> =>
+  context.journal.record(RunJournal.withSequence(entry, context.sequence.next())).pipe(
+    Effect.catchCause(() => Effect.void)
+  )
 
 const settle = (
   context: RunContext,
@@ -1515,11 +1529,17 @@ const interpret = (
       humanTasks,
       planStore,
       journal,
+      sequence: (() => {
+        let value = 0
+        return { next: () => value++ }
+      })(),
       input,
       settlements: new Map(),
       latches: new Map(),
       values: new Map(),
-      nodesScope: {},
+      // A null-prototype scope so a node id like `__proto__` becomes an own
+      // key rather than mutating the scope object's prototype.
+      nodesScope: Object.create(null),
       compensations: []
     }
     for (const name of Object.keys(input)) {
@@ -1589,7 +1609,13 @@ export const layer = <W extends Workflow.Any>(
     Effect.gen(function*() {
       const journal = yield* RunJournal.RunJournal
       const instance = yield* WorkflowEngine.WorkflowInstance
-      const record = (entry: RunJournal.EntryInput) => journal.record(entry).pipe(Effect.catchCause(() => Effect.void))
+      // The terminal event is emitted from the layer wrapper, outside the
+      // run's own sequence counter; a sentinel sequence keeps it last in the
+      // timeline regardless of how many node events preceded it.
+      const record = (entry: RunJournal.EmitInput) =>
+        journal.record(RunJournal.withSequence(entry, Number.MAX_SAFE_INTEGER)).pipe(
+          Effect.catchCause(() => Effect.void)
+        )
       return yield* interpret(definition, options, payload, executionId).pipe(
         Effect.onExit((exit) => {
           if (exit._tag === "Success") {

@@ -30,6 +30,7 @@ const strictParseOptions = { onExcessProperty: "error" } as const
 const common = {
   runId: Schema.NonEmptyString,
   planId: Schema.NonEmptyString,
+  sequence: Schema.Int,
   timeMillis: Schema.Number
 }
 
@@ -86,7 +87,13 @@ export const Entry = Schema.Union([
 export type Entry = Schema.Schema.Type<typeof Entry>
 
 /**
- * An entry as emitted by the engine, before the journal stamps its time.
+ * An entry as emitted by the engine, before the journal stamps its ordering.
+ *
+ * **Details**
+ *
+ * The engine supplies the causal `sequence` (a per-run counter incremented in
+ * interpretation order); the journal stamps `timeMillis`. Because emission is
+ * idempotent under replay, the first recording of an entry key fixes both.
  *
  * @category models
  * @since 4.0.0
@@ -94,6 +101,24 @@ export type Entry = Schema.Schema.Type<typeof Entry>
 export type EntryInput = Entry extends infer E ? E extends { readonly timeMillis: number } ? Omit<E, "timeMillis">
   : never
   : never
+
+/**
+ * An entry as the engine builds it, before it stamps the causal sequence.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export type EmitInput = Entry extends infer E
+  ? E extends { readonly sequence: number } ? Omit<E, "sequence" | "timeMillis"> : never
+  : never
+
+/**
+ * Adds the causal sequence to an emit input, producing a record input.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export const withSequence = (entry: EmitInput, sequence: number): EntryInput => ({ ...entry, sequence }) as EntryInput
 
 /**
  * The stable identity that makes journal recording idempotent under replay.
@@ -168,11 +193,11 @@ export const timeline = (runId: string): Effect.Effect<ReadonlyArray<Entry>> =>
 
 const stamped = (entry: EntryInput, timeMillis: number): Entry => ({ ...entry, timeMillis } as Entry)
 
+// Causal order: the engine's per-run sequence is authoritative; wall-clock
+// time is a display attribute only, never a sort key (many entries share a
+// millisecond).
 const ordered = (entries: Iterable<Entry>): ReadonlyArray<Entry> =>
-  Array.from(entries).sort((left, right) =>
-    left.timeMillis - right.timeMillis ||
-    (left._tag < right._tag ? -1 : left._tag > right._tag ? 1 : 0)
-  )
+  Array.from(entries).sort((left, right) => left.sequence - right.sequence)
 
 /**
  * In-memory journal for tests and single-process deployments.
@@ -223,6 +248,7 @@ export const layerSql = (options?: {
             CREATE TABLE ${tableSql} (
               run_id NVARCHAR(255) NOT NULL,
               entry_key NVARCHAR(450) NOT NULL,
+              sequence_no INT NOT NULL,
               time_millis BIGINT NOT NULL,
               entry NVARCHAR(MAX) NOT NULL,
               PRIMARY KEY (run_id, entry_key)
@@ -231,6 +257,7 @@ export const layerSql = (options?: {
           sql`CREATE TABLE IF NOT EXISTS ${tableSql} (
             run_id VARCHAR(255) NOT NULL,
             entry_key VARCHAR(450) NOT NULL,
+            sequence_no INTEGER NOT NULL,
             time_millis BIGINT NOT NULL,
             entry TEXT NOT NULL,
             PRIMARY KEY (run_id, entry_key)
@@ -245,8 +272,10 @@ export const layerSql = (options?: {
             Effect.gen(function*() {
               const entry = stamped(input, clock.currentTimeMillisUnsafe())
               const encoded = yield* encode(entry).pipe(Effect.orDie)
-              yield* sql`INSERT INTO ${tableSql} (run_id, entry_key, time_millis, entry)
-                VALUES (${input.runId}, ${entryKey(input)}, ${entry.timeMillis}, ${JSON.stringify(encoded)})`.pipe(
+              yield* sql`INSERT INTO ${tableSql} (run_id, entry_key, sequence_no, time_millis, entry)
+                VALUES (${input.runId}, ${entryKey(input)}, ${input.sequence}, ${entry.timeMillis}, ${
+                JSON.stringify(encoded)
+              })`.pipe(
                 // Replay re-emits the same identity; the first write wins.
                 Effect.catchCause(() => Effect.void)
               )
@@ -255,7 +284,7 @@ export const layerSql = (options?: {
         timeline: (runId) =>
           sql<{ readonly entry: string }>`SELECT entry FROM ${tableSql}
             WHERE run_id = ${runId}
-            ORDER BY time_millis, entry_key`.pipe(
+            ORDER BY sequence_no`.pipe(
             Effect.orDie,
             Effect.flatMap(
               Effect.forEach((row) => Schema.decodeUnknownEffect(Entry)(JSON.parse(row.entry)).pipe(Effect.orDie))

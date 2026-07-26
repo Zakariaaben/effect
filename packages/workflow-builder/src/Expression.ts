@@ -489,26 +489,52 @@ const read = (scope: Scope, path: Path): Read => {
   return { _tag: "Found", value: current }
 }
 
-const deepEquals = (left: Schema.Json, right: Schema.Json): boolean => {
-  if (Object.is(left, right)) {
-    return true
-  }
-  if (Array.isArray(left)) {
-    return Array.isArray(right) && left.length === right.length &&
-      left.every((item, index) => deepEquals(item, right[index]!))
-  }
-  if (left !== null && typeof left === "object") {
-    if (right === null || typeof right !== "object" || Array.isArray(right)) {
-      return false
+/**
+ * Iterative deep JSON equality with an explicit worklist.
+ *
+ * **Details**
+ *
+ * Run inputs and node outputs are attacker-influenced data of unbounded
+ * nesting; a recursive comparison would overflow the stack on deeply nested
+ * values. The worklist keeps comparison bounded by heap, not call depth.
+ */
+const deepEquals = (rootLeft: Schema.Json, rootRight: Schema.Json): boolean => {
+  const stack: Array<readonly [Schema.Json, Schema.Json]> = [[rootLeft, rootRight]]
+  while (stack.length > 0) {
+    const [left, right] = stack.pop()!
+    if (Object.is(left, right)) {
+      continue
     }
-    const leftObject = left as Schema.JsonObject
-    const rightObject = right as Schema.JsonObject
-    const leftKeys = Object.keys(leftObject)
-    const rightKeys = Object.keys(rightObject)
-    return leftKeys.length === rightKeys.length &&
-      leftKeys.every((key) => hasOwn.call(rightObject, key) && deepEquals(leftObject[key]!, rightObject[key]!))
+    if (Array.isArray(left)) {
+      if (!Array.isArray(right) || left.length !== right.length) {
+        return false
+      }
+      for (let index = 0; index < left.length; index++) {
+        stack.push([left[index]!, right[index]!])
+      }
+      continue
+    }
+    if (left !== null && typeof left === "object") {
+      if (right === null || typeof right !== "object" || Array.isArray(right)) {
+        return false
+      }
+      const leftObject = left as Schema.JsonObject
+      const rightObject = right as Schema.JsonObject
+      const leftKeys = Object.keys(leftObject)
+      if (leftKeys.length !== Object.keys(rightObject).length) {
+        return false
+      }
+      for (const key of leftKeys) {
+        if (!hasOwn.call(rightObject, key)) {
+          return false
+        }
+        stack.push([leftObject[key]!, rightObject[key]!])
+      }
+      continue
+    }
+    return false
   }
-  return false
+  return true
 }
 
 type Evaluation = Result.Result<Schema.Json, EvaluationError>
@@ -583,15 +609,23 @@ const evaluateAt = (
       return Result.succeed(parts.join(""))
     }
     case "Record": {
-      const output: { [key: string]: Schema.Json } = {}
+      // A null-prototype accumulator so a field literally named `__proto__`
+      // becomes an own data property rather than mutating the object's
+      // prototype (which would silently drop the field).
+      const output: { [key: string]: Schema.Json } = Object.create(null)
       for (const key of Object.keys(expression.fields).sort()) {
         const value = evaluateAt(expression.fields[key]!, scope, [...expressionPath, "fields", key])
         if (Result.isFailure(value)) {
           return value
         }
-        output[key] = value.success
+        Object.defineProperty(output, key, {
+          value: value.success,
+          enumerable: true,
+          configurable: true,
+          writable: true
+        })
       }
-      return Result.succeed(output)
+      return Result.succeed({ ...output })
     }
     case "List": {
       const output: Array<Schema.Json> = []
