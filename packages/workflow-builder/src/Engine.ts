@@ -473,7 +473,21 @@ const awaitEligibility = (
           }),
           { startImmediately: true }
         ))
-      return yield* Deferred.await(fire)
+      const decision = yield* Deferred.await(fire)
+      // An any-join fires on the first live control edge, but the value it
+      // reads (via data edges, bindings, or config expressions) may come from
+      // a node that has not settled yet. Await every value dependency before
+      // resolving, so the value read — or the dead-path skip — is determined
+      // by committed settlements rather than fiber scheduling, keeping the
+      // decision stable across replay. Value sources that are common
+      // ancestors of the racing branches are already settled, so this adds no
+      // latency in the usual discriminator shape.
+      if (decision === "live") {
+        for (const dependency of node.valueDependencies) {
+          yield* Deferred.await(context.latches.get(dependency)!)
+        }
+      }
+      return decision
     })
     : Effect.gen(function*() {
       for (const dependency of node.dependencies) {

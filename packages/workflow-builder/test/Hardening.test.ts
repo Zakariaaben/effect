@@ -32,6 +32,23 @@ const testCrypto = Crypto.make({
     })
 })
 
+const awaitStatus = (
+  runId: string,
+  done: (status: Runs.RunStatus) => boolean,
+  adjust?: string
+) =>
+  Effect.gen(function*() {
+    let status = yield* Runs.status(runId)
+    for (let index = 0; index < 400 && !done(status); index++) {
+      if (adjust !== undefined) {
+        yield* TestClock.adjust(adjust)
+      }
+      yield* Effect.sleep("5 millis").pipe(TestClock.withLive)
+      status = yield* Runs.status(runId)
+    }
+    return status
+  })
+
 describe("Hardening", () => {
   describe("expression evaluation is stack-safe on deep data", () => {
     it("compares deeply nested values without overflowing", () => {
@@ -147,6 +164,82 @@ describe("Hardening", () => {
 
     it.effect("rejects a wait horizon beyond the hard ceiling", () =>
       rejects("workflow/delay", { durationMillis: Builtins.MaxWaitMillis + 1 }))
+  })
+
+  describe("any-join reads data deterministically across a branch race", () => {
+    // A slow branch (durable delay) feeds a value; a fast branch fires the
+    // any-join's control. The join must read the slow branch's committed
+    // value, not skip because the fast control won the race first.
+    const slow = Node.make("Slow", {
+      version: "1.0.0",
+      outputs: { value: Port.output(Schema.String, { contract: "*" }) }
+    })
+    const registry = Registry.make(slow, Builtins.Delay, Builtins.Transform)
+    const definition = Workflow.make("test/any-race", {
+      version: "1.0.0",
+      nodes: registry,
+      linkPolicy: LinkPolicy.allowAll,
+      limits: new Workflow.Limits({ maxNodes: 12, maxEdges: 16, maxFanIn: 4, maxFanOut: 8, maxDepth: 8 })
+    })
+    const handlers = registry.toLayer(registry.of({
+      "Slow@1.0.0": () => Effect.succeed({ value: "slow-value" })
+    }))
+    const layer = Engine.layer(definition).pipe(
+      Layer.provideMerge(Layer.mergeAll(handlers, PlanStore.layerMemory, HumanTasks.layerMemory)),
+      Layer.provideMerge(WorkflowEngine.layerMemory),
+      Layer.provideMerge(Layer.succeed(Crypto.Crypto)(testCrypto))
+    )
+
+    it.effect("waits for the data source rather than skipping or racing", () =>
+      Effect.gen(function*() {
+        const compiled = yield* Compiler.compile(definition, {
+          formatVersion: 2,
+          id: "any-race",
+          revision: 1,
+          definition: { id: "test/any-race", version: "1.0.0" },
+          outputs: [{ name: "joined", contract: "*" }],
+          nodes: [
+            // The "slow" branch produces a value, gated behind a delay.
+            { id: "gate", type: "workflow/delay", version: "1.0.0", config: { durationMillis: 20 } },
+            { id: "producer", type: "Slow", version: "1.0.0", config: {} },
+            // The "fast" branch fires control immediately.
+            { id: "fast", type: "workflow/transform", version: "1.0.0", config: { value: Expression.literal("go") } },
+            // An any-join whose required input is fed from the slow branch.
+            {
+              id: "join",
+              type: "workflow/transform",
+              version: "1.0.0",
+              join: "any",
+              config: { value: Expression.ref("nodes", "producer", "value") }
+            }
+          ],
+          edges: [
+            { _tag: "ControlEdge", id: "g-p", sourceNodeId: "gate", targetNodeId: "producer" },
+            { _tag: "ControlEdge", id: "p-j", sourceNodeId: "producer", targetNodeId: "join" },
+            { _tag: "ControlEdge", id: "f-j", sourceNodeId: "fast", targetNodeId: "join" },
+            {
+              _tag: "DataEdge",
+              id: "out",
+              source: { _tag: "NodeOutput", nodeId: "join", output: "value" },
+              target: { _tag: "WorkflowOutput", output: "joined" }
+            }
+          ]
+        })
+        const store = yield* PlanStore.PlanStore
+        yield* store.save(compiled)
+
+        const handle = yield* Runs.start("any-race", { input: {} })
+        const status = yield* awaitStatus(
+          handle.runId,
+          (s) => s._tag !== "Running" && s._tag !== "Suspended",
+          "50 millis"
+        )
+        assert.strictEqual(status._tag, "Succeeded")
+        assert.deepStrictEqual(
+          (status as Extract<Runs.RunStatus, { _tag: "Succeeded" }>).value.outputs,
+          { joined: "slow-value" }
+        )
+      }).pipe(Effect.provide(layer)))
   })
 
   describe("run journal timeline is causally ordered", () => {

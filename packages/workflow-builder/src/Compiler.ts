@@ -135,6 +135,7 @@ export interface CompiledNode {
   readonly incomingControl: ReadonlyArray<CompiledControlEdge>
   readonly outgoingControl: ReadonlyArray<CompiledControlEdge>
   readonly dependencies: ReadonlyArray<string>
+  readonly valueDependencies: ReadonlyArray<string>
   readonly dependents: ReadonlyArray<string>
 }
 
@@ -238,6 +239,7 @@ interface MutableCompiledNode {
   readonly incomingControl: Array<CompiledControlEdge>
   readonly outgoingControl: Array<CompiledControlEdge>
   readonly dependencies: Set<string>
+  readonly valueDependencies: Set<string>
   readonly dependents: Set<string>
 }
 
@@ -774,6 +776,7 @@ export const compile = Effect.fnUntraced(function*<W extends Workflow.Any>(
       incomingControl: [],
       outgoingControl: [],
       dependencies: new Set(),
+      valueDependencies: new Set(),
       dependents: new Set()
     })
   }
@@ -943,6 +946,7 @@ export const compile = Effect.fnUntraced(function*<W extends Workflow.Any>(
       }
       if (owner !== undefined) {
         owner.dependencies.add(referencedId)
+        owner.valueDependencies.add(referencedId)
         referenced.dependents.add(owner.node.id)
       }
     }
@@ -1286,6 +1290,7 @@ export const compile = Effect.fnUntraced(function*<W extends Workflow.Any>(
       const targetNode = mutableNodes.get(target.descriptor.nodeId)!
       sourceNode.dependents.add(targetNode.node.id)
       targetNode.dependencies.add(sourceNode.node.id)
+      targetNode.valueDependencies.add(sourceNode.node.id)
     }
   }
 
@@ -1456,6 +1461,9 @@ export const compile = Effect.fnUntraced(function*<W extends Workflow.Any>(
         outgoingControl: Object.freeze(node.outgoingControl),
         dependencies: Object.freeze(
           Array.from(node.dependencies).sort(compareCodeUnits)
+        ),
+        valueDependencies: Object.freeze(
+          Array.from(node.valueDependencies).sort(compareCodeUnits)
         ),
         dependents: Object.freeze(
           Array.from(node.dependents).sort(compareCodeUnits)
